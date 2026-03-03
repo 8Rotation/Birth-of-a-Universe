@@ -1,0 +1,20 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Python (extraction tools, no longer needed)
+.venv/
+__pycache__/
+*.pyc
+
+# Source materials (copyrighted)
+sources/
+sources_extracted/
+
+# Editor / OS
+.vscode/
+*.swp
+Thumbs.db
+.DS_Store
