@@ -19,8 +19,8 @@ export interface SensorParams {
   lMax: number;
 
   // Flow
-  shellRate: number;     // shells per second
-  shellSize: number;     // particles per shell
+  particleRate: number;  // particles per second (continuous Poisson stream)
+  fieldEvolution: number; // O-U mean-reversion rate (1/s): 0 = frozen, higher = faster drift
   timeDilation: number;  // stretches arrival time spread
 
   // Display
@@ -59,8 +59,8 @@ export function createSensorControls(onReset: () => void) {
     beta: 0.10,
     perturbAmplitude: 0.12,
     lMax: 8,
-    shellRate: 5.0,
-    shellSize: 2500,
+    particleRate: 2000,
+    fieldEvolution: 0.1,
     timeDilation: 120,
     hitSize: 3.0,
     brightness: 1.0,   // lowered: brightness now only modulates HSL lightness, not alpha too
@@ -83,8 +83,8 @@ export function createSensorControls(onReset: () => void) {
 
   // ── Flow ──────────────────────────────────────────────────────────
   const flow = gui.addFolder("Flow");
-  flow.add(params, "shellRate", 0.1, 20, 0.1).name("Shell rate (/s)");
-  flow.add(params, "shellSize", 50, 10000, 50).name("Particles/shell");
+  flow.add(params, "particleRate", 100, 20000, 100).name("Particle rate (/s)");
+  flow.add(params, "fieldEvolution", 0, 2, 0.01).name("Field evolution (/s)");
   flow.add(params, "timeDilation", 1, 10000).name("Time dilation");
   flow.add(params, "paused").name("Paused");
   flow.add(params, "reset").name("⟳ Clear");

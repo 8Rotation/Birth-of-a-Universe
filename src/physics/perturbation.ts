@@ -12,6 +12,18 @@
  * while we apply the separate-universe approximation to introduce
  * perturbations.
  *
+ * The separate-universe approach is supported by the algebraic nature
+ * of torsion in ECSK theory (Hehl et al. 1976 eq. 3.22; Brechet et al.
+ * 2007 eq. 21): torsion does not propagate, so each fluid element's
+ * bounce depends only on its local β_eff. Elizalde et al. 2023 confirm
+ * that GW propagate on torsionless geodesics at c, further validating
+ * that torsion effects are strictly local.
+ *
+ * Perturbation spectrum for δ on the primordial bounce S²:
+ *   Sadatian & Hosseini 2025 derive a Bessel-type mode equation
+ *   with spectral index n_s ≈ 0.965 from ξ ≈ 0.4 (their eq. 37),
+ *   consistent with the Planck 2018 value used here.
+ *
  * Spectral index: n_s = 0.965 (Planck 2018)
  * Silk damping: exp(−(l/l_silk)²) with l_silk = 0.6 × l_max
  */
@@ -100,7 +112,8 @@ function ylmReal(
 export interface PerturbMode {
   l: number;
   m: number;
-  c: number; // coefficient
+  c: number;     // current coefficient
+  sigma: number; // O-U diffusion scale = amplitude × √C_l (per-mode target std dev)
 }
 
 /**
@@ -127,11 +140,65 @@ export function generatePerturbCoeffs(
     const modeAmp = amplitude * Math.sqrt(Cl);
 
     for (let m = -l; m <= l; m++) {
-      coeffs.push({ l, m, c: (rng() * 2 - 1) * modeAmp });
+      coeffs.push({ l, m, c: (rng() * 2 - 1) * modeAmp, sigma: modeAmp });
     }
   }
 
   return coeffs;
+}
+
+/**
+ * Ornstein-Uhlenbeck evolution of perturbation coefficients.
+ *
+ * Each coefficient performs a mean-reverting random walk:
+ *
+ *   dc = −θ · c · dt + σ_OU · √dt · ξ
+ *
+ * where σ_OU = mode.sigma · √(2θ) ensures the stationary variance
+ * equals mode.sigma² (matching the original generatePerturbCoeffs scale).
+ *
+ * @param coeffs  Coefficient array (mutated in place).
+ * @param dt      Frame duration in seconds.
+ * @param theta   Mean-reversion rate (1/s).  θ = 0.1 → ~10 s correlation
+ *                time; θ = 1.0 → ~1 s; θ = 0 → frozen.
+ * @param rng     Uniform [0,1) PRNG (Box-Muller pairs consumed internally).
+ */
+export function evolveCoeffs(
+  coeffs: PerturbMode[],
+  dt: number,
+  theta: number,
+  rng: () => number,
+): void {
+  if (theta <= 0) return;
+  const sqrtDt = Math.sqrt(dt);
+  const sigmaScale = Math.sqrt(2 * theta);
+  for (const mode of coeffs) {
+    // Box-Muller: two uniforms → one Gaussian
+    const u1 = Math.max(1e-10, rng());
+    const u2 = rng();
+    const gauss = Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+    mode.c += -theta * mode.c * dt + mode.sigma * sigmaScale * sqrtDt * gauss;
+  }
+}
+
+/**
+ * Rescale the sigma targets of an existing coefficient array.
+ *
+ * Called when perturbAmplitude changes at runtime so the O-U stationary
+ * distribution tracks the new amplitude without regenerating coefficients.
+ */
+export function rescaleCoeffSigmas(
+  coeffs: PerturbMode[],
+  lMax: number,
+  amplitude: number,
+): void {
+  const ns = 0.965;
+  const lSilk = Math.max(2, lMax * 0.6);
+  for (const mode of coeffs) {
+    const Cl =
+      Math.pow(mode.l, ns - 1) * Math.exp(-(mode.l * mode.l) / (lSilk * lSilk));
+    mode.sigma = amplitude * Math.sqrt(Cl);
+  }
 }
 
 /**

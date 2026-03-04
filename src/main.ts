@@ -10,13 +10,17 @@
  *   - Perturbation: δ(θ,φ) in spherical harmonics → β_eff = β(1+δ)
  *   - Color: w_eff(β_eff) — effective equation of state
  *
- * References:
- *   Poplawski 2010b, 2014, 2020, 2020b
- *   Hehl & Datta 1971; Hehl et al. 1976
+ * References (verified against all 29 source papers, 2025-03-04):
+ *   Core: Poplawski 2010b, 2012, 2014, 2020, 2020b, 2021, 2025
+ *   Spin-torsion: Hehl & Datta 1971; Hehl et al. 1976
+ *   Bounce analysis: Unger & Poplawski 2019; Cubero & Poplawski 2019
+ *   See EQUATION_CATALOG.md for full 29-paper bibliography
  */
 
 import { ECSKPhysics } from "./physics/ecsk-physics.js";
-import { InfallingShell } from "./physics/shell.js";
+import { PhysicsBridge } from "./physics/physics-bridge.js";
+import { MinHeap } from "./physics/min-heap.js";
+import type { PendingParticle } from "./physics/shell.js";
 import { SensorRenderer, type Hit } from "./rendering/renderer.js";
 import { createSensorControls } from "./ui/controls.js";
 
@@ -58,11 +62,7 @@ async function main() {
   let physics = new ECSKPhysics(0.10);
 
   // ── 3. State ──────────────────────────────────────────────────────
-  let shells: InfallingShell[] = [];
-  let hits: Hit[] = [];
-  let simTime = 0;
-  let lastSpawnTime = 0;
-  let shellCounter = 0;
+  let hits: Hit[] = [];  const pendingHeap = new MinHeap<PendingParticle>(p => p.arrivalTime);  let simTime = 0;
   let arrivalCounter = 0;
   let arrivalRateSmooth = 0;
   let lastBeta = physics.beta;
@@ -70,57 +70,48 @@ async function main() {
   // ── 4. Controls ───────────────────────────────────────────────────
   const { params, hud, updateHUD } = createSensorControls(() => {
     // Reset
-    shells = [];
+    pendingHeap.clear();
     hits = [];
     simTime = 0;
-    lastSpawnTime = 0;
-    shellCounter = 0;
     arrivalCounter = 0;
     arrivalRateSmooth = 0;
+    bridge.reset({
+      beta: physics.beta,
+      perturbAmplitude: params.perturbAmplitude,
+      lMax: params.lMax,
+      timeDilation: params.timeDilation,
+      seed: Date.now(),
+      fieldEvolution: params.fieldEvolution,
+    });
   });
 
-  // ── 5. Shell spawning ─────────────────────────────────────────────
-  function spawnShell() {
-    shellCounter++;
-    shells.push(
-      new InfallingShell(
-        params.shellSize,
-        physics,
-        params.perturbAmplitude,
-        params.lMax,
-        params.timeDilation,
-        shellCounter * 7919 + 13, // coprime seed
-        simTime,
-      ),
-    );
-  }
+  // ── 5. Physics worker (off-thread emission) ────────────────────
+  const bridge = new PhysicsBridge({
+    beta: physics.beta,
+    perturbAmplitude: params.perturbAmplitude,
+    lMax: params.lMax,
+    timeDilation: params.timeDilation,
+    seed: 42,
+    fieldEvolution: params.fieldEvolution,
+  });
 
-  // ── 6. Arrival processing ─────────────────────────────────────────
-  function processArrivals(now: number): Hit[] {
-    const newHits: Hit[] = [];
-    for (let b = shells.length - 1; b >= 0; b--) {
-      const shell = shells[b];
-      while (
-        shell.cursor < shell.size &&
-        simTime >= shell.arrivalTime[shell.cursor]
-      ) {
-        const i = shell.cursor;
-        newHits.push({
-          x: shell.lx[i],
-          y: shell.ly[i],
-          hue: shell.hue[i],
-          brightness: shell.brightness[i],
-          size: shell.hitSize[i],
-          tailAngle: shell.tailAngle[i],
-          born: now,
-        });
-        shell.cursor++;
-      }
-      // Remove fully consumed shells
-      if (shell.cursor >= shell.size) shells.splice(b, 1);
+  // ── 6. Arrival processing (heap-backed, O(log N) per extract) ──
+  function processArrivals(now: number): void {
+    let count = 0;
+    while (pendingHeap.length > 0 && pendingHeap.peek()!.arrivalTime <= now) {
+      const p = pendingHeap.pop()!;
+      hits.push({
+        x: p.lx,
+        y: p.ly,
+        hue: p.hue,
+        brightness: p.brightness,
+        size: p.hitSize,
+        tailAngle: p.tailAngle,
+        born: now,
+      });
+      count++;
     }
-    arrivalCounter += newHits.length;
-    return newHits;
+    arrivalCounter += count;
   }
 
   // ── 7. Animation loop ─────────────────────────────────────────────
@@ -146,42 +137,52 @@ async function main() {
     if (Math.abs(params.beta - lastBeta) > 0.0001) {
       physics = new ECSKPhysics(params.beta);
       lastBeta = params.beta;
-      // Discard stale shells and hits: their brightness was baked at the
-      // old β and would linger with incorrect energy-density encoding.
-      shells = [];
+      // Notify worker; discard stale pending/hits baked at the old β.
+      bridge.updateBeta(params.beta);
+      pendingHeap.clear();
       hits = [];
     }
 
-    // ── Advance simulation ────────────────────────────────────────
+    // ── Advance simulation (physics runs off-thread) ──────────────
     if (!params.paused) {
       simTime += dt;
 
-      // Spawn shells at configured rate
-      const interval = 1 / Math.max(0.01, params.shellRate);
-      if (now - lastSpawnTime > interval) {
-        spawnShell();
-        lastSpawnTime = now;
+      // Request particles from worker (results arrive next frame)
+      bridge.tick(dt, simTime, params.particleRate, {
+        perturbAmplitude: params.perturbAmplitude,
+        lMax: params.lMax,
+        timeDilation: params.timeDilation,
+        fieldEvolution: params.fieldEvolution,
+      });
+
+      // Insert particles from previous worker tick(s) into heap
+      const fresh = bridge.drain();
+      for (let i = 0; i < fresh.length; i++) {
+        pendingHeap.push(fresh[i]);
+      }
+
+      // Guard against unbounded growth if timeDilation is very large
+      if (pendingHeap.length > MAX_HITS * 2) {
+        pendingHeap.clear();
       }
     }
 
     // ── Process arrivals ──────────────────────────────────────────
-    const newHits = !params.paused ? processArrivals(now) : [];
+    if (!params.paused) processArrivals(now);
 
-    // ── Add to visible hits, fade old ones ────────────────────────
-    for (const h of newHits) hits.push(h);
-
-    // Remove expired hits
+    // ── Fade-expire hits in place (no allocation) ─────────────────
     const cutoff = params.persistence * 2;
     const fadeThreshold = 0.003;
-    const next: Hit[] = [];
-    for (const hit of hits) {
+    let writeIdx = 0;
+    for (let i = 0; i < hits.length; i++) {
+      const hit = hits[i];
       const age = now - hit.born;
       if (age > cutoff) continue;
       const fade = Math.exp((-age / params.persistence) * 3);
       if (fade < fadeThreshold) continue;
-      next.push(hit);
+      hits[writeIdx++] = hit;
     }
-    hits = next;
+    hits.length = writeIdx;
 
     // Enforce budget
     if (hits.length > MAX_HITS) {

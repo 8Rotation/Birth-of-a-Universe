@@ -281,6 +281,7 @@ package.json            — three r183, lil-gui, vite 7.3.1
 
 ### P0 — Physics accuracy & hardware utilization
 - [x] Full physics review against all 27 source texts (re-audit every equation) — completed, all equations verified correct
+- [x] Second full physics review (2025-03-04) against all 29 sources incl. newly added — all equations verified correct; see review notes below
 - [ ] Review individual feature implementations against physical expectations
 - [ ] Unit tests for physics modules (ecsk-physics, perturbation, shell — pure math, very testable)
 - [ ] Performance review and profiling (identify CPU/GPU bottlenecks)
