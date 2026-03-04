@@ -9,9 +9,11 @@ dist/
 __pycache__/
 *.pyc
 
-# Source materials (copyrighted)
+# Source materials (copyrighted) + processing tools
 sources/
 sources_extracted/
+sources_marker/
+source-processing/
 
 # Editor / OS
 .vscode/

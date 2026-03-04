@@ -78,32 +78,58 @@ where the structure directly encodes the physics of the torsion bounce.
 
 ## Source Material
 
-All source PDFs are in `sources/` (gitignored — copyrighted), with extracted
-text in `sources_extracted/` (14 .txt files, committed).
+All source PDFs are in `sources/` (gitignored — copyrighted). All derived
+text and equation files are also gitignored (`sources_extracted/`, `sources_marker/`).
+The committed artifact is **`EQUATION_CATALOG.md`** — a curated equation
+reference compiled from all 27 papers.
+
+### Extraction pipeline
+
+| Step | Tool | Output | Status |
+|------|------|--------|--------|
+| 1. Plain text | `source-processing/extract_pdfs.py` (PyMuPDF) | `sources_extracted/*.txt` | ✅ all 27 done |
+| 2. LaTeX markdown | `source-processing/extract_arxiv.py` (arXiv API) | `sources_marker/*.md` | ✅ 20/27 done |
+| 2b. Fallback | `sources_extracted/*.txt` + manual reconstruction | — | ✅ 7 journal-only recovered |
+
+20 papers have arXiv LaTeX source (perfect equation fidelity). The remaining 7
+are textbooks or journal-only papers extracted from plain text.
 
 ### Key Sources
 
 | File | What it provides |
 |------|------------------|
-| `Poplawski_2010.txt` | Radial geodesics through Einstein-Rosen bridge (eq.5-6). |
-| `Poplawski_2010_b.txt` | Friedmann equations with torsion (eq.10-11), ε̃ = ε − αn² (eq.1). |
-| `Poplawski_2014.txt` | Bounce condition (eq.21-22), time evolution (eq.25), particle production (eq.42-48). **Core reference.** |
-| `Poplawski_2020.txt` | Kantowski-Sachs field equations (eq.10), shear (eq.24-25), singularity avoidance (eq.32). |
-| `Poplawski_2020_b.txt` | Tolman collapse with torsion, oscillatory bounces. |
+| Poplawski 2010 | Radial geodesics through Einstein-Rosen bridge (eq.5-6). |
+| Poplawski 2010b | Friedmann equations with torsion (eq.10-11), ε̃ = ε − αn² (eq.1). |
+| Poplawski 2014 | Bounce condition (eq.21-22), time evolution (eq.25), particle production (eq.42-48). **Core reference.** |
+| Poplawski 2020 | Kantowski-Sachs field equations (eq.10), shear (eq.24-25), singularity avoidance (eq.32). |
+| Poplawski 2020b | Tolman collapse with torsion, oscillatory bounces. |
+| Unger & Poplawski 2019 | Closed universe threshold C ≥ 8/9; aT = const. |
+| Poplawski 2012 | Spinor-torsion bounce at T_cr ≈ 0.78 m_P. |
+| Poplawski 2021 | KS anisotropy, shear, particle production (journal version of 2020). |
+| Poplawski 2025 | Black holes in expanding universe (McVittie-ECSK). |
+| Tukhashvili 2024 | NJL condensate, sub-Planckian bounce. |
 
 ### Supporting Sources
 
 | File | Role |
 |------|------|
-| `Hehl_et_al_1976.txt` | Derives ECSK theory. Proves spin averaging gives s² > 0. |
-| `Hehl_Datta_1971.txt` | Nonlinear spinor equations with torsion (foundational). |
-| `Boehmer_Bronowski_2006.txt` | Weyssenhoff fluid under cosmological principle. |
-| `Brecht_et_al_2007.txt` | 1+3 covariant Weyssenhoff fluid dynamics. |
-| `Gourgoulhon_2007.txt` | 3+1 formalism reference (220 pages). |
-| `Hashemi_2021.txt` | Independent confirmation: torsion prevents singularity in OS collapse. |
-| `Misner_et_al_2017.txt` | MTW Gravitation textbook (OCR). |
-| `Parker_Toms_2009.txt` | QFT in curved spacetime (OCR). Particle creation. |
-| `Wald_1984.txt` | General Relativity textbook (OCR). |
+| Hehl et al. 1976 | Derives ECSK theory. Proves spin averaging gives s² > 0. |
+| Hehl & Datta 1971 | Nonlinear spinor equations with torsion (foundational). |
+| Böhmer & Bronowski 2006 | Weyssenhoff fluid under cosmological principle. |
+| Brechet et al. 2007 | 1+3 covariant Weyssenhoff fluid dynamics. |
+| Hashemi 2021 | Independent confirmation: torsion prevents singularity in OS collapse. |
+| Alexander et al. 2014 | Gravi-weak unification via torsion. |
+| Kranas et al. 2019 | FRW with vectorial torsion. |
+| Elizalde et al. 2023 | GW amplitude modification in ECSK. |
+| Kirsch et al. 2023 | CCGG quadratic gravity, torsion as dark energy. |
+| Alam et al. 2025 | f(R) ECSK anisotropic bounce, Kalb-Ramond field. |
+| Shah et al. 2025 | De Donder–Weyl ECSK cosmology. |
+| Garcia de Andrade 2018 | Chiral torsion dynamo, primordial magnetic fields. |
+| Sadatian & Hosseini 2025 | F(T) gravity + BCS condensate, exact bounce. |
+| Gourgoulhon 2007 | 3+1 formalism reference (220 pages). |
+| MTW (Misner et al. 2017) | Gravitation textbook. |
+| Parker & Toms 2009 | QFT in curved spacetime. Particle creation. |
+| Wald 1984 | General Relativity textbook. |
 
 ---
 
@@ -134,7 +160,7 @@ Derived from ε̃ = 1/a⁴ − β/a⁶ and p̃ = 1/(3a⁴) − β/a⁶:
     w_eff = (a̅² − 3β) / (3(a̅² − β))
 
 Not explicitly stated in the papers but correctly derived from
-Poplawski 2010b eq.1 and radiation EOS p = ε/3.
+Poplawski 2014 eq.9 (ε̃ = ε − αn², p̃ = p − αn²) and radiation EOS p = ε/3.
 
 ### Coupling constant
 From Hehl & Datta 1971, Hehl et al. 1976, Poplawski 2010b:
@@ -239,7 +265,7 @@ package.json            — three r183, lil-gui, vite 7.3.1
 
 ## What's Done
 
-- [x] Physics audit: all equations verified against 7 source papers
+- [x] Physics audit: all equations verified against 27 source papers; full catalog in `EQUATION_CATALOG.md`
 - [x] `ecsk-physics.ts`: bounce properties, half-period integral, sensitivity
 - [x] `perturbation.ts`: real spherical harmonics, spectral synthesis, PRNG
 - [x] `shell.ts`: S² sampling, Lambert projection, arrival time computation
@@ -247,12 +273,14 @@ package.json            — three r183, lil-gui, vite 7.3.1
 - [x] `main.ts`: shell spawning, cursor-based arrival processing, hit fading
 - [x] `controls.ts`: full lil-gui panel with physics/flow/display/readout
 - [x] Clean TypeScript compilation (zero errors)
-- [x] Project cleanup (dead files removed, folders renamed for commit)
+- [x] `EQUATION_CATALOG.md` — 1 027-line equation reference, all 27 papers, §1–§25
+- [x] Source processing pipeline: PyMuPDF plain text → arXiv LaTeX download → `sources_marker/`
+- [x] Project cleanup: dead files removed, source-processing scripts quarantined to `source-processing/` (gitignored), all source material folders gitignored
 
 ## Future Work (ranked by urgency)
 
 ### P0 — Physics accuracy & hardware utilization
-- [ ] Full physics review against all 14 source texts (re-audit every equation)
+- [x] Full physics review against all 27 source texts (re-audit every equation) — completed, all equations verified correct
 - [ ] Review individual feature implementations against physical expectations
 - [ ] Unit tests for physics modules (ecsk-physics, perturbation, shell — pure math, very testable)
 - [ ] Performance review and profiling (identify CPU/GPU bottlenecks)

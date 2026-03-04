@@ -57,7 +57,7 @@ export class ECSKPhysics {
       wEff: (a2 - 3 * be) / (3 * (a2 - be)),
       // Bounce kick: ä = −1/a³ + 2β/a⁵ (from D2)
       acc: -1 / (a2 * a) + (2 * be) / (a2 * a2 * a),
-      // Torsion ratio: S = αn²/ε = β/a² → 1 at bounce
+      // Torsion ratio: S = αn²/ε = β/a² (→ 1 in small-β limit; = 1−a² at bounce)
       S: be / a2,
       // Number density proxy: n ∝ 1/a³
       n: 1 / (a2 * a),
