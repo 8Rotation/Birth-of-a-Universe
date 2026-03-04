@@ -316,6 +316,15 @@ package.json            — three r183, lil-gui, vite 7.3.1
 - [ ] Share state via URL query parameters
 - [ ] Colorblind-safe alternate palettes
 - [ ] Touch / mobile support (pinch-zoom, swipe, responsive layout)
+- [ ] **Performance-aware slider value coloring** — the numeric readout for each slider is
+  tinted on a continuous green → orange → red gradient based on available performance
+  headroom for that parameter. Green = ample headroom to push higher; orange = moderate
+  load; red = near the performance ceiling. Requires (a) a lightweight ongoing measurement
+  of frame-budget consumption (CPU + GPU), and (b) a per-parameter cost model that
+  estimates how much increasing a given slider would affect frame time.
+  ⚠️ *Lower priority. The monitoring and cost-estimation logic must be negligible in its
+  own overhead — it must not consume CPU/GPU budget that would otherwise go to the
+  simulation itself.*
 
 ### P4 — Stretch (nice-to-have / experimental)
 - [ ] Anisotropic extension (Kantowski-Sachs with two scale factors X, Y)
