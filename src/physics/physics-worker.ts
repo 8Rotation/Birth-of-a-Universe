@@ -26,17 +26,28 @@ import { StreamEmitter } from "./shell.js";
 
 const STRIDE = 7;
 
+/**
+ * Hard ceiling on particles produced per tick.
+ * At high particle rates the accumulator can demand millions of particles
+ * per frame; generating them all would choke the worker and backlog the
+ * message queue.  50 000 is enough to saturate the 150 000 hit budget in
+ * a few seconds while remaining interactive.
+ */
+const MAX_PARTICLES_PER_TICK = 50_000;
+
 /* eslint-disable @typescript-eslint/no-explicit-any */
 const _self = self as any;
 
 let physics: ECSKPhysics;
 let emitter: StreamEmitter;
+let generation = 0;
 
 _self.onmessage = (e: MessageEvent) => {
   const msg = e.data;
 
   switch (msg.type) {
     case "init": {
+      generation = msg.generation ?? 0;
       physics = new ECSKPhysics(msg.beta);
       emitter = new StreamEmitter(
         physics,
@@ -50,11 +61,13 @@ _self.onmessage = (e: MessageEvent) => {
     }
 
     case "updateBeta": {
+      generation = msg.generation ?? generation;
       physics = new ECSKPhysics(msg.beta);
       break;
     }
 
     case "reset": {
+      generation = msg.generation ?? generation;
       physics = new ECSKPhysics(msg.beta);
       emitter = new StreamEmitter(
         physics,
@@ -68,6 +81,9 @@ _self.onmessage = (e: MessageEvent) => {
     }
 
     case "tick": {
+      // Drop stale ticks that were queued before a reset/updateBeta
+      if (msg.generation !== undefined && msg.generation < generation) break;
+
       // Sync emitter with latest slider values
       emitter.update(
         physics,
@@ -77,11 +93,13 @@ _self.onmessage = (e: MessageEvent) => {
         msg.fieldEvolution,
       );
 
-      const particles = emitter.tick(msg.dt, msg.simTime, msg.particleRate);
+      // Cap particle rate so the worker never chokes on a single tick
+      const cappedRate = Math.min(msg.particleRate, MAX_PARTICLES_PER_TICK / Math.max(msg.dt, 1e-4));
+      const particles = emitter.tick(msg.dt, msg.simTime, cappedRate);
       const count = particles.length;
 
       if (count === 0) {
-        _self.postMessage({ type: "particles", count: 0, data: null });
+        _self.postMessage({ type: "particles", count: 0, data: null, generation });
         break;
       }
 
@@ -101,7 +119,7 @@ _self.onmessage = (e: MessageEvent) => {
 
       // Transfer the ArrayBuffer (zero-copy handoff to main thread)
       _self.postMessage(
-        { type: "particles", count, data: buf },
+        { type: "particles", count, data: buf, generation },
         [buf.buffer],
       );
       break;

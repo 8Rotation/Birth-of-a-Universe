@@ -28,7 +28,10 @@ console.log("[main] Birth of a Universe — ECSK Bounce Sensor");
 
 // ── Configuration ─────────────────────────────────────────────────────────
 
-const MAX_HITS = 150_000;
+// Hard ceiling: a true emergency stop to prevent
+// multi-GB RAM/VRAM consumption if persistence and rate are
+// both cranked to extreme values simultaneously.
+const EMERGENCY_HIT_CAP = 5_000_000;
 
 // ── Info overlay ──────────────────────────────────────────────────────────
 
@@ -44,7 +47,6 @@ async function main() {
 
   // ── 1. Initialize renderer ────────────────────────────────────────
   const renderer = new SensorRenderer({
-    maxHits: MAX_HITS,
     bloomStrength: 1.2,
     bloomRadius: 0.3,
     bloomThreshold: 0.05,
@@ -96,9 +98,18 @@ async function main() {
   });
 
   // ── 6. Arrival processing (heap-backed, O(log N) per extract) ──
+  // Budget: don't pop more than this per frame to keep main loop responsive
+  const MAX_ARRIVALS_PER_FRAME = 20_000;
+  // Don't insert more than this into the heap per frame
+  const MAX_HEAP_INSERTS_PER_FRAME = 60_000;
+
   function processArrivals(now: number): void {
     let count = 0;
-    while (pendingHeap.length > 0 && pendingHeap.peek()!.arrivalTime <= now) {
+    while (
+      count < MAX_ARRIVALS_PER_FRAME &&
+      pendingHeap.length > 0 &&
+      pendingHeap.peek()!.arrivalTime <= now
+    ) {
       const p = pendingHeap.pop()!;
       hits.push({
         x: p.lx,
@@ -156,13 +167,16 @@ async function main() {
       });
 
       // Insert particles from previous worker tick(s) into heap
+      // (cap per frame to keep main loop responsive)
       const fresh = bridge.drain();
-      for (let i = 0; i < fresh.length; i++) {
+      const insertLimit = Math.min(fresh.length, MAX_HEAP_INSERTS_PER_FRAME);
+      for (let i = 0; i < insertLimit; i++) {
         pendingHeap.push(fresh[i]);
       }
 
-      // Guard against unbounded growth if timeDilation is very large
-      if (pendingHeap.length > MAX_HITS * 2) {
+      // Guard against unbounded growth — trim oldest by clearing.
+      // This is a hard safety net; the worker-side cap makes it rare.
+      if (pendingHeap.length > EMERGENCY_HIT_CAP * 3) {
         pendingHeap.clear();
       }
     }
@@ -184,9 +198,9 @@ async function main() {
     }
     hits.length = writeIdx;
 
-    // Enforce budget
-    if (hits.length > MAX_HITS) {
-      hits = hits.slice(hits.length - MAX_HITS);
+    // Enforce emergency ceiling (prevents multi-GB RAM at extreme settings)
+    if (hits.length > EMERGENCY_HIT_CAP) {
+      hits.splice(0, hits.length - EMERGENCY_HIT_CAP);
     }
 
     // ── Update renderer ───────────────────────────────────────────

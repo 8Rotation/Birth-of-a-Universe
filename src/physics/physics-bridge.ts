@@ -25,6 +25,7 @@ export interface PhysicsBridgeConfig {
 export class PhysicsBridge {
   private worker: Worker;
   private batches: PendingParticle[][] = [];
+  private generation = 0;
 
   constructor(config: PhysicsBridgeConfig) {
     this.worker = new Worker(
@@ -35,11 +36,13 @@ export class PhysicsBridge {
     this.worker.onmessage = (e: MessageEvent) => {
       const msg = e.data;
       if (msg.type === "particles" && msg.count > 0 && msg.data) {
+        // Discard batches from a stale generation (pre-reset/pre-updateBeta)
+        if (msg.generation !== undefined && msg.generation < this.generation) return;
         this.batches.push(this._unpack(msg.data, msg.count));
       }
     };
 
-    this.worker.postMessage({ type: "init", ...config });
+    this.worker.postMessage({ type: "init", ...config, generation: this.generation });
   }
 
   /** Send a tick to the worker — produces particles asynchronously. */
@@ -59,20 +62,23 @@ export class PhysicsBridge {
       dt,
       simTime,
       particleRate,
+      generation: this.generation,
       ...params,
     });
   }
 
   /** Notify the worker that β has changed (recreates physics engine). */
   updateBeta(beta: number): void {
-    this.worker.postMessage({ type: "updateBeta", beta });
+    this.generation++;
+    this.worker.postMessage({ type: "updateBeta", beta, generation: this.generation });
     // Discard any queued particles baked at the old β
     this.batches.length = 0;
   }
 
   /** Reset the worker's emitter (e.g., on user "Clear"). */
   reset(config: PhysicsBridgeConfig): void {
-    this.worker.postMessage({ type: "reset", ...config });
+    this.generation++;
+    this.worker.postMessage({ type: "reset", ...config, generation: this.generation });
     this.batches.length = 0;
   }
 

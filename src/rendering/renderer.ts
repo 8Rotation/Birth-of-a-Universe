@@ -23,7 +23,7 @@ import { bloom } from "three/addons/tsl/display/BloomNode.js";
 // ── Types ─────────────────────────────────────────────────────────────────
 
 export interface SensorRendererConfig {
-  maxHits: number;
+  initialCapacity?: number;  // initial GPU buffer size; doubles automatically as needed
   bloomStrength?: number;
   bloomRadius?: number;
   bloomThreshold?: number;
@@ -72,17 +72,17 @@ export class SensorRenderer {
   private diskRing!: THREE.LineLoop;
 
   private pipeline: RenderPipeline | null = null;
-  useBloom = true;            // public — toggled by UI
+  useBloom = true;
 
-  // BloomNode stores strength/radius/threshold as its own internal
-  // UniformNode instances (.strength, .radius, .threshold).  Holding a
-  // reference here lets us update .value each frame without touching the
-  // pipeline graph.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private _bloomNode: any = null;
 
-  private readonly maxHits: number;
   private _ready = false;
+
+  // GPU buffer capacity — starts at initialCapacity and doubles when exceeded.
+  // There is no fixed upper bound; the system adapts to however many hits
+  // the simulation and persistence settings produce.
+  private _capacity: number;
 
   // ── Tunable parameters (set from controls each frame) ─────────────
   hitBaseSize = 3.0;
@@ -92,7 +92,7 @@ export class SensorRenderer {
   bloomThreshold: number;
 
   constructor(config: SensorRendererConfig) {
-    this.maxHits = config.maxHits;
+    this._capacity = config.initialCapacity ?? 65_536;
     this.bloomStrength = config.bloomStrength ?? 1.2;
     this.bloomRadius = config.bloomRadius ?? 0.3;
     this.bloomThreshold = config.bloomThreshold ?? 0.05;
@@ -135,8 +135,8 @@ export class SensorRenderer {
 
     // ── Point cloud for hits ──────────────────────────────────────────
     const geo = new THREE.BufferGeometry();
-    const positions = new Float32Array(this.maxHits * 3);
-    const colors = new Float32Array(this.maxHits * 3);
+    const positions = new Float32Array(this._capacity * 3);
+    const colors = new Float32Array(this._capacity * 3);
 
     this.posAttr = new THREE.BufferAttribute(positions, 3);
     this.posAttr.setUsage(THREE.DynamicDrawUsage);
@@ -204,22 +204,26 @@ export class SensorRenderer {
     }
 
     this._ready = true;
-    console.log(`[sensor] Ready — max ${this.maxHits} hits`);
+    console.log(`[sensor] Ready — initial GPU buffer ${this._capacity} hits (grows as needed)`);
   }
 
   /**
    * Write visible hits into the GPU buffers for rendering.
-   *
-   * @param hits  Currently alive hits
-   * @param now   Wall-clock seconds (performance.now() / 1000)
-   * @param persistence  Fade time constant in seconds
+   * Automatically grows the GPU buffer (doubling) if hits.length exceeds
+   * current capacity — no fixed upper limit.
    */
   updateHits(hits: Hit[], now: number, persistence: number): void {
     if (!this._ready) return;
 
+    const n = hits.length;
+
+    // Grow GPU buffers if needed (doubles capacity each time)
+    if (n > this._capacity) {
+      this._growBuffers(n);
+    }
+
     const pos = this.posAttr.array as Float32Array;
     const col = this.colorAttr.array as Float32Array;
-    const n = Math.min(hits.length, this.maxHits);
 
     for (let i = 0; i < n; i++) {
       const hit = hits[i];
@@ -252,6 +256,26 @@ export class SensorRenderer {
     this.colorAttr.needsUpdate = true;
     this.points.geometry.setDrawRange(0, n);
     this.material.size = this.hitBaseSize;
+  }
+
+  /**
+   * Grow GPU position + color buffers to accommodate at least `needed` hits.
+   * Doubles capacity repeatedly until sufficient, then replaces the
+   * BufferAttributes on the geometry (old GPU buffers are released).
+   */
+  private _growBuffers(needed: number): void {
+    while (this._capacity < needed) this._capacity *= 2;
+    const geo = this.points.geometry;
+
+    this.posAttr = new THREE.BufferAttribute(new Float32Array(this._capacity * 3), 3);
+    this.posAttr.setUsage(THREE.DynamicDrawUsage);
+    geo.setAttribute("position", this.posAttr);
+
+    this.colorAttr = new THREE.BufferAttribute(new Float32Array(this._capacity * 3), 3);
+    this.colorAttr.setUsage(THREE.DynamicDrawUsage);
+    geo.setAttribute("color", this.colorAttr);
+
+    console.log(`[sensor] GPU buffer grown → ${this._capacity} hits (${(this._capacity * 24 / 1024 / 1024).toFixed(1)} MB)`);
   }
 
   /** Render one frame (with or without bloom). */
