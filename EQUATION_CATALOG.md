@@ -1,6 +1,44 @@
 # Comprehensive Equation Catalog — ECSK Theory, Torsion & Bounce Cosmology
 
-**Extracted from 27 source papers.** Organized by paper, with cross-references.
+**Extracted from 29 source papers.** Organized by paper, with cross-references.
+
+---
+
+## Bibliography
+
+### File Key → Full Citation
+
+| File key | Full citation |
+|----------|---------------|
+| `Alam_et_al_2025` | Alam, S., Sen, S. & Sengupta, S. (2025) 'Bouncing cosmologies in modified gravity with spacetime torsion', *arXiv:2509.03508* |
+| `Alexander_et_al_2014` | Alexander, S., Marcianò, A. & Smolin, L. (2014) 'Gravitational origin of the weak interaction's chirality', *Physical Review D*, 89(6), 065017. arXiv:1212.5246 |
+| `Boehmer_Bronowski_2006` | Böhmer, C.G. & Bronowski, P. (2006) 'The homogeneous and isotropic Weyssenhoff fluid', *arXiv:gr-qc/0612078* |
+| `Brechet_et_al_2007` | Brechet, S.D., Hobson, M.P. & Lasenby, A.N. (2007) 'Weyssenhoff fluid dynamics in general relativity using a 1+3 covariant approach', *Classical and Quantum Gravity*, 25(24). arXiv:0706.2367 |
+| `Cubero_Poplawski_2019` | Cubero, J.L. & Popławski, N.J. (2020) 'Analysis of big bounce in Einstein–Cartan cosmology', *Classical and Quantum Gravity*, 37(2), 025011. arXiv:1906.11824 |
+| `Elizalde_et_al_2023` | Elizalde, E., Izaurieta, F., Riveros, C., Salgado, G. & Valdivia, O. (2023) 'Gravitational waves in Einstein-Cartan theory: on the effects of dark matter spin tensor', *arXiv:2204.00090* |
+| `GarciaDeAndrade_2018` | Garcia de Andrade, L.C. (2018) 'Metric-torsion decay of non-adiabatic chiral helical magnetic fields against chiral dynamo action in bouncing cosmological models', *European Physical Journal C*, 78, 530 |
+| `Gourgoulhon_2007` | Gourgoulhon, É. (2007) '3+1 formalism and bases of numerical relativity' (lecture notes), *arXiv:gr-qc/0703035* |
+| `Hashemi_et_al_2021` | Hashemi, M., Jalalzadeh, S. & Ziaie, A.H. (2021) 'Collapse and dispersal of a homogeneous spin fluid in Einstein-Cartan theory', *arXiv:1407.4103* |
+| `Hehl_Datta_1971` | Hehl, F.W. & Datta, B.K. (1971) 'Nonlinear spinor equation and asymmetric connection in general relativity', *Journal of Mathematical Physics*, 12, 1334 |
+| `Hehl_et_al_1976` | Hehl, F.W., von der Heyde, P., Kerlick, G.D. & Nester, J.M. (1976) 'General relativity with spin and torsion: foundations and prospects', *Reviews of Modern Physics*, 48, 393 |
+| `Kirsch_et_al_2023` | Kirsch, J., Vasak, D., van de Venn, A. & Struckmeier, J. (2023) 'Torsion driving cosmic expansion', *arXiv:2303.01165* |
+| `Kranas_et_al_2019` | Kranas, D., Tsagas, C.G., Barrow, J.D. & Iosifidis, D. (2019) 'Friedmann-like universes with torsion', *European Physical Journal C*, 79, 341. arXiv:1809.10064 |
+| `Lucat_Prokopek_2015` | Lucat, S. & Prokopec, T. (2015) 'Cosmological singularities and bounce in Cartan-Einstein theory', *arXiv:1512.06074* |
+| `Misner_et_al_2017` | Misner, C.W., Thorne, K.S. & Wheeler, J.A. (1973/2017) *Gravitation*. Princeton: Princeton University Press |
+| `Parker_Toms_2009` | Parker, L.E. & Toms, D.J. (2009) *Quantum Field Theory in Curved Spacetime*. Cambridge: Cambridge University Press |
+| `Poplawski_2010` | Popławski, N.J. (2010a) 'Radial motion into an Einstein-Rosen bridge', *Physics Letters B*, 687(2–3), 110–113. arXiv:0902.1994 |
+| `Poplawski_2010b` | Popławski, N.J. (2010b) 'Cosmology with torsion: an alternative to cosmic inflation', *Physics Letters B*, 694(3), 181–185. arXiv:1007.0587 |
+| `Poplawski_2012` | Popławski, N.J. (2012) 'Nonsingular, big-bounce cosmology from spinor-torsion coupling', *Physical Review D*, 85(10), 107502. arXiv:1111.4595 |
+| `Poplawski_2014` | Popławski, N.J. (2014) 'Universe in a black hole with spin and torsion', *arXiv:1410.3881* |
+| `Poplawski_2020` | Popławski, N.J. (2020a) 'The universe as a closed anisotropic universe born in a black hole', *arXiv:2007.11556* |
+| `Poplawski_2020b` | Popławski, N.J. (2020b) 'Gravitational collapse of a fluid with torsion into a universe in a black hole', *arXiv:2008.02136* |
+| `Poplawski_2021` | Popławski, N.J. (2021) 'A nonsingular, anisotropic universe in a black hole with torsion and particle production', *General Relativity and Gravitation*, 53, 18 |
+| `Poplawski_2025` | Popławski, N.J. (2025) 'Black holes in the expanding universe', *Classical and Quantum Gravity*, 42(6), 065017. arXiv:2405.16673 |
+| `Sadatian_Hosseini_2025` | Sadatian, S.D. & Hosseini, S.M.R. (2025) 'Effects of torsion coupling on fermions and bounce dynamics of the universe', *Nuclear Physics B*, 1014, 116888 |
+| `Shah_et_al_2025` | Shah, A., Khlopov, M. & Krasnov, M. (2025) 'Cosmology in the De Donder-Weyl formulation of Einstein-Cartan gravity', *arXiv:2511.15773* |
+| `Tukhashvili_2024` | Tukhashvili, G. (2024) 'Torsion, gravity induced chiral symmetry breaking and cosmological bounce', *arXiv:2309.08654* |
+| `Unger_Poplawski_2019` | Unger, G. & Popławski, N.J. (2019) 'Big bounce and closed universe from spin and torsion', *The Astrophysical Journal*, 870, 78. arXiv:1808.08327 |
+| `Wald_1984` | Wald, R.M. (1984) *General Relativity*. Chicago: University of Chicago Press |
 
 ---
 
@@ -30,6 +68,8 @@
 23. [Shah, Khlopov & Krasnov 2025 (DW Hamiltonian, $a(t) = Ct^\alpha e^{Kt^\beta}$)](#23-shah-khlopov--krasnov-2025)
 24. [Garcia de Andrade 2018 (Chiral torsion dynamo, EC bounce, $B_\text{seed}\sim10^{-10}$ G)](#24-garcia-de-andrade-2018)
 25. [Sadatian & Hosseini 2025 (F(T) gravity + BCS condensate, exact bounce $a(t_0)=a_\text{min}$)](#25-sadatian--hosseini-2025)
+26. [Cubero & Popławski 2019 (Double bounce, closed-universe threshold $C > e^{-1/2}$)](#26-cubero--popławski-2019)
+27. [Lucat & Prokopek 2015 (Generalized ECKS, 2PI quantum bounce, $\xi$-coupling)](#27-lucat--prokopek-2015)
 
 ---
 
@@ -1024,3 +1064,112 @@ where $\beta = \alpha n_0^2 / \varepsilon_0$ is the torsion-to-radiation energy 
 | (37) | $n_s - 1 \equiv \dfrac{d\ln\mathcal{P}(k)}{d\ln k} = 2 - |\nu|$ — spectral tilt; CMB $n_s\approx0.9649\pm0.0042\Rightarrow|\nu|\approx1.035\Rightarrow|\xi|\approx0.4$ |
 
 **Key result:** F(T) gravity ($F(T)=\varepsilon T$) coupled to Dirac fermions with BCS four-fermion condensate ($\xi<0$) yields an exact non-singular bounce with $H(t_0)=0$ at $t_0=\tfrac{1}{2}\sqrt{3\varepsilon/\pi}$. The scale factor is exactly $a(t)\propto[(t-t_0)^2 + a_\text{min}^2]$ (hyperbola). Fermionic perturbations satisfy a Bessel equation with index $\nu^2=1-8\xi$; scale invariance ($\nu=2$) requires $|\xi|=3/8$, with CMB tilt $n_s\approx0.965$ giving $|\xi|\approx0.4$ — consistent with lepton–quark contact-interaction bounds $|\xi|<10^{32}$.
+
+---
+
+## 26. Cubero & Popławski 2019
+**"Analysis of big bounce in Einstein–Cartan cosmology"**
+*Class. Quantum Grav. 37, 025011 (2020); arXiv:1906.11824*
+*(Refines Popławski 2010b/2012 by including curvature $k\neq0$ in the Friedmann equations at the bounce)*
+
+### Sign Conventions & Notation
+- Signature $(+,-,-,-)$; $\kappa = 8\pi G/c^4$
+- $\alpha = 16\kappa(\hbar c)^2$ — torsion coupling constant (note factor-of-$\tfrac{1}{2}$ difference from Unger & Popławski 2019 conventions; same physics)
+- $h_\star = (\pi^2/30)(g_b + \tfrac{7}{8}g_f)k_B^4/(\hbar c)^3$ — relativistic energy density factor ($g_b=29$, $g_f=90$ for SM)
+- $h_{nf} = (\zeta(3)/\pi^2)(\tfrac{3}{4})g_f k_B^3/(\hbar c)^3$ — fermion number density factor
+- Dimensionless variables: $x = T/T_{cr}$, $y = a/a_{cr}$, $\tau = ct/a_{cr}$
+
+### Effective Fluid Equations (after integrating out torsion)
+
+| Eq. | Relation |
+|-----|----------|
+| — | $\tilde\epsilon = \epsilon - \alpha n_f^2$ — effective energy density with spin-torsion correction |
+| — | $\tilde p = p + \alpha n_f^2$ — effective pressure; note sign flip relative to density |
+| — | $\alpha = 16\kappa(\hbar c)^2$ — torsion coupling ($= \kappa(\hbar c)^2/32$ in Poplawski 2010b convention times $512$; check paper for exact factor) |
+
+### Friedmann + Thermodynamics System
+
+| Eq. | Relation |
+|-----|----------|
+| (Fried.) | $\dfrac{\dot a^2}{c^2} + k = 3\kappa\bigl(h_\star T^4 - \alpha h_{nf}^2 T^6\bigr)a^2$ — modified first Friedmann equation with spin-fluid corrections; $k\in\{-1,0,+1\}$ |
+| (Thermo) | $\dot T - \dfrac{T\dot T}{T_{cr}^2} + \dfrac{\dot a}{a}T = 0$ — first law of thermodynamics for spin fluid (adiabatic conservation) |
+| (a–T) | $a(T) = CT\,e^{T^2/(2T_{cr}^2)}$ — scale factor as explicit function of temperature ($C>0$ = integration constant) |
+
+### Critical Scales
+
+| Quantity | Value |
+|----------|-------|
+| $T_{cr} = \bigl(2h_\star / 3\alpha h_{nf}^2\bigr)^{1/2}$ | $= 2.218\times10^{31}\,\text{K}$ — critical temperature; minimum of $a(T)$ occurs here |
+| $a_{cr} = 8\hbar c\bigl(\alpha h_{nf}^4/h_\star^3\bigr)^{1/2}$ | $= 6.661\times10^{-35}\,\text{m}$ — critical scale factor (Planck-scale natural unit of $a$) |
+| $a_{\min} = C\,e^{1/2}\,a_{cr} > 0$ | minimum scale factor — strictly positive for all $C>0$, all $k$ |
+
+### Turning Points and Closed-Universe Threshold
+
+| Eq. | Relation |
+|-----|----------|
+| (Closed turning pt.) | $(3x^2 - 2x^4)e^{x^2} = C^{-2}$ — equation for turning points ($\dot a=0$) in $k=+1$ universe; left-hand side has maximum $e$ at $x=1$ |
+| **Existence threshold** | $C > e^{-1/2} \approx 0.6065$ — necessary and sufficient for closed universe to have turning points; below this no oscillation exists |
+| (Flat turning pts.) | $x_{\min}=0$, $x_{\max}=\sqrt{3/2}$ — for $k=0$; temperature always between 0 and $\sqrt{3/2}\,T_{cr}$ |
+| (Open) | No turning points for $k=-1$; universe expands from any $C>0$ |
+| (Double bounce) | As $T$ rises then falls: $a$ decreases → increases → decreases → increases — **double** bounce sequence for closed universe |
+
+### Dimensionless Form
+
+| Eq. | Relation |
+|-----|----------|
+| $\dot y^2 + k = (3x^4 - 2x^6)y^2$ | dimensionless Friedmann equation ($y=a/a_{cr}$, $x=T/T_{cr}$) |
+| $y(x) = Cx\,e^{x^2/2}$ | dimensionless $a$–$T$ relation; minimum $y_{\min}=Ce^{1/2}$ at $x=1$ |
+
+**Key result:** The bounce is universal and non-singular for all $k$ and all $C>0$. A **closed** universe is only realized when $C > e^{-1/2}$, linking the curvature parameter to a threshold in the scale factor–temperature phase space. The bounce is **double**: the scale factor passes through two local minima as the universe oscillates in temperature. Maximum temperature for all topologies: $T_{\max} = \sqrt{3/2}\,T_{cr} \approx 1.22\,T_{cr}$.
+
+---
+
+## 27. Lucat & Prokopek 2015
+**"Cosmological singularities and bounce in Cartan-Einstein theory"**
+*arXiv:1512.06074 [gr-qc]*
+*(Fully microscopic quantum treatment: Dirac fermions, 2PI effective action, Schwinger-Keldysh formalism)*
+
+### Sign Conventions & Notation
+- Natural units $\hbar=c=1$; metric $(+,-,-,-)$; $D$-dimensional spacetime for dimensional regularization
+- Torsion: ${S^\lambda}_{\mu\nu} = \Gamma^\lambda_{[\mu\nu]}$; trace $S_\mu = {S^\alpha}_{\mu\alpha}$
+- $G_N$: Newton constant; $M_P = (8\pi G_N)^{-1/2}$: reduced Planck mass
+- Generalized coupling: $\xi$ = torsion–pseudovector strength; $\xi'$ = torsion–vector strength ($\xi'=0$ in main analysis)
+- $\alpha_5 = 3\pi G_N\xi^2/2$ — effective four-fermion coupling constant
+
+### Generalized Torsion-Fermion Action
+
+| Eq. | Relation |
+|-----|----------|
+| (1)/(eq0) | $\mathcal{L}_{\text{int}} = \sqrt{-g}\,S_{\lambda\mu\nu}\epsilon^{\lambda\mu\nu\sigma}\bigl(\xi\bar\psi\gamma^5\gamma_\sigma\psi + \xi'\bar\psi\gamma_\sigma\psi\bigr)$ — most general dim-4 torsion–fermion coupling; EC corresponds to $\xi=1,\xi'=0$ |
+| (eq1.1) | $S = \int d^Dx\sqrt{-g}\bigl(\mathcal{L}_m(g,\Gamma) - 16\pi G_N R(g,\Gamma)\bigr)$ — Einstein-Cartan-Hilbert action with general connection |
+| (eq1.3) | $4g_{\lambda[\mu}S_{\nu]} + S_{\lambda[\mu\nu]} - 2S_{[\mu\nu]\lambda} = 8\pi G_N\Pi_{\lambda[\mu\nu]}$ — Cartan (torsion) equation; purely algebraic → torsion non-propagating |
+| (eq1.5) | $S_{\text{eff}} = \int d^Dx\sqrt{-g}\Bigl[\mathring{\mathcal{L}}_m - 16\pi G_N\bigl(R + 8\pi G_N\xi(\nabla_\kappa - 4\pi G_N\xi\Pi_\kappa)\Pi^\kappa - (8\pi G_N\xi)^2\Pi_{\rho\mu\kappa}\Pi^{\mu\kappa\rho}\bigr)\Bigr]$ — general effective action after integrating out torsion |
+
+### ECKS Effective Theory (after integrating torsion, $\xi'=0$)
+
+| Eq. | Relation |
+|-----|----------|
+| (eq1.4)/(Π) | $\Pi^{\mu\nu\lambda} = -4\sqrt{-g}\,\bar\psi\gamma^{[\mu}\gamma^\nu\gamma^{\lambda]}\psi = -4\epsilon^{\mu\nu\lambda\sigma}\bar\psi\gamma^5\gamma_\sigma\psi$ — totally antisymmetric spin source; implies torsion is also totally antisymmetric |
+| (eq1.8) | $S = \int d^Dx\sqrt{-g}\Bigl[\mathring{\mathcal{L}}_\psi - 16\pi G_N R + (\bar\psi\gamma^5\gamma^\sigma\psi)(\bar\psi\gamma^5\gamma_\sigma\psi)\Bigr]$ — ECKS effective action; torsion replaced by axial four-fermion contact term |
+| (eq1.9) | $T_{\mu\nu} = 2\bigl(\bar\psi\gamma_{(\mu}D_{\nu)}\psi - D_{(\nu}\bar\psi\gamma_{\mu)}\psi\bigr) + g_{\mu\nu}(\bar\psi\gamma^5\gamma^\sigma\psi)^2$ — energy-momentum tensor from ECKS effective theory |
+| (eq1.10) | $\bigl(i\gamma^\mu D_\mu - m_R - im_I\gamma^5\bigr)\psi = -(3\pi G_N\xi^2)\,(\bar\psi\gamma^5\gamma^\sigma\psi)\,\gamma^5\gamma_\sigma\psi$ — Dirac equation; cubic torsion self-interaction on RHS |
+| (semiclass.) | $G_{\mu\nu} = 8\pi G_N\langle T_{\mu\nu}(x)\rangle$ — semiclassical Einstein equations; $\langle\cdot\rangle = \text{Tr}[\rho_H\cdot]$ |
+
+### 2PI Effective Action & Schwinger-Keldysh Propagators
+
+| Eq. | Relation |
+|-----|----------|
+| (eq6.2.1–4) | $iS^{++}_{\alpha\beta}=\langle T[\psi_\alpha\psi_\beta]\rangle$; $iS^{-+}_{\alpha\beta}=\langle\psi_\alpha\bar\psi_\beta\rangle$; $iS^{+-}_{\alpha\beta}=-\langle\bar\psi_\alpha\psi_\beta\rangle$; $iS^{--}=\langle\bar T[\psi\bar\psi]\rangle$ — four SK propagator components (Feynman, Wightman +/−, Dyson) |
+| (2PI Γ) | $\Gamma[S,g_{\mu\nu}] = \int d^Dx\sqrt{-g}\Bigl[\text{Tr}\bigl[\sigma_z(i\!\not\!D-m)(iS)\bigr] - \tfrac{i}{\sqrt{-g}}\text{Tr}\log(iS)\Bigr] + \Gamma_2[iS,g_{\mu\nu}]$ — 2PI effective action; $\Gamma_2$ = two-loop (Hartree + Fock) diagrams |
+| (Hartree-Fock) | $\Gamma_2 \supset \text{Tr}[iS\gamma^5\gamma^\sigma]\text{Tr}[iS\gamma^5\gamma_\sigma] - \text{Tr}[iS\gamma^5\gamma^\sigma\,iS\gamma^5\gamma_\sigma]$ — Hartree (direct) and Fock (exchange) torsion self-energy diagrams |
+
+### Bounce Dynamics
+
+| Eq. | Relation |
+|-----|----------|
+| (classical) | $\rho_{\text{torsion}} \propto -\alpha_5\langle\bar\psi\gamma^5\gamma^\sigma\psi\rangle^2 \propto -\alpha_5 n_f^2/a^6$ — torsion energy density scales as $a^{-6}$, dominates at small $a$; negative sign → gravitational repulsion |
+| (bounce cond.) | $H^2 = 0 \Leftrightarrow \rho_{\text{rad}} + \rho_{\text{torsion}} = 0 \Leftrightarrow \rho_{\text{rad}} = \alpha_5 n_f^2/a^6$ — bounce condition; torsion repulsion balances radiation at $a_{\min}$ |
+| (quantum) | Particle production in contracting background enhances torsion term: $\rho_{\text{torsion}}\to a^{-(6+\gamma_1)}$ with $\gamma_1>0$ — quantum corrections accelerate bounce, reduce $a_{\min}$ |
+| (validity) | $k_BT_{\text{bounce}} \ll M_P/\xi$ — semiclassical approximation valid when bounce energy is sub-Planckian; $\xi\sim10^3$ gives $T_{\text{bounce}}\sim10^{-3}M_P$ |
+
+**Key result:** Generalizes EC bounce to arbitrary torsion–pseudovector coupling $\xi$. After integrating out torsion, the effective four-fermion interaction has strength $\alpha_5 = 3\pi G_N\xi^2/2$; the standard EC result is recovered at $\xi=1$. The bounce is established in three regimes: (a) classical (no particle production), (b) fixed-background Hartree-Fock, and (c) full quantum backreaction via 2PI/Schwinger-Keldysh. In all cases with $\xi\neq0$ the universe bounces. Particle production speeds up the bounce and slightly lowers $a_{\min}$. The torsion contribution to $\rho$ scales as $a^{-6}$ classically, steepening to $a^{-(6+\gamma_1)}$ at one loop — always dominating radiation ($\sim a^{-4}$) at small $a$.

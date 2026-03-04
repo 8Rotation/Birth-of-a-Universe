@@ -79,8 +79,6 @@ export class InfallingShell {
     this.tailAngle = new Float32Array(size);
 
     // Temporary arrays for normalization
-    let minEps = Infinity,
-      maxEps = 0;
     let minAcc = Infinity,
       maxAcc = 0;
     let minW = 0,
@@ -113,8 +111,6 @@ export class InfallingShell {
       accArr[i] = props.acc;
       wArr[i] = props.wEff;
 
-      if (props.eps < minEps) minEps = props.eps;
-      if (props.eps > maxEps) maxEps = props.eps;
       if (props.acc < minAcc) minAcc = props.acc;
       if (props.acc > maxAcc) maxAcc = props.acc;
       if (props.wEff < minW) minW = props.wEff;
@@ -136,9 +132,21 @@ export class InfallingShell {
     for (let i = 0; i < size; i++) this.arrivalTime[i] += shift;
 
     // ── Normalize visual properties to 0-1 range ─────────────────────
-    const epsR = maxEps - minEps || 1;
     const accR = maxAcc - minAcc || 1;
     const wR = minW - maxW || 1;
+
+    // Fixed global log-scale reference anchored at eps = 10 000
+    // (≡ a_min = 0.1, a mid-range physical energy density).
+    // This is independent of the current β so that:
+    //   • strong-torsion shells (large β, gentle bounce, low eps) appear dim
+    //   • weak-torsion shells (small β, hard crunch, high eps) appear bright
+    //
+    // log(eps + 1) / log(10001) maps approx:
+    //   β = 0.20 → eps ≈ 13  → brightness ≈ 0.29
+    //   β = 0.10 → eps ≈ 79  → brightness ≈ 0.48
+    //   β = 0.05 → eps ≈ 254 → brightness ≈ 0.60
+    //   β ≪ 0.01 → eps → ∞   → brightness → 1.0 (clamped)
+    const EPS_LOG_REF = Math.log(10001); // log(1 / 0.1⁴ + 1)
 
     for (let i = 0; i < size; i++) {
       // Hue: w_eff maps from amber (25°) → violet (270°)
@@ -146,8 +154,11 @@ export class InfallingShell {
       // Lower w_eff (deep repulsive) → violet
       this.hue[i] = 25 + ((wArr[i] - maxW) / wR) * 245;
 
-      // Brightness: energy density at bounce (higher = brighter)
-      this.brightness[i] = 0.3 + 0.7 * (epsArr[i] - minEps) / epsR;
+      // Brightness: absolute log-scale energy density at bounce.
+      // Clamp to [0.15, 1.0] so no hit disappears entirely.
+      this.brightness[i] = Math.min(1.0, Math.max(0.15,
+        Math.log(epsArr[i] + 1) / EPS_LOG_REF,
+      ));
 
       // Hit size: bounce kick acceleration (larger kick = bigger)
       this.hitSize[i] = 0.5 + (accArr[i] - minAcc) / accR;

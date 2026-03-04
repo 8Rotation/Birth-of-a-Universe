@@ -146,6 +146,10 @@ async function main() {
     if (Math.abs(params.beta - lastBeta) > 0.0001) {
       physics = new ECSKPhysics(params.beta);
       lastBeta = params.beta;
+      // Discard stale shells and hits: their brightness was baked at the
+      // old β and would linger with incorrect energy-density encoding.
+      shells = [];
+      hits = [];
     }
 
     // ── Advance simulation ────────────────────────────────────────
@@ -187,6 +191,7 @@ async function main() {
     // ── Update renderer ───────────────────────────────────────────
     renderer.hitBaseSize = params.hitSize;
     renderer.brightnessMultiplier = params.brightness;
+    renderer.useBloom = params.bloomEnabled;   // toggle
     renderer.bloomStrength = params.bloomStrength;
     renderer.bloomRadius = params.bloomRadius;
     renderer.updateHits(hits, now, params.persistence);

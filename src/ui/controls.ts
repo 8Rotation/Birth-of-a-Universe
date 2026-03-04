@@ -63,7 +63,7 @@ export function createSensorControls(onReset: () => void) {
     shellSize: 2500,
     timeDilation: 120,
     hitSize: 3.0,
-    brightness: 2.0,
+    brightness: 1.0,   // lowered: brightness now only modulates HSL lightness, not alpha too
     persistence: 1.0,
     bloomEnabled: true,
     bloomStrength: 1.2,

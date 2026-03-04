@@ -72,7 +72,14 @@ export class SensorRenderer {
   private diskRing!: THREE.LineLoop;
 
   private pipeline: RenderPipeline | null = null;
-  private useBloom = true;
+  useBloom = true;            // public — toggled by UI
+
+  // BloomNode stores strength/radius/threshold as its own internal
+  // UniformNode instances (.strength, .radius, .threshold).  Holding a
+  // reference here lets us update .value each frame without touching the
+  // pipeline graph.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private _bloomNode: any = null;
 
   private readonly maxHits: number;
   private _ready = false;
@@ -177,12 +184,17 @@ export class SensorRenderer {
       this.pipeline = new RenderPipeline(this.renderer);
       const scenePass = pass(this.scene, this.camera);
       const scenePassColor = scenePass.getTextureNode("output");
+
+      // BloomNode internally wraps each of these as uniform() nodes, so
+      // we pass plain numbers here and drive changes via _bloomNode.*.
       const bloomPass = bloom(
         scenePassColor,
         this.bloomStrength,
         this.bloomRadius,
         this.bloomThreshold,
       );
+      // Keep a reference so render() can push slider values each frame.
+      this._bloomNode = bloomPass;
       this.pipeline.outputNode = scenePassColor.add(bloomPass);
       this.useBloom = true;
       console.log("[sensor] Bloom enabled");
@@ -222,13 +234,15 @@ export class SensorRenderer {
       const age = now - hit.born;
       const fade = Math.exp((-age / persistence) * 3);
 
-      // HSL → RGB with physics encoding
-      const lightness = Math.min(0.85, 0.35 + hit.brightness * 0.35);
-      const saturation = 0.75 + (1 - hit.brightness) * 0.2;
+      // HSL → RGB with physics encoding.
+      // brightness drives lightness [0.20 → 0.85] and saturation — not alpha.
+      // Alpha is purely fade × user brightness multiplier so brightness is
+      // applied exactly once (preventing channel saturation at mid-range β).
+      const lightness = 0.20 + hit.brightness * 0.65;
+      const saturation = 0.70 + (1 - hit.brightness) * 0.25;
       const [r, g, b] = hslToRGB(hit.hue, saturation, lightness);
 
-      // Premultiply by fade × brightness × user brightness
-      const alpha = fade * hit.brightness * this.brightnessMultiplier;
+      const alpha = fade * this.brightnessMultiplier;
       col[j3]     = r * alpha;
       col[j3 + 1] = g * alpha;
       col[j3 + 2] = b * alpha;
@@ -243,6 +257,21 @@ export class SensorRenderer {
   /** Render one frame (with or without bloom). */
   render(): void {
     if (!this._ready) return;
+
+    // Push latest UI values into BloomNode's own internal uniform nodes.
+    //
+    // NOTE: BloomNode's "radius" controls mip weight distribution, not spread
+    // distance directly.  At radius=0 the fine (tight) mips dominate, which
+    // seats the bloom halo on top of the particle and reads as blur.
+    // At radius=1 the coarse mips dominate, spreading the glow outward.
+    // This is the opposite of user-intuition ("0 = sharp, 1 = wide"), so we
+    // invert the value before passing it through.
+    if (this._bloomNode) {
+      this._bloomNode.strength.value  = this.bloomStrength;
+      this._bloomNode.radius.value    = 1 - this.bloomRadius;   // inverted ↔ intuitive
+      this._bloomNode.threshold.value = this.bloomThreshold;
+    }
+
     if (this.useBloom && this.pipeline) {
       try {
         this.pipeline.render();
