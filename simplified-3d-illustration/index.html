@@ -81,6 +81,7 @@
      computed from the Friedmann equation:</p>
   <p class="eq">&nbsp; (da̅/dτ̅)² = 1/a̅² − β/a̅⁴ − 1</p>
   <p><span class="amber">● Contraction</span> — parent star interior collapsing<br>
+     <span style="color:#fff;font-weight:600">○ Event horizon</span> — a̅ = a̅<sub>max</sub> = r<sub>S</sub> (Schwarzschild radius)<br>
      <span class="red">● Bounce hypersurface</span> — torsion halts collapse at a̅<sub>min</sub><br>
      <span class="blue">● Expansion</span> — baby universe is born<br>
      <span class="green">◉ Simulation slice</span> — the main app renders this exact cross-section</p>
@@ -94,6 +95,7 @@
 
 <!-- 3D labels projected over the canvas -->
 <div id="label-top"    class="label-3d" style="color:#ffaa44">Parent universe<br><span style="font-size:11px;color:#997733">(collapsing star interior)</span></div>
+<div id="label-horizon" class="label-3d" style="color:#ffffff;font-weight:700">Event horizon<br><span style="font-size:11px;color:#aaaaaa">a̅ = a̅<sub>max</sub> = r<sub>S</sub> (Schwarzschild radius)</span></div>
 <div id="label-bounce" class="label-3d" style="color:#ff3333;font-weight:700">Bounce hypersurface<br><span style="font-size:11px;color:#cc4444">2D sensor at this cross-section</span></div>
 <div id="label-bottom" class="label-3d" style="color:#5588ff">Baby universe<br><span style="font-size:11px;color:#336699">(expanding)</span></div>
 <div id="label-viewdir" class="label-3d" style="color:#44dd66;font-weight:600">◉ You are here<br><span style="font-size:10px;color:#33aa55">looking up at the bounce<br>(illustrative — simulation has no depth)</span></div>
@@ -309,6 +311,37 @@ const disk = new THREE.Mesh(diskGeo, diskMat);
 disk.rotation.x = -Math.PI / 2;
 disk.position.y = bounceY;
 scene.add(disk);
+
+// ─────────────────────────────────────────────────────
+//  Event horizon ring (white) at top of contraction funnel
+// ─────────────────────────────────────────────────────
+// In Poplawski 2014: a_i = r_S = 2GM/c², the initial (maximum) scale
+// factor equals the Schwarzschild radius.  In the dimensionless
+// Friedmann equation, a̅_max IS the event horizon.
+{
+  const ehRadius = RSCALE;  // a̅_max / a̅_max = 1 → full RSCALE
+  const ehY = VSCALE;       // top of the contraction cone
+
+  // Solid white ring
+  const ehRingGeo = new THREE.TorusGeometry(ehRadius, 0.022, 16, 80);
+  const ehRingMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+  const ehRing = new THREE.Mesh(ehRingGeo, ehRingMat);
+  ehRing.rotation.x = Math.PI / 2;
+  ehRing.position.y = ehY;
+  scene.add(ehRing);
+
+  // Outer glow ring
+  const ehGlowGeo = new THREE.TorusGeometry(ehRadius, 0.06, 12, 80);
+  const ehGlowMat = new THREE.MeshBasicMaterial({
+    color: 0xffffff,
+    transparent: true,
+    opacity: 0.12,
+  });
+  const ehGlow = new THREE.Mesh(ehGlowGeo, ehGlowMat);
+  ehGlow.rotation.x = Math.PI / 2;
+  ehGlow.position.y = ehY;
+  scene.add(ehGlow);
+}
 
 // ─────────────────────────────────────────────────────
 //  Cross-section rings at intervals (like latitude lines)
@@ -567,15 +600,17 @@ scene.add(betaSprite);
 // ─────────────────────────────────────────────────────
 
 const labelTop    = document.getElementById('label-top');
+const labelHorizon = document.getElementById('label-horizon');
 const labelBounce = document.getElementById('label-bounce');
 const labelBottom = document.getElementById('label-bottom');
 
 const labelViewDir = document.getElementById('label-viewdir');
 
 const labelPositions = {
-  top:    new THREE.Vector3(-RSCALE - 0.4, VSCALE * 0.7, 0),
-  bounce: new THREE.Vector3(-bounceRadius - 0.55, 0, 0),
-  bottom: new THREE.Vector3(-RSCALE - 0.4, -VSCALE * 0.7, 0),
+  top:     new THREE.Vector3(-RSCALE - 0.4, VSCALE * 0.7, 0),
+  horizon: new THREE.Vector3(-RSCALE - 0.55, VSCALE, 0),
+  bounce:  new THREE.Vector3(-bounceRadius - 0.55, 0, 0),
+  bottom:  new THREE.Vector3(-RSCALE - 0.4, -VSCALE * 0.7, 0),
   viewdir: new THREE.Vector3(-RSCALE - 1.0, -VSCALE * 0.52, 0),
 };
 
@@ -619,9 +654,10 @@ function animate() {
   updateBounceGlow(t);
 
   // Project 3D labels
-  projectLabel(labelTop,    labelPositions.top);
-  projectLabel(labelBounce, labelPositions.bounce);
-  projectLabel(labelBottom, labelPositions.bottom);
+  projectLabel(labelTop,     labelPositions.top);
+  projectLabel(labelHorizon, labelPositions.horizon);
+  projectLabel(labelBounce,  labelPositions.bounce);
+  projectLabel(labelBottom,  labelPositions.bottom);
   projectLabel(labelViewDir, labelPositions.viewdir);
 
   renderer.render(scene, camera);
