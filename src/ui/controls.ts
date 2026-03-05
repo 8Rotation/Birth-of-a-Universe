@@ -12,6 +12,7 @@
 
 import GUI from "lil-gui";
 import type { Controller } from "lil-gui";
+import type { ComputeBudget } from "./hardware-info.js";
 
 // ── Simulation parameters exposed to UI ───────────────────────────────────
 
@@ -30,6 +31,7 @@ export interface SensorParams {
   hitSize: number;       // base point size in pixels
   brightness: number;    // brightness multiplier
   persistence: number;   // fade time constant (seconds)
+  roundParticles: boolean; // circular vs square particles
 
   // Bloom
   bloomEnabled: boolean;
@@ -37,7 +39,7 @@ export interface SensorParams {
   bloomRadius: number;
 
   // Playback
-  paused: boolean;
+  frozen: boolean;
 
   // Actions
   reset: () => void;
@@ -53,6 +55,16 @@ export interface HUDData {
   flux: string;
   visible: string;
   fps: string;
+  screen: string;
+  hz: string;
+  hdr: string;
+  gamut: string;
+  // Hardware
+  cpuCores: string;
+  cpuBench: string;
+  gpu: string;
+  capability: string;
+  tier: string;
 }
 
 // ── Numeric controller descriptor ────────────────────────────────────────
@@ -70,21 +82,39 @@ interface NumCtrl {
 
 // ── Create controls ───────────────────────────────────────────────────────
 
-export function createSensorControls(onReset: () => void) {
+/**
+ * Create the sensor controls panel.
+ *
+ * @param onReset  Callback for the Clear button.
+ * @param budget   Hardware-derived compute budget — drives both default
+ *                 values and normal-mode slider ranges.  If omitted,
+ *                 falls back to mid-tier defaults.
+ */
+export function createSensorControls(onReset: () => void, budget?: ComputeBudget) {
+  // ── Slider limits from hardware detection (or sensible mid-tier fallback)
+  const sl = budget?.sliderLimits ?? {
+    particleRateMax: 8_000,
+    lMaxMax: 16,
+    persistenceMax: 12,
+    timeDilationMax: 8_000,
+    bloomStrengthMax: 3,
+  };
+
   const params: SensorParams = {
     beta: 0.10,
     perturbAmplitude: 0.12,
-    lMax: 8,
-    particleRate: 2000,
+    lMax: budget?.recommendedLMax ?? 8,
+    particleRate: budget?.particleRate ?? 2000,
     fieldEvolution: 0.1,
     timeDilation: 120,
-    hitSize: 3.0,
-    brightness: 1.0,
+    hitSize: 1.0,
+    brightness: 5.0,
     persistence: 1.0,
-    bloomEnabled: true,
+    roundParticles: true,
+    bloomEnabled: budget?.bloomDefault ?? false,
     bloomStrength: 1.2,
     bloomRadius: 0.3,
-    paused: false,
+    frozen: false,
     reset: onReset,
   };
 
@@ -112,30 +142,32 @@ export function createSensorControls(onReset: () => void) {
 
   // ── Flow ──────────────────────────────────────────────────────────
   const flow = gui.addFolder("Flow");
-  flow.add(params, "paused").name("Paused");
+  flow.add(params, "frozen").name("Freeze");
   flow.add(params, "reset").name("⟳ Clear");
 
   // ── Sensor Display ────────────────────────────────────────────────
   const display = gui.addFolder("Sensor Display");
+  display.add(params, "roundParticles").name("Round particles");
   display.add(params, "bloomEnabled").name("Bloom");
 
   // ── Numeric controller descriptors ────────────────────────────────
-  // overrideMax: slider range used in Override Mode (greatly expanded)
+  // Normal-mode max values adapt to hardware tier via `sl`.
+  // overrideMax: slider range used in Override Mode (greatly expanded).
   const numericDefs: NumCtrl[] = [
     // Collapse Physics
-    { folder: physics, prop: "beta",             label: "β spin param",        min: 0.005, max: 0.249,  step: 0.001, overrideMax: 10        },
-    { folder: physics, prop: "perturbAmplitude", label: "Inhomogeneity",       min: 0.001, max: 0.6,    step: 0.001, overrideMax: 100       },
-    { folder: physics, prop: "lMax",             label: "Turbulence (l_max)",  min: 1,     max: 24,     step: 1,     overrideMax: 512       },
+    { folder: physics, prop: "beta",             label: "β spin param",        min: 0.005, max: 0.249,              step: 0.001, overrideMax: 10        },
+    { folder: physics, prop: "perturbAmplitude", label: "Inhomogeneity",       min: 0.001, max: 0.6,                step: 0.001, overrideMax: 100       },
+    { folder: physics, prop: "lMax",             label: "Turbulence (l_max)",  min: 1,     max: sl.lMaxMax,          step: 1,     overrideMax: 512       },
     // Flow
-    { folder: flow,    prop: "particleRate",     label: "Particle rate (/s)",  min: 100,   max: 20000,  step: 100,   overrideMax: 10000000, overrideStep: 1000 },
-    { folder: flow,    prop: "fieldEvolution",   label: "Field evolution (/s)", min: 0,    max: 2,      step: 0.01,  overrideMax: 1000      },
-    { folder: flow,    prop: "timeDilation",     label: "Time dilation",       min: 1,     max: 10000,  step: 1,     overrideMax: 100000000 },
+    { folder: flow,    prop: "particleRate",     label: "Particle rate (/s)",  min: 100,   max: sl.particleRateMax,  step: 100,   overrideMax: 10000000, overrideStep: 1000 },
+    { folder: flow,    prop: "fieldEvolution",   label: "Field evolution (/s)", min: 0,    max: 2,                  step: 0.01,  overrideMax: 1000      },
+    { folder: flow,    prop: "timeDilation",     label: "Time dilation",       min: 1,     max: sl.timeDilationMax,  step: 1,     overrideMax: 100000000 },
     // Sensor Display
-    { folder: display, prop: "hitSize",          label: "Hit size (px)",       min: 1,     max: 30,     step: 0.5,   overrideMax: 10000     },
-    { folder: display, prop: "brightness",       label: "Brightness",          min: 0.1,   max: 5,      step: 0.1,   overrideMax: 10000     },
-    { folder: display, prop: "persistence",      label: "Persistence (s)",     min: 0.1,   max: 20,     step: 0.1,   overrideMax: 100000    },
-    { folder: display, prop: "bloomStrength",    label: "Bloom strength",      min: 0,     max: 3,      step: 0.1,   overrideMax: 10000     },
-    { folder: display, prop: "bloomRadius",      label: "Bloom radius",        min: 0,     max: 1,      step: 0.05,  overrideMax: 1000      },
+    { folder: display, prop: "hitSize",          label: "Hit size (px)",       min: 1,     max: 30,                 step: 0.5,   overrideMax: 10000     },
+    { folder: display, prop: "brightness",       label: "Brightness",          min: 0.1,   max: 5,                  step: 0.1,   overrideMax: 10000     },
+    { folder: display, prop: "persistence",      label: "Persistence (s)",     min: 0.1,   max: sl.persistenceMax,   step: 0.1,   overrideMax: 100000    },
+    { folder: display, prop: "bloomStrength",    label: "Bloom strength",      min: 0,     max: sl.bloomStrengthMax, step: 0.1,   overrideMax: 10000     },
+    { folder: display, prop: "bloomRadius",      label: "Bloom radius",        min: 0,     max: 1,                  step: 0.05,  overrideMax: 1000      },
   ];
 
   // Track live controllers so we can destroy & recreate on mode switch
@@ -176,6 +208,15 @@ export function createSensorControls(onReset: () => void) {
     flux: "0",
     visible: "0",
     fps: "0",
+    screen: "detecting...",
+    hz: "--",
+    hdr: "--",
+    gamut: "--",
+    cpuCores: "--",
+    cpuBench: "--",
+    gpu: "detecting...",
+    capability: "--",
+    tier: "--",
   };
 
   const hudFolder = gui.addFolder("Readout");
@@ -187,6 +228,15 @@ export function createSensorControls(onReset: () => void) {
     hudFolder.add(hud, "flux").name("Flux (/s)").listen().disable(),
     hudFolder.add(hud, "visible").name("Visible").listen().disable(),
     hudFolder.add(hud, "fps").name("FPS").listen().disable(),
+    hudFolder.add(hud, "screen").name("Screen").listen().disable(),
+    hudFolder.add(hud, "hz").name("Refresh (Hz)").listen().disable(),
+    hudFolder.add(hud, "hdr").name("HDR").listen().disable(),
+    hudFolder.add(hud, "gamut").name("Gamut").listen().disable(),
+    hudFolder.add(hud, "cpuCores").name("CPU threads").listen().disable(),
+    hudFolder.add(hud, "cpuBench").name("CPU bench").listen().disable(),
+    hudFolder.add(hud, "gpu").name("GPU").listen().disable(),
+    hudFolder.add(hud, "capability").name("Capability").listen().disable(),
+    hudFolder.add(hud, "tier").name("HW tier").listen().disable(),
   ];
 
   function updateHUD() {

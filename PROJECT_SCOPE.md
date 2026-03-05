@@ -185,7 +185,7 @@ Spectrum: C_l ∝ l^(n_s − 1) × exp(−(l/l_silk)²)
 ### How it works
 
 ```
-                    CPU (per shell)                    GPU (every frame)
+                 Worker thread (per shell)              GPU (every frame)
               ┌─────────────────────────┐         ┌──────────────────┐
   ECSKPhysics │ β → a_min, w_eff, ε, ä │         │  Three.js WebGPU │
               └────────┬────────────────┘         │  OrthographicCam │
@@ -197,8 +197,12 @@ Spectrum: C_l ∝ l^(n_s − 1) × exp(−(l/l_silk)²)
     1. Sample uniform  │ Lambert projection                 │
     2. Evaluate δ(θ,φ) │ → β_eff per point                 │
     3. Bounce props    │ → hue, brightness, size            │
-    4. Arrival times   │ → sorted by time                   │
-    5. Cursor ─────────┼──── main.ts processes arrivals ────┘
+    4. Arrival times   │ → MinHeap (priority queue)         │
+                       │                                    │
+  ── Web Worker boundary (physics-worker.ts) ──────────     │
+                       │                                    │
+  PhysicsBridge        │ batches arrive via postMessage     │
+    main.ts drains ────┼──── processes arrivals ────────────┘
                        │         ↓
                    Hit[] array → renderer.updateHits()
 ```
@@ -219,6 +223,9 @@ src/
     ecsk-physics.ts     — ECSK bounce physics (bounceProps, halfPeriod, sensitivity)
     perturbation.ts     — Spherical harmonics, spectrum, splitmix32 PRNG
     shell.ts            — Infalling shell: S² sampling, Lambert, arrival sorting
+    physics-bridge.ts   — Main-thread ↔ Web Worker bridge (async particle batches)
+    physics-worker.ts   — Off-main-thread physics: shell spawning + arrival computation
+    min-heap.ts         — O(log N) binary min-heap for pending-particle priority queue
   rendering/
     renderer.ts         — 2D sensor: OrthographicCamera, additive Points, bloom
   ui/
@@ -276,12 +283,15 @@ package.json            — three r183, lil-gui, vite 7.3.1
 - [x] `EQUATION_CATALOG.md` — 1 027-line equation reference, all 27 papers, §1–§25
 - [x] Source processing pipeline: PyMuPDF plain text → arXiv LaTeX download → `sources_marker/`
 - [x] Project cleanup: dead files removed, source-processing scripts quarantined to `source-processing/` (gitignored), all source material folders gitignored
+- [x] Full physics review against all 27 source texts (re-audit every equation) — all equations verified correct
+- [x] Second full physics review (2025-03-04) against all 29 sources incl. newly added — all equations verified correct
+- [x] `physics-bridge.ts`: Web Worker bridge — off-main-thread physics computation (~16 ms latency at 60 fps)
+- [x] `physics-worker.ts`: physics Web Worker — shell spawning + arrival computation runs in dedicated thread
+- [x] `min-heap.ts`: O(log N) priority queue for pending-particle arrivals (replaced O(N) sorted-array + splice)
 
 ## Future Work (ranked by urgency)
 
 ### P0 — Physics accuracy & hardware utilization
-- [x] Full physics review against all 27 source texts (re-audit every equation) — completed, all equations verified correct
-- [x] Second full physics review (2025-03-04) against all 29 sources incl. newly added — all equations verified correct; see review notes below
 - [ ] Review individual feature implementations against physical expectations
 - [ ] Unit tests for physics modules (ecsk-physics, perturbation, shell — pure math, very testable)
 - [ ] Performance review and profiling (identify CPU/GPU bottlenecks)
@@ -290,6 +300,31 @@ package.json            — three r183, lil-gui, vite 7.3.1
 - [ ] Smooth mode — auto-maximize resolution and refresh rate based on hardware
   (caps particle count, persistence, and bloom to sustain native refresh)
 - [ ] Frame budget system — auto-throttle shell rate to maintain target FPS
+- [ ] **Spectral index n_s slider** — expose the currently hardcoded n_s = 0.965 in
+  perturbation.ts as a UI slider. Controls power-spectrum tilt: lower n_s gives more
+  large-scale structure (big blobs), higher gives scale-invariant texture. Connected
+  to torsion-fermion coupling ξ via |ν|² = 1 − 8ξ (Sadatian & Hosseini 2025 eq. 37).
+  Trivial to implement — pure constant extraction.
+- [ ] **Curvature k selector** — add k ∈ {−1, 0, +1} dropdown. Currently hardcoded
+  to k=+1 (closed universe). Changes the "−1" in D1 to "−k". For k=0 and k=−1
+  the bounce still occurs but the turnaround/recollapse behavior differs.
+  (Cubero & Popławski 2019; Unger & Popławski 2019 eq. 7)
+- [ ] **Double bounce visualization** — for k=+1 near the Cubero & Popławski threshold
+  (C > e^{−1/2}), the closed universe exhibits two local minima in the scale factor
+  as temperature oscillates. Visually: a second wave of particles arriving after
+  the first, creating a rhythmic pulsation. Requires coupling to k and C.
+  (Cubero & Popławski 2019 §26)
+- [ ] **Anisotropy / Shear σ²** — Kantowski-Sachs interior with two independent scale
+  factors X(t), Y(t). Shear σ² = ⅓(Ẋ/X − Ẏ/Y)² competes against torsion; if shear
+  wins, no bounce occurs (Popławski 2020 eq. 25, 32; 2021 eq. 5–7). As a slider, σ₀
+  would deform the S² projection into an ellipse with axis ratio encoding X/Y. The
+  core drama of the bounce is this torsion-vs-shear competition. Requires replacing
+  single-a evolution with (X, Y) pair + modified Lambert projection.
+- [ ] **Particle production** — post-bounce fermion creation at rate ṅ_f + 3Hn_f = β_pp H⁴
+  (Popławski 2014 eq. 40–46; 2020 eq. 33; 2021 eq. 8). Critical rate β_cr ≈ 1/929.
+  Drives the transition from bounce to inflation. Visually: a second surge of
+  particles with different colors (higher T/energy) after the initial bounce wave.
+  Completes the narrative — currently the sim shows only the bounce, not the birth.
 
 ### P1 — Visual quality (first impression)
 - [ ] Review color assignment — current hue mapping (amber→violet via HSL) skews green;
@@ -327,8 +362,24 @@ package.json            — three r183, lil-gui, vite 7.3.1
   simulation itself.*
 
 ### P4 — Stretch (nice-to-have / experimental)
-- [ ] Anisotropic extension (Kantowski-Sachs with two scale factors X, Y)
-- [ ] Particle production modeling (β·H⁴ term from Poplawski 2020 eq.33)
+- [ ] **ξ-coupling slider** — generalized torsion-pseudovector strength (Lucat & Prokopek
+  2015 eq. 1): α₅ = 3πG_N ξ²/2. Standard EC is ξ=1; ξ=0 recovers GR (no bounce).
+  Mathematically equivalent to rescaling β by ξ², so no new dynamics — but high
+  educational value: the user can "turn off torsion" and watch the bounce vanish.
+- [ ] **EOS convention toggle** — switch between spin-fluid (p̃ = p − αn²) and Dirac-
+  spinor (p̃ = p + αn²) conventions for the w_eff color encoding. Both give identical
+  D1 dynamics; only the hue mapping changes. Spin-fluid: w < −⅓ at bounce (violet);
+  Dirac: w > 1 (amber-red). Already commented in ecsk-physics.ts lines 88–95.
+  (EQUATION_CATALOG §11 cross-check 2, §14, §26)
+- [ ] **Adiabatic invariant C threshold** — expose C = aT/(a_cr T_cr) as a dial.
+  For k=+1, C ≥ 8/9 is necessary for a closed universe to exist at all
+  (Unger & Popławski 2019 eq. 7–8). Below threshold, the solution vanishes —
+  particles stop appearing. Dramatic on/off transition. Requires reparametrizing
+  the Friedmann equation from β to (C, k).
+- [ ] **Temperature color encoding** — alternative hue mode mapping temperature T ∝ 1/a̅
+  instead of w_eff. High-T hits glow white-blue (Planck-scale), cooling hits shift
+  to red. More intuitive "thermal" look for non-physicists. T_max = 1.15 × 10³² K
+  (Popławski 2014 eq. 21). Offered as a dropdown toggle in Display panel.
 - [ ] Time-lapse accumulation — long-exposure composite of all arrivals (static image)
 - [ ] A/B split view — compare two β values side-by-side on same perturbation seed
 - [ ] Parameter animation — auto-sweep β or amplitude for cinematic sequences

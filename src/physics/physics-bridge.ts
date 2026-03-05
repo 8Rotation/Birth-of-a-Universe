@@ -51,6 +51,7 @@ export class PhysicsBridge {
     simTime: number,
     particleRate: number,
     params: {
+      beta: number;
       perturbAmplitude: number;
       lMax: number;
       timeDilation: number;
@@ -72,6 +73,16 @@ export class PhysicsBridge {
     this.generation++;
     this.worker.postMessage({ type: "updateBeta", beta, generation: this.generation });
     // Discard any queued particles baked at the old β
+    this.batches.length = 0;
+  }
+
+  /**
+   * Flush the pipeline — discard all in-flight and queued particle
+   * batches.  Bumps the generation so any worker responses still in
+   * transit are silently dropped by the onmessage handler.
+   */
+  flushPipeline(): void {
+    this.generation++;
     this.batches.length = 0;
   }
 

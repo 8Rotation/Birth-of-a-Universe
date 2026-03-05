@@ -13,12 +13,33 @@
  *
  * The disk radius is 2 (matching the Lambert projection radius),
  * viewed with an orthographic camera looking down -Z.
+ *
+ * NOTE: WebGPU point primitives are hard-capped at 1×1 pixel by the spec.
+ * To get variable-sized particles we use instanced Sprites with
+ * PointsNodeMaterial, which expands a quad per instance in the vertex
+ * shader and fully supports sizeNode.
  */
 
 import * as THREE from "three";
-import { WebGPURenderer, RenderPipeline } from "three/webgpu";
-import { pass } from "three/tsl";
+import {
+  WebGPURenderer,
+  RenderPipeline,
+  PointsNodeMaterial,
+} from "three/webgpu";
+import {
+  pass,
+  uniform,
+  instancedDynamicBufferAttribute,
+  uv,
+  float,
+  length,
+  smoothstep,
+  mix,
+  Fn,
+} from "three/tsl";
 import { bloom } from "three/addons/tsl/display/BloomNode.js";
+import type { ScreenInfo } from "../ui/screen-info.js";
+import { recommendedPixelRatioCap, hitSizeScale, recommendedExposure } from "../ui/screen-info.js";
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -65,11 +86,22 @@ export class SensorRenderer {
   readonly scene: THREE.Scene;
   readonly camera: THREE.OrthographicCamera;
 
-  private points!: THREE.Points;
-  private posAttr!: THREE.BufferAttribute;
-  private colorAttr!: THREE.BufferAttribute;
-  private material!: THREE.PointsMaterial;
+  // Instanced sprite for particle hits (replaces THREE.Points which is
+  // limited to 1px in WebGPU).
+  private sprite!: THREE.Sprite;
+  private posAttr!: THREE.InstancedBufferAttribute;
+  private colorAttr!: THREE.InstancedBufferAttribute;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private material!: any; // PointsNodeMaterial
   private diskRing!: THREE.LineLoop;
+
+  // TSL uniform for hit size — drives sizeNode on the material so the
+  // slider value propagates to the GPU every frame.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private _sizeUniform!: any;
+  // TSL uniform: 1.0 = round particles, 0.0 = square
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private _roundUniform!: any;
 
   private pipeline: RenderPipeline | null = null;
   useBloom = true;
@@ -87,9 +119,15 @@ export class SensorRenderer {
   // ── Tunable parameters (set from controls each frame) ─────────────
   hitBaseSize = 3.0;
   brightnessMultiplier = 2.0;
+  roundParticles = true;
   bloomStrength: number;
   bloomRadius: number;
   bloomThreshold: number;
+
+  /** Current hit-size scale factor derived from screen density. */
+  hitSizeScaleFactor = 1.0;
+  /** Current pixel ratio cap from screen detection. */
+  private _pixelRatioCap = 2;
 
   constructor(config: SensorRendererConfig) {
     this._capacity = config.initialCapacity ?? 65_536;
@@ -123,6 +161,38 @@ export class SensorRenderer {
     window.addEventListener("resize", () => this.onResize());
   }
 
+  /**
+   * Update renderer to match detected screen characteristics.
+   * Called once after init and whenever the screen changes (monitor switch).
+   */
+  applyScreenInfo(info: ScreenInfo): void {
+    this._pixelRatioCap = recommendedPixelRatioCap(info);
+    this.hitSizeScaleFactor = hitSizeScale(info);
+
+    const effectiveDpr = Math.min(info.dpr, this._pixelRatioCap);
+    this.renderer.setPixelRatio(effectiveDpr);
+    this.renderer.setSize(info.viewportWidth, info.viewportHeight);
+
+    // Adjust tone mapping exposure for HDR displays
+    this.renderer.toneMappingExposure = recommendedExposure(info);
+
+    // Update camera aspect
+    const aspect = info.viewportWidth / info.viewportHeight;
+    const V = 2.5;
+    this.camera.left   = -V * aspect;
+    this.camera.right  =  V * aspect;
+    this.camera.top    =  V;
+    this.camera.bottom = -V;
+    this.camera.updateProjectionMatrix();
+    try { this.pipeline?.setSize?.(info.viewportWidth, info.viewportHeight); } catch { /* noop */ }
+
+    console.log(
+      `[sensor] Screen adapted: DPR ${effectiveDpr.toFixed(2)} (cap ${this._pixelRatioCap}), ` +
+      `hitScale ${this.hitSizeScaleFactor.toFixed(2)}, render ${info.renderWidth}×${info.renderHeight}` +
+      `${info.hdrCapable ? `, HDR/${info.colorGamut} exposure=${this.renderer.toneMappingExposure}` : ", SDR"}`
+    );
+  }
+
   get ready(): boolean {
     return this._ready;
   }
@@ -133,32 +203,57 @@ export class SensorRenderer {
     await this.renderer.init();
     console.log("[sensor] WebGPU ready");
 
-    // ── Point cloud for hits ──────────────────────────────────────────
-    const geo = new THREE.BufferGeometry();
+    // ── Instanced sprite for particle hits ────────────────────────────
+    // WebGPU point primitives are always 1px.  PointsNodeMaterial on a
+    // Sprite expands a screen-aligned quad per instance, honouring
+    // sizeNode for arbitrary pixel sizes.
+
     const positions = new Float32Array(this._capacity * 3);
-    const colors = new Float32Array(this._capacity * 3);
+    const colors    = new Float32Array(this._capacity * 3);
 
-    this.posAttr = new THREE.BufferAttribute(positions, 3);
+    this.posAttr = new THREE.InstancedBufferAttribute(positions, 3);
     this.posAttr.setUsage(THREE.DynamicDrawUsage);
-    geo.setAttribute("position", this.posAttr);
 
-    this.colorAttr = new THREE.BufferAttribute(colors, 3);
+    this.colorAttr = new THREE.InstancedBufferAttribute(colors, 3);
     this.colorAttr.setUsage(THREE.DynamicDrawUsage);
-    geo.setAttribute("color", this.colorAttr);
 
-    this.material = new THREE.PointsMaterial({
-      size: this.hitBaseSize,
-      vertexColors: true,
-      sizeAttenuation: false, // pixel-sized (orthographic)
-      blending: THREE.AdditiveBlending,
+    // TSL uniforms (reactive every frame)
+    this._sizeUniform = uniform(this.hitBaseSize);
+    this._roundUniform = uniform(1.0);
+
+    this.material = new PointsNodeMaterial({
+      sizeAttenuation: false,  // pixel-sized (orthographic)
       transparent: true,
       depthWrite: false,
+      blending: THREE.AdditiveBlending,
     });
 
-    this.points = new THREE.Points(geo, this.material);
-    this.points.frustumCulled = false;
-    this.scene.add(this.points);
-    geo.setDrawRange(0, 0);
+    // Wire instanced attributes through TSL nodes
+    this.material.positionNode = instancedDynamicBufferAttribute(this.posAttr, "vec3");
+    this.material.colorNode    = instancedDynamicBufferAttribute(this.colorAttr, "vec3");
+    this.material.sizeNode     = this._sizeUniform;
+
+    // ── Circular particle clipping (toggleable via _roundUniform) ─────
+    // The sprite quad has UV (0,0)→(1,1).  When round=1, discard fragments
+    // outside a soft circle; when round=0, all fragments pass (square).
+    // Uses mix() so the shader is compiled once — switching is just a
+    // uniform change, zero recompilation cost.
+    const roundU = this._roundUniform;
+    const circleOpacity = Fn(() => {
+      const coord = uv().sub(float(0.5));        // centre at origin
+      const dist  = length(coord);                // distance from centre
+      // Soft edge: fully opaque inside r=0.45, fades to 0 at r=0.50
+      const circle = smoothstep(float(0.50), float(0.45), dist);
+      // mix(1.0, circle, round): square when round=0, circle when round=1
+      return mix(float(1.0), circle, roundU);
+    });
+    this.material.opacityNode = circleOpacity();
+    this.material.alphaTest = 0.01;
+
+    this.sprite = new THREE.Sprite(this.material);
+    this.sprite.count = 0;  // no visible instances yet
+    this.sprite.frustumCulled = false;
+    this.scene.add(this.sprite);
 
     // ── Lambert disk boundary ring ────────────────────────────────────
     const ringGeo = new THREE.BufferGeometry();
@@ -254,26 +349,36 @@ export class SensorRenderer {
 
     this.posAttr.needsUpdate = true;
     this.colorAttr.needsUpdate = true;
-    this.points.geometry.setDrawRange(0, n);
-    this.material.size = this.hitBaseSize;
+    this.sprite.count = n;
+
+    // Push current values into TSL uniforms (WebGPU-reactive)
+    // Apply screen-density scaling so particles stay proportional across displays
+    this._sizeUniform.value = this.hitBaseSize * this.hitSizeScaleFactor;
+    this._roundUniform.value = this.roundParticles ? 1.0 : 0.0;
   }
 
   /**
    * Grow GPU position + color buffers to accommodate at least `needed` hits.
    * Doubles capacity repeatedly until sufficient, then replaces the
-   * BufferAttributes on the geometry (old GPU buffers are released).
+   * InstancedBufferAttributes and re-wires the TSL nodes on the material.
    */
   private _growBuffers(needed: number): void {
     while (this._capacity < needed) this._capacity *= 2;
-    const geo = this.points.geometry;
 
-    this.posAttr = new THREE.BufferAttribute(new Float32Array(this._capacity * 3), 3);
+    this.posAttr = new THREE.InstancedBufferAttribute(
+      new Float32Array(this._capacity * 3), 3,
+    );
     this.posAttr.setUsage(THREE.DynamicDrawUsage);
-    geo.setAttribute("position", this.posAttr);
 
-    this.colorAttr = new THREE.BufferAttribute(new Float32Array(this._capacity * 3), 3);
+    this.colorAttr = new THREE.InstancedBufferAttribute(
+      new Float32Array(this._capacity * 3), 3,
+    );
     this.colorAttr.setUsage(THREE.DynamicDrawUsage);
-    geo.setAttribute("color", this.colorAttr);
+
+    // Re-wire TSL instanced-attribute nodes to point at the new buffers
+    this.material.positionNode = instancedDynamicBufferAttribute(this.posAttr, "vec3");
+    this.material.colorNode    = instancedDynamicBufferAttribute(this.colorAttr, "vec3");
+    this.material.needsUpdate  = true;
 
     console.log(`[sensor] GPU buffer grown → ${this._capacity} hits (${(this._capacity * 24 / 1024 / 1024).toFixed(1)} MB)`);
   }
@@ -323,7 +428,7 @@ export class SensorRenderer {
 
   dispose(): void {
     this.renderer.dispose();
-    this.points.geometry.dispose();
+    this.sprite.geometry.dispose();
     this.material.dispose();
   }
 }

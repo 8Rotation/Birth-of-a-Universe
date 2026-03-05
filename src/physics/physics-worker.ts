@@ -84,6 +84,18 @@ _self.onmessage = (e: MessageEvent) => {
       // Drop stale ticks that were queued before a reset/updateBeta
       if (msg.generation !== undefined && msg.generation < generation) break;
 
+      // Adopt the latest generation so responses carry the current tag.
+      // Without this, flushPipeline() bumps the bridge generation but the
+      // worker keeps stamping responses with the old value — the bridge
+      // then silently discards every response as "stale".
+      if (msg.generation !== undefined) generation = msg.generation;
+
+      // Continuously track β from tick params so slider drags
+      // propagate without a disruptive generation bump.
+      if (msg.beta !== undefined && Math.abs(msg.beta - physics.beta) > 1e-6) {
+        physics = new ECSKPhysics(msg.beta);
+      }
+
       // Sync emitter with latest slider values
       emitter.update(
         physics,

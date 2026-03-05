@@ -61,8 +61,11 @@ declare module "three/webgpu" {
     depthWrite: boolean;
     colorNode: any;
     sizeNode: any;
+    positionNode: any;
+    fragmentNode: any;
     vertexColorNode: any;
     opacityNode: any;
+    needsUpdate: boolean;
   }
 
   export class SpriteNodeMaterial {
@@ -111,6 +114,9 @@ declare module "three/tsl" {
   export function dot(a: any, b: any): any;
   export function cross(a: any, b: any): any;
   export function select(condition: any, a: any, b: any): any;
+  export function instancedBufferAttribute(attr: any, type?: string, stride?: number, offset?: number): any;
+  export function instancedDynamicBufferAttribute(attr: any, type?: string, stride?: number, offset?: number): any;
+  export function Discard(conditional?: any): any;
   export const time: any;
   export const deltaTime: any;
   export const positionLocal: any;

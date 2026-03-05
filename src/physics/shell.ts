@@ -191,8 +191,11 @@ export class StreamEmitter {
       const betaEff = this.physics.beta * (1 + delta);
       const props   = this.physics.bounceProps(betaEff);
 
-      // Arrival time relative to now
-      tBuf[i] = now + sens * (betaEff - this.physics.beta) * this.timeDilation;
+      // Arrival time relative to now — clamped to prevent pathological
+      // delays when sensitivity diverges near β → 1/4.
+      const rawDelay = sens * (betaEff - this.physics.beta) * this.timeDilation;
+      const MAX_DELAY = 8.0;
+      tBuf[i] = now + Math.max(-MAX_DELAY, Math.min(rawDelay, MAX_DELAY));
 
       accBuf[i] = props.acc;
       wBuf[i]   = props.wEff;
