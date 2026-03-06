@@ -39,7 +39,14 @@ import {
 } from "three/tsl";
 import { bloom } from "three/addons/tsl/display/BloomNode.js";
 import type { ScreenInfo } from "../ui/screen-info.js";
-import { recommendedPixelRatioCap, hitSizeScale, recommendedExposure } from "../ui/screen-info.js";
+import {
+  recommendedPixelRatioCap,
+  hitSizeScale,
+  recommendedExposure,
+  SDR_REFERENCE_WHITE_NITS,
+  DEFAULT_HDR_PEAK_NITS,
+  epsToNits,
+} from "../ui/screen-info.js";
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -50,11 +57,23 @@ export interface SensorRendererConfig {
   bloomThreshold?: number;
 }
 
+/**
+ * HDR rendering mode.
+ *   - 'full':  True HDR output (rgba16float canvas + extended tone mapping).
+ *             Particle brightness maps to real nits on the display.
+ *   - 'soft':  HDR-capable display but browser/GPU can't do extended canvas.
+ *             Uses linear tone mapping + nits-based color encoding for wider
+ *             perceptual range than ACES.
+ *   - 'none':  Standard SDR (ACES Filmic tone mapping, proxy brightness).
+ */
+export type HDRMode = 'full' | 'soft' | 'none';
+
 export interface Hit {
   x: number;         // Lambert x  (−2 .. 2)
   y: number;         // Lambert y  (−2 .. 2)
   hue: number;       // 0-360  (w_eff mapping)
-  brightness: number; // 0-1   (energy density)
+  brightness: number; // 0-1   (log-compressed energy density, for SDR)
+  eps: number;       // raw energy density at bounce (1/a_min⁴, for HDR)
   size: number;      // 0-1   (bounce kick)
   tailAngle: number; // 0-2π  (unused for now, reserved for flow tails)
   born: number;      // wall-clock second when this hit appeared
@@ -78,7 +97,16 @@ function hslToRGB(h: number, s: number, l: number): [number, number, number] {
   else              { r = c; g = 0; b = x; }
   return [r + m, g + m, b + m];
 }
+// ── Renderer constants ──────────────────────────────────────────────────────
 
+/** Orthographic camera half-extent in world units (disk radius = 2). */
+const CAMERA_HALF_SIZE = 2.5;
+/** Number of line segments for the Lambert disk boundary ring. */
+const RING_SEGMENTS = 128;
+/** Default initial GPU buffer capacity when hardware budget is unavailable. */
+const DEFAULT_INITIAL_CAPACITY = 65_536;
+/** Fixed outer radius for circular particle clipping. */
+const CIRCLE_OUTER_R = 0.50;
 // ── Sensor Renderer ───────────────────────────────────────────────────────
 
 export class SensorRenderer {
@@ -94,6 +122,7 @@ export class SensorRenderer {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private material!: any; // PointsNodeMaterial
   private diskRing!: THREE.LineLoop;
+  private _ringMaterial!: THREE.LineBasicMaterial;
 
   // TSL uniform for hit size — drives sizeNode on the material so the
   // slider value propagates to the GPU every frame.
@@ -102,6 +131,9 @@ export class SensorRenderer {
   // TSL uniform: 1.0 = round particles, 0.0 = square
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private _roundUniform!: any;
+  // TSL uniform: soft-edge width for circular particles
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private _softEdgeUniform!: any;
 
   private pipeline: RenderPipeline | null = null;
   useBloom = true;
@@ -123,21 +155,51 @@ export class SensorRenderer {
   bloomStrength: number;
   bloomRadius: number;
   bloomThreshold: number;
+  fadeSharpness = 1.0;
+
+  // Color tuning
+  lightnessFloor = 0.20;
+  lightnessRange = 0.65;
+  saturationFloor = 0.70;
+  saturationRange = 0.25;
+
+  // Ring
+  ringOpacity = 0.3;
+  ringColor = 0x502008;
+
+  // HDR exposure (soft-HDR path)
+  softHdrExposure = 1.6;
+
+  // Particle edge softness (0 = hard, 0.5 = very soft)
+  particleSoftEdge = 0.05;
 
   /** Current hit-size scale factor derived from screen density. */
   hitSizeScaleFactor = 1.0;
   /** Current pixel ratio cap from screen detection. */
   private _pixelRatioCap = 2;
+  // ── HDR state ─────────────────────────────────────────────────────────
+  private _hdrMode: HDRMode = 'none';
+  private _peakNits = SDR_REFERENCE_WHITE_NITS;   // 203 until overridden
+  /**
+   * Reference value for the brightness slider in SDR mode.
+   * In HDR, the slider is normalised against this so that the default
+   * slider position (≈5.0) maps to nits-accurate brightness, and moving
+   * the slider still has the same perceptual feel.
+   */
+  private static readonly SDR_BRIGHTNESS_REF = 5.0;
+
+  /** Active HDR rendering mode ('full' | 'soft' | 'none'). */
+  get hdrMode(): HDRMode { return this._hdrMode; }
 
   constructor(config: SensorRendererConfig) {
-    this._capacity = config.initialCapacity ?? 65_536;
+    this._capacity = config.initialCapacity ?? DEFAULT_INITIAL_CAPACITY;
     this.bloomStrength = config.bloomStrength ?? 1.2;
     this.bloomRadius = config.bloomRadius ?? 0.3;
     this.bloomThreshold = config.bloomThreshold ?? 0.05;
 
     // ── WebGPU renderer ───────────────────────────────────────────────
     this.renderer = new WebGPURenderer({ antialias: true });
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, this._pixelRatioCap));
     this.renderer.setSize(window.innerWidth, window.innerHeight);
     this.renderer.setClearColor(0x000000, 1);
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -149,7 +211,7 @@ export class SensorRenderer {
 
     // ── Orthographic camera (fits Lambert disk with padding) ──────────
     const aspect = window.innerWidth / window.innerHeight;
-    const V = 2.5; // half-size in world units (disk radius = 2)
+    const V = CAMERA_HALF_SIZE;
     this.camera = new THREE.OrthographicCamera(
       -V * aspect, V * aspect,
       V, -V,
@@ -173,12 +235,23 @@ export class SensorRenderer {
     this.renderer.setPixelRatio(effectiveDpr);
     this.renderer.setSize(info.viewportWidth, info.viewportHeight);
 
-    // Adjust tone mapping exposure for HDR displays
-    this.renderer.toneMappingExposure = recommendedExposure(info);
+    // Tone mapping exposure: only relevant for SDR and soft-HDR paths.
+    // Full HDR uses NoToneMapping (set in _setupHDR, preserved here).
+    if (this._hdrMode === 'none') {
+      this.renderer.toneMappingExposure = recommendedExposure(info);
+    } else if (this._hdrMode === 'soft') {
+      this.renderer.toneMappingExposure = recommendedExposure(info);
+    }
+    // 'full' → exposure stays at 1.0 (set by _setupHDR)
+
+    // Update peak nits if the display changed and we’re in an HDR mode
+    if (this._hdrMode !== 'none') {
+      this._peakNits = info.peakBrightnessNits ?? DEFAULT_HDR_PEAK_NITS;
+    }
 
     // Update camera aspect
     const aspect = info.viewportWidth / info.viewportHeight;
-    const V = 2.5;
+    const V = CAMERA_HALF_SIZE;
     this.camera.left   = -V * aspect;
     this.camera.right  =  V * aspect;
     this.camera.top    =  V;
@@ -188,8 +261,9 @@ export class SensorRenderer {
 
     console.log(
       `[sensor] Screen adapted: DPR ${effectiveDpr.toFixed(2)} (cap ${this._pixelRatioCap}), ` +
-      `hitScale ${this.hitSizeScaleFactor.toFixed(2)}, render ${info.renderWidth}×${info.renderHeight}` +
-      `${info.hdrCapable ? `, HDR/${info.colorGamut} exposure=${this.renderer.toneMappingExposure}` : ", SDR"}`
+      `hitScale ${this.hitSizeScaleFactor.toFixed(2)}, render ${info.renderWidth}×${info.renderHeight}, ` +
+      `HDR mode: ${this._hdrMode}` +
+      (this._hdrMode !== 'none' ? ` (~${this._peakNits} nits)` : '')
     );
   }
 
@@ -197,11 +271,126 @@ export class SensorRenderer {
     return this._ready;
   }
 
-  /** Initialize WebGPU and build the scene. */
-  async init(): Promise<void> {
+  // ── HDR canvas configuration ────────────────────────────────────────────
+
+  /**
+   * Attempt to configure the WebGPU canvas for true HDR output.
+   * Falls back through: full → soft → none.
+   *
+   * Full HDR requires:
+   *   - `rgba16float` canvas format
+   *   - `toneMapping: { mode: 'extended' }` on the canvas context
+   *   - Values > 1.0 in the framebuffer map to brightness above SDR white
+   *
+   * If the browser or GPU doesn’t support the extended canvas, we fall back
+   * to “soft” HDR (linear tone mapping + nits-based color encoding) which
+   * still looks wider-range than SDR ACES.
+   */
+  private _setupHDR(info: ScreenInfo): void {
+    this._peakNits = info.peakBrightnessNits ?? DEFAULT_HDR_PEAK_NITS;
+
+    // ── Tier 1: True HDR canvas (rgba16float + extended tone mapping) ──
+    try {
+      const canvas = this.renderer.domElement;
+      const ctx = canvas.getContext('webgpu') as GPUCanvasContext | null;
+      if (!ctx) throw new Error('No WebGPU context on canvas');
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const backend = (this.renderer as any).backend;
+      const device: GPUDevice | undefined = backend?.device;
+      if (!device) throw new Error('WebGPU device not available on backend');
+
+      // Reconfigure the swap chain for HDR output.
+      // `rgba16float` gives 16-bit float per channel (supports values > 1.0).
+      // `toneMapping: extended` tells the compositor to display values > 1.0
+      // as brighter than SDR white, up to the display’s peak luminance.
+      const hdrConfig: GPUCanvasConfiguration = {
+        device,
+        format: 'rgba16float' as GPUTextureFormat,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        colorSpace: 'srgb' as any,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        toneMapping: { mode: 'extended' } as any,
+        usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
+        alphaMode: 'premultiplied',
+      };
+
+      ctx.configure(hdrConfig);
+
+      // Patch Three.js internals so it uses the new format for pipeline
+      // creation and future reconfigures (e.g. on resize).
+      if (backend.utils?.getPreferredCanvasFormat) {
+        backend.utils.getPreferredCanvasFormat = () => 'rgba16float';
+      }
+
+      // Override _configureContext so resizes preserve HDR settings.
+      // eslint-disable-next-line @typescript-eslint/no-this-alias
+      const self = this;
+      if (typeof backend._configureContext === 'function') {
+        const origConfigure = backend._configureContext.bind(backend);
+        backend._configureContext = function () {
+          try {
+            this.context.configure({
+              device: this.device,
+              format: 'rgba16float',
+              colorSpace: 'srgb',
+              toneMapping: { mode: 'extended' },
+              usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
+              alphaMode: 'premultiplied',
+            });
+          } catch {
+            // If HDR reconfigure fails (e.g. device lost), fall back to SDR.
+            origConfigure();
+            self._hdrMode = 'soft';
+          }
+        };
+      }
+
+      // No Three.js tone mapping — we encode nits directly into the
+      // framebuffer and let the extended canvas handle the display mapping.
+      this.renderer.toneMapping = THREE.NoToneMapping;
+      this.renderer.toneMappingExposure = 1.0;
+
+      this._hdrMode = 'full';
+      console.log(
+        `[sensor] HDR FULL: rgba16float / srgb / extended, ` +
+        `peak ~${this._peakNits} nits`
+      );
+      return;
+    } catch (e) {
+      console.warn('[sensor] HDR canvas setup failed, trying soft HDR:', e);
+    }
+
+    // ── Tier 2: Soft HDR (standard canvas, linear tone mapping) ────────
+    // Nits-based color encoding still spreads values wider than ACES,
+    // and LinearToneMapping preserves more of the extended range before
+    // the 8-bit canvas clips.  Bloom bleeds the clipped energy outward
+    // for a wider perceived brightness range.
+    this.renderer.toneMapping = THREE.LinearToneMapping;
+    this.renderer.toneMappingExposure = this.softHdrExposure;
+    this._hdrMode = 'soft';
+    console.log(
+      `[sensor] HDR SOFT: standard canvas + linear TM, ` +
+      `peak ~${this._peakNits} nits`
+    );
+  }
+
+  /**
+   * Initialize WebGPU, optionally set up the HDR pipeline, and build the
+   * scene.  If `screenInfo` indicates an HDR-capable display, attempts
+   * to configure a true HDR canvas before any GPU pipelines are compiled.
+   */
+  async init(screenInfo?: ScreenInfo): Promise<void> {
     console.log("[sensor] Initializing WebGPU...");
     await this.renderer.init();
     console.log("[sensor] WebGPU ready");
+
+    // ── HDR pipeline setup (must happen BEFORE scene/pipeline creation
+    //    so that GPU pipelines are compiled against the correct canvas
+    //    format from the start) ──────────────────────────────────
+    if (screenInfo?.hdrCapable) {
+      this._setupHDR(screenInfo);
+    }
 
     // ── Instanced sprite for particle hits ────────────────────────────
     // WebGPU point primitives are always 1px.  PointsNodeMaterial on a
@@ -220,6 +409,7 @@ export class SensorRenderer {
     // TSL uniforms (reactive every frame)
     this._sizeUniform = uniform(this.hitBaseSize);
     this._roundUniform = uniform(1.0);
+    this._softEdgeUniform = uniform(this.particleSoftEdge);
 
     this.material = new PointsNodeMaterial({
       sizeAttenuation: false,  // pixel-sized (orthographic)
@@ -239,11 +429,13 @@ export class SensorRenderer {
     // Uses mix() so the shader is compiled once — switching is just a
     // uniform change, zero recompilation cost.
     const roundU = this._roundUniform;
+    const softEdgeU = this._softEdgeUniform;
     const circleOpacity = Fn(() => {
       const coord = uv().sub(float(0.5));        // centre at origin
       const dist  = length(coord);                // distance from centre
-      // Soft edge: fully opaque inside r=0.45, fades to 0 at r=0.50
-      const circle = smoothstep(float(0.50), float(0.45), dist);
+      // Soft edge: fully opaque inside r=(OUTER_R - softEdge), fades to 0 at r=OUTER_R
+      const innerR = float(CIRCLE_OUTER_R).sub(softEdgeU);
+      const circle = smoothstep(float(CIRCLE_OUTER_R), innerR, dist);
       // mix(1.0, circle, round): square when round=0, circle when round=1
       return mix(float(1.0), circle, roundU);
     });
@@ -258,20 +450,17 @@ export class SensorRenderer {
     // ── Lambert disk boundary ring ────────────────────────────────────
     const ringGeo = new THREE.BufferGeometry();
     const ringPts: number[] = [];
-    const SEGS = 128;
-    for (let i = 0; i <= SEGS; i++) {
-      const a = (i / SEGS) * Math.PI * 2;
+    for (let i = 0; i <= RING_SEGMENTS; i++) {
+      const a = (i / RING_SEGMENTS) * Math.PI * 2;
       ringPts.push(2 * Math.cos(a), 2 * Math.sin(a), 0);
     }
     ringGeo.setAttribute("position", new THREE.Float32BufferAttribute(ringPts, 3));
-    this.diskRing = new THREE.LineLoop(
-      ringGeo,
-      new THREE.LineBasicMaterial({
-        color: 0x502008,
-        transparent: true,
-        opacity: 0.3,
-      }),
-    );
+    this._ringMaterial = new THREE.LineBasicMaterial({
+      color: this.ringColor,
+      transparent: true,
+      opacity: this.ringOpacity,
+    });
+    this.diskRing = new THREE.LineLoop(ringGeo, this._ringMaterial);
     this.scene.add(this.diskRing);
 
     // ── Bloom post-processing ─────────────────────────────────────────
@@ -329,22 +518,51 @@ export class SensorRenderer {
       pos[j3 + 1] = hit.y;
       pos[j3 + 2] = 0;
 
-      // Compute fade alpha from age
-      const age = now - hit.born;
-      const fade = Math.exp((-age / persistence) * 3);
+      // Compute fade alpha from age.
+      // Future particles (born > now, age < 0) are clamped to age = 0 so
+      // they appear at full brightness until their bounce moment arrives,
+      // then fade normally.  These represent not-yet-bounced regions of S²
+      // approaching peak density — physically correct to show as bright.
+      const age = Math.max(0, now - hit.born);
+      // Weibull stretched exponential: sharpness controls curve *shape*
+      // independently of persistence (time scale).
+      //   k=1: standard exponential (gradual tail)
+      //   k>1: stays bright then drops sharply (Gaussian-like at k=2)
+      //   k<1: fast initial dim, very long tail
+      const fade = Math.exp(-Math.pow(age / persistence, this.fadeSharpness));
 
       // HSL → RGB with physics encoding.
-      // brightness drives lightness [0.20 → 0.85] and saturation — not alpha.
-      // Alpha is purely fade × user brightness multiplier so brightness is
-      // applied exactly once (preventing channel saturation at mid-range β).
-      const lightness = 0.20 + hit.brightness * 0.65;
-      const saturation = 0.70 + (1 - hit.brightness) * 0.25;
+      // brightness drives lightness and saturation (tunable ranges).
+      // Identical in both SDR and HDR — the base color character is the same.
+      const lightness = this.lightnessFloor + hit.brightness * this.lightnessRange;
+      const saturation = this.saturationFloor + (1 - hit.brightness) * this.saturationRange;
       const [r, g, b] = hslToRGB(hit.hue, saturation, lightness);
 
-      const alpha = fade * this.brightnessMultiplier;
-      col[j3]     = r * alpha;
-      col[j3 + 1] = g * alpha;
-      col[j3 + 2] = b * alpha;
+      // ── Brightness scaling ───────────────────────────────────────────
+      // Same structure (fade × scale × multiplier), different scale.
+      //
+      // SDR:  scale = brightnessMultiplier (user controls perceived brightness;
+      //        brightness [0–1] is already baked into HSL lightness;
+      //        ACES compresses the result)
+      // HDR:  scale = epsToNits(eps) / SDR_WHITE  (raw physics energy density
+      //        → real display nits; multiplier normalised so the default
+      //        slider position ≈ nits-accurate)
+      //
+      // In HDR the eps→nits mapping is LINEAR, so particles whose physics
+      // energy density is 2× will appear 2× as bright on the display.
+      let scale: number;
+      if (this._hdrMode !== 'none') {
+        const nits = epsToNits(hit.eps, this._peakNits);
+        const linearRelSDR = nits / SDR_REFERENCE_WHITE_NITS;
+        scale = fade * linearRelSDR
+              * (this.brightnessMultiplier / SensorRenderer.SDR_BRIGHTNESS_REF);
+      } else {
+        scale = fade * this.brightnessMultiplier;
+      }
+
+      col[j3]     = r * scale;
+      col[j3 + 1] = g * scale;
+      col[j3 + 2] = b * scale;
     }
 
     this.posAttr.needsUpdate = true;
@@ -353,8 +571,15 @@ export class SensorRenderer {
 
     // Push current values into TSL uniforms (WebGPU-reactive)
     // Apply screen-density scaling so particles stay proportional across displays
+    // Update ring opacity and colour
+    if (this._ringMaterial) {
+      this._ringMaterial.opacity = this.ringOpacity;
+      this._ringMaterial.color.set(this.ringColor);
+    }
+
     this._sizeUniform.value = this.hitBaseSize * this.hitSizeScaleFactor;
     this._roundUniform.value = this.roundParticles ? 1.0 : 0.0;
+    this._softEdgeUniform.value = this.particleSoftEdge;
   }
 
   /**
@@ -387,6 +612,13 @@ export class SensorRenderer {
   render(): void {
     if (!this._ready) return;
 
+    // Push soft-HDR exposure each frame so the UI slider takes effect live.
+    // Full HDR uses NoToneMapping (exposure irrelevant); SDR uses
+    // screen-detected exposure (set in applyScreenInfo, not overridden here).
+    if (this._hdrMode === 'soft') {
+      this.renderer.toneMappingExposure = this.softHdrExposure;
+    }
+
     // Push latest UI values into BloomNode's own internal uniform nodes.
     //
     // NOTE: BloomNode's "radius" controls mip weight distribution, not spread
@@ -416,7 +648,7 @@ export class SensorRenderer {
     const w = window.innerWidth;
     const h = window.innerHeight;
     const aspect = w / h;
-    const V = 2.5;
+    const V = CAMERA_HALF_SIZE;
     this.camera.left   = -V * aspect;
     this.camera.right  =  V * aspect;
     this.camera.top    =  V;

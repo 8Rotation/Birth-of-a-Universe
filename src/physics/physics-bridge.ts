@@ -11,15 +11,32 @@
 
 import type { PendingParticle } from "./shell.js";
 
-const STRIDE = 7;
+const STRIDE = 8;
 
 export interface PhysicsBridgeConfig {
   beta: number;
+  kCurvature: number;
   perturbAmplitude: number;
   lMax: number;
+  nS: number;
   timeDilation: number;
   seed: number;
   fieldEvolution: number;
+  doubleBounce: boolean;
+  betaPP: number;
+  // New configurable fields
+  silkDamping?: number;
+  hueMin?: number;
+  hueRange?: number;
+  brightnessFloor?: number;
+  brightnessCeil?: number;
+  dbSecondHueShift?: number;
+  dbSecondBriScale?: number;
+  ppHueShift?: number;
+  ppBriBoost?: number;
+  ppSizeScale?: number;
+  ppBaseDelay?: number;
+  ppScatterRange?: number;
 }
 
 export class PhysicsBridge {
@@ -52,10 +69,26 @@ export class PhysicsBridge {
     particleRate: number,
     params: {
       beta: number;
+      kCurvature: number;
       perturbAmplitude: number;
       lMax: number;
+      nS: number;
       timeDilation: number;
       fieldEvolution: number;
+      doubleBounce: boolean;
+      betaPP: number;
+      silkDamping?: number;
+      hueMin?: number;
+      hueRange?: number;
+      brightnessFloor?: number;
+      brightnessCeil?: number;
+      dbSecondHueShift?: number;
+      dbSecondBriScale?: number;
+      ppHueShift?: number;
+      ppBriBoost?: number;
+      ppSizeScale?: number;
+      ppBaseDelay?: number;
+      ppScatterRange?: number;
     },
   ): void {
     this.worker.postMessage({
@@ -68,11 +101,11 @@ export class PhysicsBridge {
     });
   }
 
-  /** Notify the worker that β has changed (recreates physics engine). */
-  updateBeta(beta: number): void {
+  /** Notify the worker that β or k has changed (recreates physics engine). */
+  updatePhysics(beta: number, kCurvature: number): void {
     this.generation++;
-    this.worker.postMessage({ type: "updateBeta", beta, generation: this.generation });
-    // Discard any queued particles baked at the old β
+    this.worker.postMessage({ type: "updateBeta", beta, kCurvature, generation: this.generation });
+    // Discard any queued particles baked at the old β/k
     this.batches.length = 0;
   }
 
@@ -124,8 +157,9 @@ export class PhysicsBridge {
         arrivalTime: data[off + 2],
         hue:         data[off + 3],
         brightness:  data[off + 4],
-        hitSize:     data[off + 5],
-        tailAngle:   data[off + 6],
+        eps:         data[off + 5],
+        hitSize:     data[off + 6],
+        tailAngle:   data[off + 7],
       };
     }
     return result;

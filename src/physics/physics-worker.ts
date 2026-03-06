@@ -8,23 +8,23 @@
  * Message protocol
  * ────────────────
  * Main → Worker:
- *   {type:'init',   beta, perturbAmplitude, lMax, timeDilation, seed, fieldEvolution}
- *   {type:'tick',   dt, simTime, particleRate, perturbAmplitude, lMax, timeDilation, fieldEvolution}
- *   {type:'updateBeta', beta}
- *   {type:'reset',  beta, perturbAmplitude, lMax, timeDilation, seed, fieldEvolution}
+ *   {type:'init',   beta, kCurvature, perturbAmplitude, lMax, nS, timeDilation, seed, fieldEvolution, doubleBounce, betaPP}
+ *   {type:'tick',   dt, simTime, particleRate, beta, kCurvature, perturbAmplitude, lMax, nS, timeDilation, fieldEvolution, doubleBounce, betaPP}
+ *   {type:'updateBeta', beta, kCurvature}
+ *   {type:'reset',  beta, kCurvature, perturbAmplitude, lMax, nS, timeDilation, seed, fieldEvolution, doubleBounce, betaPP}
  *
  * Worker → Main:
  *   {type:'particles', count, data: Float32Array | null}
  *
- * Packed particle layout (7 × Float32 per particle, stride 7):
+ * Packed particle layout (8 × Float32 per particle, stride 8):
  *   [0] lx   [1] ly   [2] arrivalTime   [3] hue
- *   [4] brightness   [5] hitSize   [6] tailAngle
+ *   [4] brightness   [5] eps   [6] hitSize   [7] tailAngle
  */
 
 import { ECSKPhysics } from "./ecsk-physics.js";
 import { StreamEmitter } from "./shell.js";
 
-const STRIDE = 7;
+const STRIDE = 8;
 
 /**
  * Hard ceiling on particles produced per tick.
@@ -41,6 +41,7 @@ const _self = self as any;
 let physics: ECSKPhysics;
 let emitter: StreamEmitter;
 let generation = 0;
+let currentK = 1;  // spatial curvature, default closed
 
 _self.onmessage = (e: MessageEvent) => {
   const msg = e.data;
@@ -48,34 +49,71 @@ _self.onmessage = (e: MessageEvent) => {
   switch (msg.type) {
     case "init": {
       generation = msg.generation ?? 0;
-      physics = new ECSKPhysics(msg.beta);
+      currentK = msg.kCurvature ?? 1;
+      physics = new ECSKPhysics(msg.beta, currentK);
       emitter = new StreamEmitter(
         physics,
-        msg.perturbAmplitude,
-        msg.lMax,
-        msg.timeDilation,
+        {
+          perturbAmplitude: msg.perturbAmplitude,
+          lMax: msg.lMax,
+          nS: msg.nS,
+          timeDilation: msg.timeDilation,
+          fieldEvolution: msg.fieldEvolution,
+          doubleBounce: msg.doubleBounce ?? false,
+          betaPP: msg.betaPP ?? 0,
+          silkDamping: msg.silkDamping,
+          hueMin: msg.hueMin,
+          hueRange: msg.hueRange,
+          brightnessFloor: msg.brightnessFloor,
+          brightnessCeil: msg.brightnessCeil,
+          dbSecondHueShift: msg.dbSecondHueShift,
+          dbSecondBriScale: msg.dbSecondBriScale,
+          ppHueShift: msg.ppHueShift,
+          ppBriBoost: msg.ppBriBoost,
+          ppSizeScale: msg.ppSizeScale,
+          ppBaseDelay: msg.ppBaseDelay,
+          ppScatterRange: msg.ppScatterRange,
+        },
         msg.seed,
-        msg.fieldEvolution,
       );
       break;
     }
 
     case "updateBeta": {
       generation = msg.generation ?? generation;
-      physics = new ECSKPhysics(msg.beta);
+      currentK = msg.kCurvature ?? currentK;
+      physics = new ECSKPhysics(msg.beta, currentK);
       break;
     }
 
     case "reset": {
       generation = msg.generation ?? generation;
-      physics = new ECSKPhysics(msg.beta);
+      currentK = msg.kCurvature ?? currentK;
+      physics = new ECSKPhysics(msg.beta, currentK);
       emitter = new StreamEmitter(
         physics,
-        msg.perturbAmplitude,
-        msg.lMax,
-        msg.timeDilation,
+        {
+          perturbAmplitude: msg.perturbAmplitude,
+          lMax: msg.lMax,
+          nS: msg.nS,
+          timeDilation: msg.timeDilation,
+          fieldEvolution: msg.fieldEvolution,
+          doubleBounce: msg.doubleBounce ?? false,
+          betaPP: msg.betaPP ?? 0,
+          silkDamping: msg.silkDamping,
+          hueMin: msg.hueMin,
+          hueRange: msg.hueRange,
+          brightnessFloor: msg.brightnessFloor,
+          brightnessCeil: msg.brightnessCeil,
+          dbSecondHueShift: msg.dbSecondHueShift,
+          dbSecondBriScale: msg.dbSecondBriScale,
+          ppHueShift: msg.ppHueShift,
+          ppBriBoost: msg.ppBriBoost,
+          ppSizeScale: msg.ppSizeScale,
+          ppBaseDelay: msg.ppBaseDelay,
+          ppScatterRange: msg.ppScatterRange,
+        },
         msg.seed,
-        msg.fieldEvolution,
       );
       break;
     }
@@ -90,19 +128,38 @@ _self.onmessage = (e: MessageEvent) => {
       // then silently discards every response as "stale".
       if (msg.generation !== undefined) generation = msg.generation;
 
-      // Continuously track β from tick params so slider drags
+      // Continuously track β and k from tick params so slider drags
       // propagate without a disruptive generation bump.
-      if (msg.beta !== undefined && Math.abs(msg.beta - physics.beta) > 1e-6) {
-        physics = new ECSKPhysics(msg.beta);
+      const tickK = msg.kCurvature ?? currentK;
+      if (msg.beta !== undefined && (Math.abs(msg.beta - physics.beta) > 1e-6 || tickK !== currentK)) {
+        currentK = tickK;
+        physics = new ECSKPhysics(msg.beta, currentK);
       }
 
       // Sync emitter with latest slider values
       emitter.update(
         physics,
-        msg.perturbAmplitude,
-        msg.lMax,
-        msg.timeDilation,
-        msg.fieldEvolution,
+        {
+          perturbAmplitude: msg.perturbAmplitude,
+          lMax: msg.lMax,
+          nS: msg.nS,
+          timeDilation: msg.timeDilation,
+          fieldEvolution: msg.fieldEvolution,
+          doubleBounce: msg.doubleBounce ?? false,
+          betaPP: msg.betaPP ?? 0,
+          silkDamping: msg.silkDamping,
+          hueMin: msg.hueMin,
+          hueRange: msg.hueRange,
+          brightnessFloor: msg.brightnessFloor,
+          brightnessCeil: msg.brightnessCeil,
+          dbSecondHueShift: msg.dbSecondHueShift,
+          dbSecondBriScale: msg.dbSecondBriScale,
+          ppHueShift: msg.ppHueShift,
+          ppBriBoost: msg.ppBriBoost,
+          ppSizeScale: msg.ppSizeScale,
+          ppBaseDelay: msg.ppBaseDelay,
+          ppScatterRange: msg.ppScatterRange,
+        },
       );
 
       // Cap particle rate so the worker never chokes on a single tick
@@ -125,8 +182,9 @@ _self.onmessage = (e: MessageEvent) => {
         buf[off + 2] = p.arrivalTime;
         buf[off + 3] = p.hue;
         buf[off + 4] = p.brightness;
-        buf[off + 5] = p.hitSize;
-        buf[off + 6] = p.tailAngle;
+        buf[off + 5] = p.eps;
+        buf[off + 6] = p.hitSize;
+        buf[off + 7] = p.tailAngle;
       }
 
       // Transfer the ArrayBuffer (zero-copy handoff to main thread)

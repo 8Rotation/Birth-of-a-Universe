@@ -309,7 +309,7 @@ package.json            — three r183, lil-gui, vite 7.3.1
   to k=+1 (closed universe). Changes the "−1" in D1 to "−k". For k=0 and k=−1
   the bounce still occurs but the turnaround/recollapse behavior differs.
   (Cubero & Popławski 2019; Unger & Popławski 2019 eq. 7)
-- [ ] **Double bounce visualization** — for k=+1 near the Cubero & Popławski threshold
+- [x] **Double bounce visualization** — for k=+1 near the Cubero & Popławski threshold
   (C > e^{−1/2}), the closed universe exhibits two local minima in the scale factor
   as temperature oscillates. Visually: a second wave of particles arriving after
   the first, creating a rhythmic pulsation. Requires coupling to k and C.

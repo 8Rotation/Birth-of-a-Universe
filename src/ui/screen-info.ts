@@ -433,9 +433,8 @@ export function hitSizeScale(info: ScreenInfo): number {
 
 /**
  * Recommended tone mapping exposure based on HDR capability.
- * SDR screens: standard exposure. HDR screens: slightly higher to take
- * advantage of extended brightness range for bloom highlights.
- * (Proper HDR tone mapping with PQ/HLG curves is a future feature.)
+ * Only used for the SDR and soft-HDR paths (ACES / Linear tone mapping).
+ * The full-HDR path uses NoToneMapping with nits-based color encoding.
  */
 export function recommendedExposure(info: ScreenInfo): number {
   if (!info.hdrCapable) return 1.0;
@@ -444,6 +443,67 @@ export function recommendedExposure(info: ScreenInfo): number {
     return 1.4; // bright HDR panel → more headroom for bloom
   }
   return 1.2; // modest HDR
+}
+
+// ── HDR helpers ───────────────────────────────────────────────────────────
+
+/**
+ * BT.2408 SDR reference white level in nits (cd/m²).
+ * On an HDR display, canvas pixel value 1.0 maps to this brightness.
+ * Values above 1.0 (in an extended-range canvas) are brighter than SDR white.
+ */
+export const SDR_REFERENCE_WHITE_NITS = 203;
+
+/**
+ * Default assumed peak brightness when the Screen Details API
+ * cannot report the display's actual peak luminance.
+ * 800 nits is typical for a mid-range HDR laptop/monitor.
+ */
+export const DEFAULT_HDR_PEAK_NITS = 800;
+
+/**
+ * Eps threshold for the dim end of the HDR nits ramp.
+ * Corresponds to β ≈ 0.20 (low energy, strong torsion).
+ */
+const EPS_DIM = 10;
+/**
+ * Eps threshold for the bright end of the HDR nits ramp.
+ * Corresponds to a_min = 0.1 (eps = 10 000).
+ */
+const EPS_BRIGHT = 10_000;
+
+/**
+ * Map physics energy density to display luminance in nits.
+ *
+ * Uses a **linear** mapping from eps (energy density at bounce, 1/a_min⁴)
+ * to nits so that HDR brightness is directly proportional to the physics
+ * parameter — no log compression, no gamma.  The display shows actual
+ * physical energy density as actual display brightness.
+ *
+ * eps spans a huge range (~13 at β=0.20 to ~10 000+ at β→0), so we
+ * clamp and linearly map within a reasonable range:
+ *   - eps ≤ EPS_DIM   (≈10)  → minNits  (dim glow, well above black)
+ *   - eps ≥ EPS_BRIGHT (≈10 000) → peakNits (display peak)
+ *   - In between: linear interpolation
+ *
+ * @param eps       Raw physics energy density 1/a_min⁴
+ * @param peakNits  Display peak luminance in nits
+ * @param minNits   Floor luminance for the dimmest particles
+ */
+export function epsToNits(
+  eps: number,
+  peakNits: number,
+  minNits = 20,
+): number {
+  // Reference range matching the physics:
+  //   β = 0.20  → eps ≈ 13   (low energy, strong torsion)
+  //   β → 0     → eps → ∞    (high energy, weak torsion)
+  // We anchor the bright end at eps = 10 000 (a_min = 0.1).
+
+  const t = Math.max(0, Math.min(1,
+    (eps - EPS_DIM) / (EPS_BRIGHT - EPS_DIM),
+  ));
+  return minNits + t * (peakNits - minNits);
 }
 
 // ── Detector class ────────────────────────────────────────────────────────

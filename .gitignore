@@ -15,6 +15,9 @@ sources_extracted/
 sources_marker/
 source-processing/
 
+# Copilot memory (local only)
+copilot-instructions.md
+
 # Editor / OS
 .vscode/
 *.swp

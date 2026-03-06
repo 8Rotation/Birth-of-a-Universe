@@ -24,7 +24,7 @@
  *   with spectral index n_s ≈ 0.965 from ξ ≈ 0.4 (their eq. 37),
  *   consistent with the Planck 2018 value used here.
  *
- * Spectral index: n_s = 0.965 (Planck 2018)
+ * Spectral index: n_s = 0.965 default (Planck 2018), exposed as UI slider
  * Silk damping: exp(−(l/l_silk)²) with l_silk = 0.6 × l_max
  */
 
@@ -109,6 +109,9 @@ function ylmReal(
 
 // ── Perturbation spectrum ─────────────────────────────────────────────────
 
+/** Default Silk damping ratio (l_silk = ratio × l_max). */
+export const DEFAULT_SILK_DAMPING = 0.6;
+
 export interface PerturbMode {
   l: number;
   m: number;
@@ -120,7 +123,7 @@ export interface PerturbMode {
  * Generate perturbation coefficients with nearly scale-invariant spectrum.
  *
  * Power spectrum: C_l ∝ l^(n_s − 1) × exp(−(l/l_silk)²)
- *   - n_s = 0.965 (Planck 2018 scalar spectral index)
+ *   - n_s: spectral index (default 0.965, Planck 2018; Sadatian & Hosseini 2025 eq. 37)
  *   - l_silk = 0.6 × lMax (Silk damping scale)
  *
  * Each (l, m) mode gets a random coefficient ~ modeAmp × uniform(−1, 1).
@@ -129,9 +132,10 @@ export function generatePerturbCoeffs(
   lMax: number,
   amplitude: number,
   rng: () => number,
+  ns = 0.965,
+  silkDamping = DEFAULT_SILK_DAMPING,
 ): PerturbMode[] {
-  const ns = 0.965;
-  const lSilk = Math.max(2, lMax * 0.6);
+  const lSilk = Math.max(2, lMax * silkDamping);
   const coeffs: PerturbMode[] = [];
 
   for (let l = 1; l <= lMax; l++) {
@@ -191,9 +195,10 @@ export function rescaleCoeffSigmas(
   coeffs: PerturbMode[],
   lMax: number,
   amplitude: number,
+  ns = 0.965,
+  silkDamping = DEFAULT_SILK_DAMPING,
 ): void {
-  const ns = 0.965;
-  const lSilk = Math.max(2, lMax * 0.6);
+  const lSilk = Math.max(2, lMax * silkDamping);
   for (const mode of coeffs) {
     const Cl =
       Math.pow(mode.l, ns - 1) * Math.exp(-(mode.l * mode.l) / (lSilk * lSilk));

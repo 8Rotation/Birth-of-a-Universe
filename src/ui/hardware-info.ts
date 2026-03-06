@@ -170,7 +170,15 @@ function lerpPow2(floorExp: number, ceilingExp: number, t: number, exponent = 1)
   return Math.pow(2, Math.round(exp));
 }
 
-// ── CPU Detection ─────────────────────────────────────────────────────────
+// ── CPU Detection ───────────────────────────────────────────────────────
+
+/** Duration of the quick CPU benchmark loop (ms). */
+const CPU_BENCH_DURATION_MS = 20;
+/**
+ * Baseline ops/ms calibrated to a mid-range 2020 CPU (i5-10400 / Ryzen 5 3600).
+ * Score = measured ops/ms / BASELINE_OPS_PER_MS  (≈1.0 for that hardware).
+ */
+const BASELINE_OPS_PER_MS = 4500;
 
 function detectCpuCores(): number {
   return navigator.hardwareConcurrency || 4;
@@ -188,12 +196,11 @@ function detectDeviceMemory(): number {
  * Runs for ~20 ms to avoid blocking the UI.
  */
 function cpuBenchmark(): number {
-  const DURATION_MS = 20;
   const start = performance.now();
   let iterations = 0;
   let x = 1.0;
 
-  while (performance.now() - start < DURATION_MS) {
+  while (performance.now() - start < CPU_BENCH_DURATION_MS) {
     for (let i = 0; i < 1000; i++) {
       x = Math.sin(x) + Math.cos(x * 0.7) + Math.sqrt(Math.abs(x) + 1);
       iterations++;
@@ -202,7 +209,6 @@ function cpuBenchmark(): number {
 
   const elapsed = performance.now() - start;
   const opsPerMs = iterations / elapsed;
-  const BASELINE_OPS_PER_MS = 4500;
   const score = opsPerMs / BASELINE_OPS_PER_MS;
 
   // Prevent dead-code elimination
