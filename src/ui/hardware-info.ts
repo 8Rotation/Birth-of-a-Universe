@@ -93,7 +93,7 @@ export interface SliderLimits {
   particleRateMax: number;
   lMaxMax: number;
   persistenceMax: number;
-  timeDilationMax: number;
+  arrivalSpreadMax: number;
   bloomStrengthMax: number;
 }
 
@@ -118,6 +118,24 @@ export interface ComputeBudget {
   recommendedWorkers: number;
   /** Normal-mode slider limits (continuously scaled) */
   sliderLimits: SliderLimits;
+
+  // ── Compound budget limits ───────────────────────────────────
+  // These cap the *product* of interacting settings to prevent
+  // combinatorial explosion that individual slider limits miss.
+
+  /**
+   * Max visible particles the CPU renderer loop can handle per frame
+   * at the target framerate (~100 ns per hit in updateHits).
+   * Caps the effective `particleRate × persistence` product.
+   */
+  maxVisibleHits: number;
+
+  /**
+   * Max spherical-harmonic evaluations per second across all workers.
+   * Caps the effective `particleRate × (lMax² + 2·lMax)` product.
+   * A single worker thread can sustain ~5–10 M evals/s comfortably.
+   */
+  maxPhysicsCostPerSec: number;
 }
 
 export interface HardwareInfo {
@@ -413,7 +431,7 @@ function tierLabel(t: number): HardwareTier {
  * ceiling = value at t = 1 (best hardware + modest display)
  * exponent > 1 skews toward ceiling (high-end benefits more)
  */
-function buildBudget(t: number, cpuCores: number): ComputeBudget {
+function buildBudget(t: number, cpuCores: number, cpuT: number): ComputeBudget {
   return {
     // ── Defaults (first-launch values) ────────────────────────────
     particleRate:           lerpInt(300,      20_000,    t, 1.3),
@@ -421,23 +439,46 @@ function buildBudget(t: number, cpuCores: number): ComputeBudget {
     bloomDefault:           t >= 0.35,
 
     // ── Internal throughput caps ──────────────────────────────────
+    // These are internal pipeline caps, not user-facing.  Set
+    // generously so the real bottleneck is the slider limits (which
+    // ARE capability-gated) rather than hidden hard ceilings.
     emergencyHitCap:        lerpInt(200_000,  20_000_000, t, 1.5),
-    maxParticlesPerTick:    lerpInt(3_000,    200_000,    t, 1.4),
-    maxArrivalsPerFrame:    lerpInt(2_000,    80_000,     t, 1.3),
-    maxHeapInsertsPerFrame: lerpInt(5_000,    200_000,    t, 1.3),
+    maxParticlesPerTick:    lerpInt(5_000,    300_000,    t, 1.3),
+    maxArrivalsPerFrame:    lerpInt(5_000,    150_000,    t, 1.2),
+    maxHeapInsertsPerFrame: lerpInt(8_000,    300_000,    t, 1.2),
     initialGpuCapacity:     lerpPow2(14, 20, t, 1.2), // 2^14=16K → 2^20=1M
 
     // ── Workers ──────────────────────────────────────────────────
-    recommendedWorkers:     Math.max(1, Math.min(lerpInt(1, 4, t), cpuCores - 2)),
+    // Workers are CPU-only — scale with the CPU sub-score (cpuT)
+    // instead of the composite score which is 50% GPU-weighted.
+    // This ensures a strong CPU isn't under-allocated due to a
+    // modest GPU.  Reserve 2 cores for main thread + OS.
+    recommendedWorkers:     Math.max(1, Math.min(lerpInt(2, cpuCores - 2, cpuT), cpuCores - 2)),
 
     // ── Slider limits (normal mode) ──────────────────────────────
     sliderLimits: {
       particleRateMax:      lerpInt(1_000,    200_000,   t, 1.4),
       lMaxMax:              lerpInt(6,        96,        t, 1.2),
       persistenceMax:       lerpInt(3,        120,       t, 1.1),
-      timeDilationMax:      lerpInt(1_000,    100_000,   t, 1.3),
+      arrivalSpreadMax:     lerp(10,          120,       t, 1.1),
       bloomStrengthMax:     lerp(1.5,         8,         t, 1.0),
     },
+
+    // ── Compound budget limits ──────────────────────────────────
+    // maxVisibleHits: CPU renderer iterates every visible hit per frame
+    // (~100 ns each).  At 60 fps the frame budget is 16.7 ms, leaving
+    // ~8 ms for updateHits → ~80 K hits.  Scale generously to allow
+    // some stutter at max settings while preventing multi-second frames.
+    maxVisibleHits:         lerpInt(50_000,   800_000,   t, 1.3),
+
+    // maxPhysicsCostPerSec: spherical-harmonic evaluations across all
+    // workers.  A single thread sustains ~5 M evals/s; with N workers
+    // the budget is N × 5 M.  Scale with both t and worker count.
+    maxPhysicsCostPerSec:   lerpInt(
+      2_000_000,
+      Math.max(1, Math.min(lerpInt(2, cpuCores - 2, cpuT), cpuCores - 2)) * 8_000_000,
+      t, 1.2,
+    ),
   };
 }
 
@@ -527,8 +568,13 @@ export class HardwareDetector {
     const penalty = renderPixels > 0 ? screenPenalty(renderPixels) : 1.0;
     const t = clamp(rawH * penalty, 0.02, 1.0);
 
+    // CPU-only sub-score for worker allocation (bench 60%, cores 40%).
+    // Workers are purely CPU-bound so the GPU and screen penalty should
+    // not limit how many threads we spin up.
+    const cpuT = clamp(cpu.benchSub * 0.6 + cpu.coresSub * 0.4, 0.05, 1.0);
+
     const tier = tierLabel(t);
-    const budget = buildBudget(t, cpu.logicalCores);
+    const budget = buildBudget(t, cpu.logicalCores, cpuT);
     const summary = buildSummary(cpu, gpu, rawH, t, renderPixels);
 
     this._info = {

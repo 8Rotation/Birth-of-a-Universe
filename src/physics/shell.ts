@@ -1,22 +1,18 @@
 /**
  * shell.ts — Infalling comoving fluid elements.
  *
- * Provides two abstractions for sampling the S² bounce hypersurface:
+ * Provides the StreamEmitter for sampling the S² bounce hypersurface.
  *
- * ── StreamEmitter (preferred) ─────────────────────────────────────────────
+ * ── StreamEmitter ─────────────────────────────────────────────────────────
  *   Models the collapsing fluid as a continuous Poisson stream.  Each call
  *   to emit() produces exactly one particle whose arrival time is
  *
- *     τ_arrive = now + sens · β · δ(θ,φ) · timeDilation
+ *     τ_arrive = now + derived_TD · sens · β · δ(θ,φ)
  *
- *   where δ is sampled from the current spherical-harmonic perturbation
+ *   where derived_TD = arrivalSpread / (|sens| × β × amplitude) and
+ *   δ is sampled from the current spherical-harmonic perturbation
  *   field.  Because no batching occurs the simulation is free of the
  *   discrete shell cadence; the only discretisation is the per-frame dt.
- *
- * ── InfallingShell (legacy, kept for reference) ───────────────────────────
- *   Batch approach: constructs N particles at once, sorts by arrival time,
- *   and drains them via a cursor.  Retained in case a batch interface is
- *   ever needed again.
  *
  * Visual encoding (shared by both):
  *   - Hue: w_eff (effective equation of state, amber→violet)
@@ -38,16 +34,7 @@ import {
   DEFAULT_SILK_DAMPING,
 } from "./perturbation.js";
 
-/**
- * Reorder a Float32Array by an index permutation.
- */
-function reorderF32(arr: Float32Array, idx: Uint32Array): Float32Array {
-  const out = new Float32Array(arr.length);
-  for (let i = 0; i < idx.length; i++) out[i] = arr[idx[i]];
-  return out;
-}
-
-// ── Log-scale brightness reference (shared with InfallingShell) ──────────
+// ── Log-scale brightness reference ───────────────────────────────────────
 // Anchored at eps = 10 000 (≡ a_min = 0.1).
 const EPS_LOG_REF = Math.log(10001);
 // ── Visual encoding defaults (now configurable via EmitterConfig) ─────────
@@ -61,12 +48,11 @@ const HIT_SIZE_BASE = 0.5;
 
 // ── Arrival-time delay clamping ───────────────────────────────────────────
 
-/** Minimum MAX_DELAY (seconds) — prevents structure crush at low TD. */
-const MAX_DELAY_FLOOR = 8.0;
-/** Maximum MAX_DELAY (seconds) — cap to prevent divergence near β → 1/4. */
-const MAX_DELAY_CEIL = 300.0;
-/** Multiplier on naturalSpread for MAX_DELAY scaling. */
-const NATURAL_SPREAD_MULT = 1.5;
+/** Multiplier on arrivalSpread for MAX_DELAY tail room (1.5× avoids hard clip). */
+const SPREAD_TAIL_MULT = 1.5;
+/** Minimum denominator for TD derivation — prevents division by zero
+ *  when sensitivity, beta, or amplitude is near-zero. */
+const TD_DENOM_FLOOR = 1e-6;
 
 // ── Double-bounce visual modulation (Cubero & Popławski 2019 §26) ───────
 
@@ -109,7 +95,9 @@ export interface EmitterConfig {
   perturbAmplitude: number;
   lMax: number;
   nS: number;
-  timeDilation: number;
+  /** Arrival-time spread in seconds — directly controls the temporal
+   *  window over which the perturbation pattern is projected. */
+  arrivalSpread: number;
   fieldEvolution: number;
   doubleBounce: boolean;
   betaPP: number;
@@ -137,7 +125,7 @@ export function defaultEmitterConfig(partial: Partial<EmitterConfig> = {}): Emit
     perturbAmplitude: partial.perturbAmplitude ?? 0.12,
     lMax:             partial.lMax ?? 8,
     nS:               partial.nS ?? 0.965,
-    timeDilation:     partial.timeDilation ?? 120,
+    arrivalSpread:    partial.arrivalSpread ?? 1.0,
     fieldEvolution:   partial.fieldEvolution ?? 0.1,
     doubleBounce:     partial.doubleBounce ?? false,
     betaPP:           partial.betaPP ?? 0,
@@ -177,7 +165,7 @@ export interface PendingParticle {
  *
  *   1. Adds dt × particleRate to an accumulator.
  *   2. For each whole count in the accumulator, samples one particle on S²
- *      and computes its arrivalTime = now + sens·β·δ·timeDilation.
+ *      and computes its arrivalTime = now + derived_TD·sens·δ·β.
  *   3. Returns the batch of pending particles; the arrival times are
  *      already in the future so they dribble into the hit buffer over the
  *      next few seconds just like the old batch cursor did — but without
@@ -200,10 +188,17 @@ export class StreamEmitter {
   private _lastSilkDamping: number;
 
   /**
+   * When true, coefficient evolution is driven externally (by the bridge)
+   * and `tick()` skips the local `evolveCoeffs` call.  The bridge
+   * broadcasts the authoritative `c` values each tick via `applyCoeffs()`.
+   */
+  private _externalCoeffs = false;
+
+  /**
    * Phase accumulator for double-bounce rate modulation.
    * Incremented by dt/visualPeriod each tick; wraps at 1.0.
    * Using an accumulator (rather than simTime % period) avoids
-   * phase jumps when timeDilation or β change the visual period.
+   * phase jumps when arrivalSpread changes the visual period.
    */
   private _dbPhase = 0;
 
@@ -226,6 +221,27 @@ export class StreamEmitter {
     );
   }
 
+  /**
+   * Apply externally-evolved perturbation coefficients.
+   *
+   * When the bridge drives N workers the O-U evolution runs once on the
+   * main thread.  The authoritative `c` values are packed into a
+   * Float64Array and sent to each worker, which calls this method to
+   * overwrite its local coefficients.  This ensures all workers share
+   * the same spatial structure — only the random sampling positions
+   * differ (each worker has a unique PRNG seed).
+   *
+   * Once called, the emitter skips its own `evolveCoeffs` call in
+   * `tick()` since evolution is now external.
+   */
+  applyCoeffs(packed: Float64Array): void {
+    this._externalCoeffs = true;
+    const len = Math.min(packed.length, this.coeffs.length);
+    for (let i = 0; i < len; i++) {
+      this.coeffs[i].c = packed[i];
+    }
+  }
+
   /** Update mutable simulation parameters without reconstructing. */
   update(
     physics: ECSKPhysics,
@@ -234,7 +250,7 @@ export class StreamEmitter {
     this.physics = physics;
     // Merge incoming config over current
     const c = this.cfg;
-    if (config.timeDilation     !== undefined) c.timeDilation     = config.timeDilation;
+    if (config.arrivalSpread    !== undefined) c.arrivalSpread    = config.arrivalSpread;
     if (config.fieldEvolution   !== undefined) c.fieldEvolution   = config.fieldEvolution;
     if (config.doubleBounce     !== undefined) c.doubleBounce     = config.doubleBounce;
     if (config.betaPP           !== undefined) c.betaPP           = config.betaPP;
@@ -292,28 +308,30 @@ export class StreamEmitter {
    */
   tick(dt: number, now: number, particleRate: number): PendingParticle[] {
     const c = this.cfg;
-    // Evolve the perturbation field (O-U random walk) before sampling
-    evolveCoeffs(this.coeffs, dt, c.fieldEvolution, this.rng);
+    // Evolve the perturbation field (O-U random walk) before sampling.
+    // When coefficients are centrally evolved by the bridge (multi-worker
+    // mode), skip local evolution — the bridge has already called
+    // applyCoeffs() with the authoritative values for this tick.
+    if (!this._externalCoeffs) {
+      evolveCoeffs(this.coeffs, dt, c.fieldEvolution, this.rng);
+    }
 
     // ── Double-bounce rate modulation (Cubero & Popławski 2019 §26) ──
     // For k=+1 the closed universe oscillates: bounce → turnaround →
     // second bounce.  We modulate the emission rate with a two-peaked
     // cos² envelope so particles arrive in rhythmic pulses — one per
-    // bounce epoch.  The visual period is pegged directly to β and
-    // timeDilation:
+    // bounce epoch.
     //
-    //   P_vis = fullPeriod(β) × timeDilation / NORM
+    // The visual period is derived from arrivalSpread: higher spread
+    // stretches the pulsation proportionally.  The period relates to
+    // how much of the ECSK half-period maps into the user's chosen
+    // spread window:
     //
-    // NORM is calibrated so the default parameters (β=0.10, TD=120)
-    // produce a ~2.5 s visual period.  Both factors respond naturally:
-    //   - Lowering β toward 0.005: fullPeriod grows → slower pulsation
-    //   - Raising β toward 0.249: fullPeriod shrinks → rapid pulsation
-    //   - Increasing timeDilation: proportionally slower pulsation
-    //   - Decreasing timeDilation: proportionally faster pulsation
+    //   TD_internal = arrivalSpread / (|sens| × β × amplitude)
+    //   P_vis = fullPeriod(β) × TD_internal / NORM
     //
-    // No ceiling clamp — if the user pushes TD to 8000 the pulse slows
-    // to ~50 s, which is physically correct (they stretched time 67×).
-    // Only a 0.3 s floor prevents imperceptible flicker at extreme lows.
+    // This means the pulsation rate scales naturally with the spread
+    // slider: small spread → fast pulsation, large spread → slow.
     //
     // Phase accumulates via dt so changes to period don't cause jumps.
     let effectiveRate = particleRate;
@@ -323,8 +341,10 @@ export class StreamEmitter {
 
     if (dbActive) {
       const fp = this.physics.fullPeriod();
-      // NORM: fullPeriod(0.10) × 120 / 2.5 ≈ 645
-      const visPeriod = Math.max(DB_VIS_PERIOD_FLOOR, fp * c.timeDilation / DB_VIS_NORM);
+      // Derive internal TD from arrivalSpread for the period calc
+      const dbDenom = Math.max(TD_DENOM_FLOOR, Math.abs(this.physics.sensitivity()) * this.physics.beta * c.perturbAmplitude);
+      const dbTD = c.arrivalSpread / dbDenom;
+      const visPeriod = Math.max(DB_VIS_PERIOD_FLOOR, fp * dbTD / DB_VIS_NORM);
       this._dbPhase += dt / visPeriod;
       this._dbPhase %= 1.0;
 
@@ -381,17 +401,14 @@ export class StreamEmitter {
       const betaEff = this.physics.beta * (1 + delta);
       const props   = this.physics.bounceProps(betaEff);
 
-      // Arrival time relative to now — clamped to prevent pathological
-      // delays when sensitivity diverges near β → 1/4.
-      //
-      // MAX_DELAY scales with the natural physics spread:
-      //   natural ≈ |sens| × β × perturbAmplitude × timeDilation
-      // Clamped to [8, 300] so it's never too tight (small TD) or
-      // absurdly large (β → 1/4 divergence).  This ensures the
-      // perturbation structure isn't crushed at high timeDilation.
-      const rawDelay = sens * (betaEff - this.physics.beta) * c.timeDilation;
-      const naturalSpread = Math.abs(sens) * this.physics.beta * c.perturbAmplitude * c.timeDilation;
-      const MAX_DELAY = Math.min(Math.max(MAX_DELAY_FLOOR, naturalSpread * NATURAL_SPREAD_MULT), MAX_DELAY_CEIL);
+      // Arrival time — derive timeDilation from the user's arrivalSpread
+      // so the perturbation pattern fills exactly that many seconds:
+      //   TD = spread / (|sens| × β × amplitude)
+      // MAX_DELAY = spread × 1.5 for tail room (no global ceiling).
+      const denom = Math.max(TD_DENOM_FLOOR, Math.abs(sens) * this.physics.beta * c.perturbAmplitude);
+      const td = c.arrivalSpread / denom;
+      const rawDelay = sens * (betaEff - this.physics.beta) * td;
+      const MAX_DELAY = c.arrivalSpread * SPREAD_TAIL_MULT;
       tBuf[i] = now + Math.max(-MAX_DELAY, Math.min(rawDelay, MAX_DELAY));
 
       accBuf[i] = props.acc;
@@ -489,8 +506,11 @@ export class StreamEmitter {
           // + small scatter.  The perturbation delay (rawDelay) preserves
           // the spatial wavefront structure; the fixed offset separates
           // the production wave visually from the bounce wave.
+          // TD is derived from arrivalSpread, same as the bounce path.
+          const ppDenom = Math.max(TD_DENOM_FLOOR, Math.abs(sens) * this.physics.beta * c.perturbAmplitude);
+          const ppTD = c.arrivalSpread / ppDenom;
           const rawDelay = sens
-            * (betaEff - this.physics.beta) * c.timeDilation;
+            * (betaEff - this.physics.beta) * ppTD;
           const scatter  = c.ppScatterRange * (this.rng() * 2 + PP_SCATTER_BIAS);
           const totalDelay = rawDelay + c.ppBaseDelay + scatter;
           ppTB[i] = now
@@ -530,140 +550,5 @@ export class StreamEmitter {
     }
 
     return result;
-  }
-}
-
-/**
- * InfallingShell — legacy batch approach (kept for reference).
- *
- * Constructs N particles at once, sorts by arrival time, and drains
- * them via a cursor. No longer used by the main loop (replaced by
- * StreamEmitter) but retained in case a batch interface is needed.
- */
-export class InfallingShell {
-  readonly size: number;
-
-  // Per-particle arrays (sorted by arrival time after construction)
-  lx: Float32Array;
-  ly: Float32Array;
-  arrivalTime: Float32Array;
-  hue: Float32Array;
-  brightness: Float32Array;
-  hitSize: Float32Array;
-  tailAngle: Float32Array;
-
-  /** Cursor into sorted arrival times — advanced by main loop. */
-  cursor = 0;
-
-  constructor(
-    size: number,
-    physics: ECSKPhysics,
-    perturbAmplitude: number,
-    lMax: number,
-    timeDilation: number,
-    batchSeed: number,
-    birthTime: number,
-  ) {
-    this.size = size;
-    const rng = splitmix32(batchSeed);
-
-    // Generate perturbation coefficients for this shell
-    const coeffs = generatePerturbCoeffs(lMax, perturbAmplitude, rng);
-    const sens = physics.sensitivity();
-
-    // Allocate per-particle arrays
-    this.lx = new Float32Array(size);
-    this.ly = new Float32Array(size);
-    this.arrivalTime = new Float32Array(size);
-    this.hue = new Float32Array(size);
-    this.brightness = new Float32Array(size);
-    this.hitSize = new Float32Array(size);
-    this.tailAngle = new Float32Array(size);
-
-    // Temporary arrays for normalization
-    let minAcc = Infinity,
-      maxAcc = 0;
-    let minW = 0,
-      maxW = -Infinity;
-    const epsArr = new Float32Array(size);
-    const accArr = new Float32Array(size);
-    const wArr = new Float32Array(size);
-
-    for (let i = 0; i < size; i++) {
-      // ── Sample uniform point on S² ────────────────────────────────
-      const theta = Math.acos(1 - 2 * rng()); // colatitude [0, π]
-      const phi = 2 * Math.PI * rng(); // azimuth [0, 2π]
-      const cosT = Math.cos(theta);
-      const sinT = Math.sin(theta);
-
-      // ── Lambert equal-area projection (S² → disk radius 2) ────────
-      // r = 2 sin(θ/2), x = r cos(φ), y = r sin(φ)
-      // Preserves density statistics (equal area ↔ uniform distribution)
-      this.lx[i] = 2 * Math.sin(theta / 2) * Math.cos(phi);
-      this.ly[i] = 2 * Math.sin(theta / 2) * Math.sin(phi);
-      this.tailAngle[i] = rng() * 6.2832;
-
-      // ── Perturbation: δ(θ,φ) → β_eff = β(1+δ) ────────────────────
-      const delta = evaluatePerturbation(coeffs, cosT, sinT, phi);
-      const betaEff = physics.beta * (1 + delta);
-
-      // ── Bounce properties for this fluid element ───────────────────
-      const props = physics.bounceProps(betaEff);
-      epsArr[i] = props.eps;
-      accArr[i] = props.acc;
-      wArr[i] = props.wEff;
-
-      if (props.acc < minAcc) minAcc = props.acc;
-      if (props.acc > maxAcc) maxAcc = props.acc;
-      if (props.wEff < minW) minW = props.wEff;
-      if (props.wEff > maxW) maxW = props.wEff;
-
-      // ── Arrival time: birth + bounce time offset ───────────────────
-      // sens = dT/dβ, so δτ ≈ sens × δβ = sens × β × δ
-      // timeDilation stretches the offset for visual clarity
-      this.arrivalTime[i] =
-        birthTime + sens * (betaEff - physics.beta) * timeDilation;
-    }
-
-    // ── Shift so earliest arrival is shortly after birth ─────────────
-    let minArr = this.arrivalTime[0];
-    for (let i = 1; i < size; i++) {
-      if (this.arrivalTime[i] < minArr) minArr = this.arrivalTime[i];
-    }
-    const shift = birthTime + 0.15 - minArr;
-    for (let i = 0; i < size; i++) this.arrivalTime[i] += shift;
-
-    // ── Normalize visual properties to 0-1 range ─────────────────────
-    const accR = maxAcc - minAcc || 1;
-    const wR = minW - maxW || 1;
-
-    for (let i = 0; i < size; i++) {
-      // Hue: w_eff maps from amber (25°) → violet (270°)
-      // Higher w_eff (mild torsion) → amber
-      // Lower w_eff (deep repulsive) → violet
-      this.hue[i] = DEF_HUE_MIN + ((wArr[i] - maxW) / wR) * DEF_HUE_RANGE;
-
-      // Brightness: absolute log-scale energy density at bounce.
-      // Clamp to [BRIGHTNESS_FLOOR, BRIGHTNESS_CEIL] so no hit disappears entirely.
-      this.brightness[i] = Math.min(DEF_BRIGHTNESS_CEIL, Math.max(DEF_BRIGHTNESS_FLOOR,
-        Math.log(epsArr[i] + 1) / EPS_LOG_REF,
-      ));
-
-      // Hit size: bounce kick acceleration (larger kick = bigger)
-      this.hitSize[i] = HIT_SIZE_BASE + (accArr[i] - minAcc) / accR;
-    }
-
-    // ── Sort by arrival time for O(1) cursor-based processing ────────
-    const idx = new Uint32Array(size);
-    for (let i = 0; i < size; i++) idx[i] = i;
-    idx.sort((a, b) => this.arrivalTime[a] - this.arrivalTime[b]);
-
-    this.lx = reorderF32(this.lx, idx);
-    this.ly = reorderF32(this.ly, idx);
-    this.arrivalTime = reorderF32(this.arrivalTime, idx);
-    this.hue = reorderF32(this.hue, idx);
-    this.brightness = reorderF32(this.brightness, idx);
-    this.hitSize = reorderF32(this.hitSize, idx);
-    this.tailAngle = reorderF32(this.tailAngle, idx);
   }
 }

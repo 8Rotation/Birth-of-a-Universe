@@ -17,9 +17,10 @@
  *   See EQUATION_CATALOG.md for full 29-paper bibliography
  */
 
+import "./style.css";
 import { ECSKPhysics } from "./physics/ecsk-physics.js";
-import { PhysicsBridge } from "./physics/physics-bridge.js";
-import type { PendingParticle } from "./physics/shell.js";
+import { PhysicsBridge, PARTICLE_STRIDE } from "./physics/physics-bridge.js";
+import type { RawParticleBatch } from "./physics/physics-bridge.js";
 import { SensorRenderer, type Hit } from "./rendering/renderer.js";
 import { createSensorControls } from "./ui/controls.js";
 import { ScreenDetector } from "./ui/screen-info.js";
@@ -37,8 +38,20 @@ const BETA_CHANGE_THRESHOLD = 0.0001;
 const FADE_THRESHOLD = 0.003;
 /** Safety margin on Weibull cutoff to prevent pop-out. */
 const CUTOFF_MARGIN = 1.2;
-/** Maximum seconds into the future a particle can be born before discard. */
-const MAX_FUTURE_SECONDS = 302;
+
+/**
+ * Convert user-facing "fade duration" (seconds) to Weibull τ (scale parameter).
+ * The slider value = total visible time before a particle reaches the
+ * discard threshold.  We invert: τ = duration / ((-ln(threshold)) × margin)^(1/k).
+ */
+function fadeDurationToTau(duration: number, sharpness: number): number {
+  return duration / (Math.pow(-Math.log(FADE_THRESHOLD) * CUTOFF_MARGIN, 1 / sharpness));
+}
+/** Maximum seconds into the future a particle can be born before discard.
+ *  Derived from arrivalSpread × tail multiplier × small margin.
+ *  Computed dynamically in the animation loop from params.arrivalSpread. */
+const SPREAD_TAIL_MULT = 1.5;
+const FUTURE_MARGIN = 2;  // extra seconds beyond the spread tail
 /** FPS / HUD update interval in seconds. */
 const FPS_SAMPLE_INTERVAL = 0.8;
 /** EMA decay factor for arrival-rate smoothing. */
@@ -54,7 +67,9 @@ let EMERGENCY_HIT_CAP = 5_000_000;
 
 // ── Info overlay ──────────────────────────────────────────────────────────
 
-const info = document.getElementById("info")!;
+const infoEl = document.getElementById("info");
+if (!infoEl) throw new Error('Missing #info element in document');
+const info: HTMLElement = infoEl;
 function setInfo(text: string) {
   info.textContent = text;
 }
@@ -114,48 +129,119 @@ async function main() {
 
   // ── 3. State ──────────────────────────────────────────────────────
   let hits: Hit[] = [];
-  let simTime = 0;
+  let visibleCount = 0;  // count of visible hits in hits[0..visibleCount); future hits follow
+  const _futureHits: Hit[] = [];  // reusable buffer for partitioning (never reallocated)
+  // simTime is initialised to wall-clock on the first frame so particle
+  // born-times and displayTime (wall-clock) share the same time basis.
+  // This eliminates the startup-offset bug where particles were born
+  // seconds/minutes in the future relative to displayTime.
+  let simTime = -1;  // sentinel: first frame will set from wall-clock
   let arrivalCounter = 0;
   let arrivalRateSmooth = 0;
   let lastBeta = physics.beta;
   let lastK = 1;  // track spatial curvature changes
   let frozenDisplayTime = 0;  // snapshot of "now" when freeze was engaged
 
-  // Previous-frame slider snapshot — used to detect changes and clear
-  // the pending-arrival heap so stale particles from old settings don't
-  // keep draining for seconds after a slider move.  Only the heap is
-  // cleared; the worker bridge is NOT flushed (no generation bump) so
-  // new particles at the updated settings flow without interruption.
+  // Previous-frame slider snapshot — used to detect changes.
+  // Physics param changes discard future-born hits (baked with old settings).
+  // Visual/flow param changes only affect going forward — no retroactive culling.
   let prevParticleRate      = NaN;  // NaN so first-frame compare is always false (no-op)
   let prevPerturbAmplitude  = NaN;
   let prevLMax              = NaN;
   let prevNS                = NaN;
-  let prevTimeDilation      = NaN;
+  let prevArrivalSpread     = NaN;
   let prevFieldEvolution    = NaN;
   let prevBeta              = NaN;
   let prevKCurvature        = NaN;
   let prevDoubleBounce      = false;
   let prevBetaPP             = 0;
   let prevSilkDamping        = NaN;
+  // Debounce timer for settings-change culling — prevents repeated wipes
+  // during a slider drag gesture (200ms cooldown).
+  let settingsChangeTimer   = 0;
+  const SETTINGS_DEBOUNCE   = 0.2;  // seconds
+  // Latching dirty flags — stay true until debounce fires.
+  // Fixes the race condition where prevXxx updates every frame
+  // but the debounce check fires later when physicsChanged is already false.
+  let physicsDirty = false;
+  let flowDirty = false;
 
   // ── 4. Controls (auto-configured from hardware budget) ────────────
-  const { params, hud, updateHUD, updateTimeDilationMax, readoutGui: _readoutGui } = createSensorControls(() => {
-    // Clear: wipe visible hits but keep the worker running so new
-    // particles arrive on the very next frame — no restart delay.
+  const { params, hud, updateHUD, setHDRMode } = createSensorControls(() => {
+    // Full reset: terminate and recreate all workers (recovers from
+    // crashes), wipe all particle state, and re-sync timing.
+    // Equivalent to browser reload but keeps current settings.
     hits = [];
-    simTime = 0;
+    visibleCount = 0;
     arrivalCounter = 0;
     arrivalRateSmooth = 0;
-    // Drain any already-queued batches so they don't appear after clear
-    bridge.drain();
-  }, budget);
+    frozenDisplayTime = 0;
+    lastTimestamp = 0;  // next frame computes fresh dt
+    // Reset rate tracking so the flux readout starts fresh instead of
+    // staying near zero for seconds (EMA with stale denominator).
+    rateTime = performance.now() / 1000;
+    // Reset simTime so particle born-times re-sync with wall clock.
+    simTime = -1;
+    // Unfreeze if frozen so the simulation resumes immediately
+    params.frozen = false;
+    // Clear dirty/debounce state to prevent stale culling after reset
+    physicsDirty = false;
+    flowDirty = false;
+    settingsChangeTimer = 0;
+    // Recreate physics engine from current settings
+    const currentK = Number(params.kCurvature);
+    physics = new ECSKPhysics(params.beta, currentK);
+    lastBeta = params.beta;
+    lastK = currentK;
+    // Fresh seed for new session
+    const resetSeed = (Date.now() ^ (Math.random() * 0xFFFFFFFF)) >>> 0;
+    // Full worker restart: terminates old workers, creates fresh ones.
+    // This recovers from worker crashes and fully resets emission state.
+    bridge.restart({
+      beta: params.beta,
+      kCurvature: currentK,
+      perturbAmplitude: params.perturbAmplitude,
+      lMax: params.lMax,
+      nS: params.nS,
+      arrivalSpread: params.arrivalSpread,
+      seed: resetSeed,
+      fieldEvolution: params.fieldEvolution,
+      doubleBounce: params.doubleBounce,
+      betaPP: params.betaPP,
+      silkDamping: params.silkDamping,
+      hueMin: params.hueMin,
+      hueRange: params.hueRange,
+      brightnessFloor: params.brightnessFloor,
+      brightnessCeil: params.brightnessCeil,
+      dbSecondHueShift: params.dbSecondHueShift,
+      dbSecondBriScale: params.dbSecondBriScale,
+      ppHueShift: params.ppHueShift,
+      ppBriBoost: params.ppBriBoost,
+      ppSizeScale: params.ppSizeScale,
+      ppBaseDelay: params.ppBaseDelay,
+      ppScatterRange: params.ppScatterRange,
+    });
+    // Re-sync prev-snapshots so the first frame after reset sees no change
+    prevParticleRate      = params.particleRate;
+    prevPerturbAmplitude  = params.perturbAmplitude;
+    prevLMax              = params.lMax;
+    prevNS                = params.nS;
+    prevArrivalSpread     = params.arrivalSpread;
+    prevFieldEvolution    = params.fieldEvolution;
+    prevBeta              = params.beta;
+    prevKCurvature        = currentK;
+    prevDoubleBounce      = params.doubleBounce;
+    prevBetaPP             = params.betaPP;
+    prevSilkDamping        = params.silkDamping;
+    console.log("[main] Simulation reset (full worker restart)");
+  }, budget, screenInfo.refreshRate);
 
   // Seed prev-snapshot so the first frame sees no change (NaN → real value)
   prevParticleRate      = params.particleRate;
   prevPerturbAmplitude  = params.perturbAmplitude;
   prevLMax              = params.lMax;
   prevNS                = params.nS;
-  prevTimeDilation      = params.timeDilation;
+  prevArrivalSpread     = params.arrivalSpread;
   prevFieldEvolution    = params.fieldEvolution;
   prevBeta              = params.beta;
   prevKCurvature        = params.kCurvature;
@@ -163,12 +249,8 @@ async function main() {
   prevBetaPP             = params.betaPP;
   prevSilkDamping        = params.silkDamping;
 
-  // Set initial TD slider max from current β and amplitude
-  updateTimeDilationMax(
-    physics.sensitivity(),
-    params.beta,
-    params.perturbAmplitude,
-  );
+  // Communicate detected HDR mode to controls so irrelevant sliders are hidden
+  setHDRMode(renderer.hdrMode);
 
   // ── 5. Physics worker (off-thread emission) ────────────────────
   // Random seed per session so the perturbation field differs on each
@@ -181,7 +263,7 @@ async function main() {
     perturbAmplitude: params.perturbAmplitude,
     lMax: params.lMax,
     nS: params.nS,
-    timeDilation: params.timeDilation,
+    arrivalSpread: params.arrivalSpread,
     seed: sessionSeed,
     fieldEvolution: params.fieldEvolution,
     doubleBounce: params.doubleBounce,
@@ -198,38 +280,36 @@ async function main() {
     ppSizeScale: params.ppSizeScale,
     ppBaseDelay: params.ppBaseDelay,
     ppScatterRange: params.ppScatterRange,
-  });
+  }, budget.recommendedWorkers);
 
   // ── 6. Direct particle routing ───────────────────────────────────
   // Particles from the worker go straight into hits[] — no heap, no
-  // arrival-time gating, no per-frame caps.  This makes slider changes
-  // feel instant: the worker already syncs params on every tick(), so
-  // the next batch reflects the new settings immediately.
+  // arrival-time gating, no per-frame caps.  Reads directly from the
+  // worker's transferred Float32Array to avoid per-particle object
+  // creation in the bridge (saves ~50K object allocations per tick).
 
-  function ingestParticles(fresh: PendingParticle[], now: number): void {
-    for (let i = 0; i < fresh.length; i++) {
-      const p = fresh[i];
-      hits.push({
-        x: p.lx,
-        y: p.ly,
-        hue: p.hue,
-        brightness: p.brightness,
-        eps: p.eps,
-        size: p.hitSize,
-        tailAngle: p.tailAngle,
-        // Use arrivalTime directly — do NOT clamp to now.
-        // Particles with arrivalTime > now (not-yet-bounced regions) are
-        // held at full brightness until their time comes, then fade normally.
-        // Particles with arrivalTime < now (already-bounced regions) appear
-        // partially faded proportional to how long ago they bounced.
-        // This produces the correct physical wavefront: the bounce sweeps
-        // across the S² sphere with one side approaching peak density
-        // (bright) and the other receding from it (fading).
-        // (Cubero & Popławski 2019 §26; Unger & Popławski 2019 eq. 3)
-        born: p.arrivalTime,
-      });
+  function ingestBatches(batches: RawParticleBatch[]): void {
+    for (let b = 0; b < batches.length; b++) {
+      const { data, count } = batches[b];
+      for (let i = 0; i < count; i++) {
+        const off = i * PARTICLE_STRIDE;
+        hits.push({
+          x: data[off],          // lx
+          y: data[off + 1],      // ly
+          hue: data[off + 3],
+          brightness: data[off + 4],
+          eps: data[off + 5],
+          size: data[off + 6],   // hitSize
+          tailAngle: data[off + 7],
+          // Use arrivalTime directly — do NOT clamp to now.
+          // Particles with arrivalTime > now (not-yet-bounced regions) are
+          // held at full brightness until their time comes, then fade normally.
+          // (Cubero & Popławski 2019 §26; Unger & Popławski 2019 eq. 3)
+          born: data[off + 2],   // arrivalTime
+        });
+      }
+      arrivalCounter += count;
     }
-    arrivalCounter += fresh.length;
   }
 
   // ── 7. Animation loop ─────────────────────────────────────────────
@@ -244,12 +324,44 @@ async function main() {
   function animate(timestamp: number) {
     requestAnimationFrame(animate);
 
+    // ── Frame throttling (target FPS) ──────────────────────────
+    // When targetFps > 0, skip rAF callbacks that arrive too soon.
+    // The 0.92 factor prevents systematic drift at fractional intervals
+    // (e.g. 60 fps on 144 Hz — accept frames that land slightly early
+    // rather than waiting an extra VSync and producing stuttery judder).
+    const targetFps = Number(params.targetFps);  // lil-gui dropdown returns string
+    if (targetFps > 0 && lastTimestamp > 0) {
+      const minInterval = 1000 / targetFps;
+      if (timestamp - lastTimestamp < minInterval * 0.92) return;
+    }
+
     const dt =
       lastTimestamp > 0
         ? Math.min((timestamp - lastTimestamp) / 1000, 0.1)
         : 0.016;
+    // Raw inter-frame gap in ms (before capping dt) — used by watchdog below.
+    const rawGapMs = lastTimestamp > 0 ? timestamp - lastTimestamp : 16;
     lastTimestamp = timestamp;
     const now = timestamp / 1000;
+
+    // ── Frame-time watchdog: emergency recovery ──────────────────
+    // If the previous frame took too long (lag spike from a massive hit
+    // buffer), aggressively shed hits so the tab becomes responsive
+    // again.  This is the safety net that makes Reset/Reset Settings
+    // work even when the simulation is overloaded.
+    if (rawGapMs > 150 && hits.length > 10_000) {
+      // Keep only the 2 000 most recent visible hits
+      const keep = Math.min(2_000, hits.length);
+      hits = hits.slice(hits.length - keep);
+      visibleCount = Math.min(visibleCount, keep);
+      // Also flush any queued worker batches that would refill the buffer
+      bridge.flushPipeline();
+      console.warn(`[main] Frame watchdog: ${rawGapMs.toFixed(0)}ms lag — emergency trim to ${keep} hits`);
+    }
+
+    // Initialise simTime from wall-clock on the first frame so particle
+    // born-times share the same time basis as displayTime.
+    if (simTime < 0) simTime = now;
 
     // ── Recreate physics engine if β or k changed ────────────────
     const currentK = Number(params.kCurvature);  // lil-gui dropdown returns string
@@ -257,76 +369,84 @@ async function main() {
       physics = new ECSKPhysics(params.beta, currentK);
       lastBeta = params.beta;
       lastK = currentK;
-      // Keep TD slider max in sync with new β
-      updateTimeDilationMax(
-        physics.sensitivity(),
-        params.beta,
-        params.perturbAmplitude,
-      );
-    } else if (params.perturbAmplitude !== prevPerturbAmplitude) {
-      // Amplitude changed without β changing — still affects TD ceiling
-      updateTimeDilationMax(
-        physics.sensitivity(),
-        params.beta,
-        params.perturbAmplitude,
-      );
+      // Notify workers so they recreate their physics engine immediately
+      // (prevents 1+ frames of stale-β particles).
+      bridge.updatePhysics(physics.beta, currentK);
     }
 
     // ── Responsive setting changes ────────────────────────────────
-    // When any slider moves, clear the pending-arrival heap so stale
-    // particles from old settings don't keep draining for seconds.
-    // The worker bridge is NOT flushed — it already receives updated
-    // params on every tick(), so new particles at the new settings
-    // arrive on the very next frame without interruption.
+    // Physics params (β, k, perturbAmplitude, lMax, nS, betaPP,
+    // silkDamping) change the particle distribution — future-born hits
+    // are discarded since they were computed with old settings.
+    // Flow/visual params (particleRate, persistence, arrivalSpread,
+    // fieldEvolution) only affect going forward — no retroactive culling.
     //
-    // If the effective target count dropped (rate × persistence), we
-    // also trim the visible-hit array to the new target so the
-    // on-screen count snaps down immediately instead of waiting for
-    // the full persistence window to expire.
+    // Latching dirty flags + 200ms debounce prevent repeated wipes
+    // during a slider drag gesture while ensuring the cull actually
+    // fires once the slider settles.
     {
-      const settingsChanged =
-        params.particleRate     !== prevParticleRate     ||
+      const physicsChanged =
         params.beta             !== prevBeta             ||
         params.perturbAmplitude !== prevPerturbAmplitude ||
         params.lMax             !== prevLMax             ||
         params.nS               !== prevNS               ||
-        params.timeDilation     !== prevTimeDilation     ||
-        params.fieldEvolution   !== prevFieldEvolution   ||
         Number(params.kCurvature) !== prevKCurvature     ||
         params.doubleBounce     !== prevDoubleBounce     ||
         params.betaPP           !== prevBetaPP            ||
         params.silkDamping      !== prevSilkDamping;
 
-      if (settingsChanged) {
-        // Discard future-born hits — they were computed with old settings
-        // (delay offsets baked at the previous β / timeDilation / amplitude).
-        // Visible (past/present) hits are kept so the display doesn't flash.
-        // Use `now` here — displayTime is set later in the frame.
-        let wi = 0;
-        for (let i = 0; i < hits.length; i++) {
-          if (hits[i].born <= now) hits[wi++] = hits[i];
-        }
-        hits.length = wi;
-        // Snap visible hits down to the new expected steady-state
-        // count so the display responds instantly when rate drops.
-        const newTarget = Math.ceil(params.particleRate * params.persistence);
-        if (hits.length > newTarget) {
-          // Keep the newest hits (end of array = most recently born)
-          hits.splice(0, hits.length - newTarget);
-        }
+      const flowChanged =
+        params.particleRate     !== prevParticleRate     ||
+        params.arrivalSpread    !== prevArrivalSpread    ||
+        params.fieldEvolution   !== prevFieldEvolution;
+
+      // Latch dirty flags — they stay true until the debounce fires.
+      if (physicsChanged) physicsDirty = true;
+      if (flowChanged) flowDirty = true;
+
+      if (physicsChanged || flowChanged) {
+        // Reset debounce timer — culling fires when slider settles
+        settingsChangeTimer = SETTINGS_DEBOUNCE;
       }
 
+      // Update prev-snapshot every frame (safe because dirty flags latch).
       prevParticleRate      = params.particleRate;
       prevPerturbAmplitude  = params.perturbAmplitude;
       prevLMax              = params.lMax;
       prevNS                = params.nS;
-      prevTimeDilation      = params.timeDilation;
+      prevArrivalSpread     = params.arrivalSpread;
       prevFieldEvolution    = params.fieldEvolution;
       prevBeta              = params.beta;
       prevKCurvature        = Number(params.kCurvature);
       prevDoubleBounce      = params.doubleBounce;
       prevBetaPP             = params.betaPP;
       prevSilkDamping        = params.silkDamping;
+
+      // Decrement debounce; cull only when timer expires (slider settled)
+      if (settingsChangeTimer > 0) {
+        settingsChangeTimer -= dt;
+        if (settingsChangeTimer <= 0) {
+          settingsChangeTimer = 0;
+
+          // Physics change → discard far-future hits (baked at old settings).
+          // Keep particles arriving within 5s — they'll fade naturally via
+          // Weibull, avoiding the near-total wipe at high arrivalSpread where
+          // many particles are future-born.
+          if (physicsDirty) {
+            const horizon = now + 5;
+            let wi = 0;
+            for (let i = 0; i < hits.length; i++) {
+              if (hits[i].born <= horizon) hits[wi++] = hits[i];
+            }
+            hits.length = wi;
+            physicsDirty = false;
+          }
+
+          flowDirty = false;
+        }
+      }
+
+      // (Soft cap moved to after fade-expire partition — see below)
     }
 
     // ── Freeze: snapshot display time so particles stop aging ────
@@ -342,14 +462,63 @@ async function main() {
     if (!params.frozen) {
       simTime += dt;
 
+      // ── Compound-budget throttling ─────────────────────────────
+      // The four interacting cost axes are:
+      //   (a) Renderer CPU:  visibleHits ≈ rate × persistence
+      //   (b) Physics CPU:   rate × numCoeffs  (per second, across workers)
+      //   (c) Total buffer:  rate × (persistence + futureBuffer) — iterated every frame
+      //   (d) Actual buffer: if hits[] already exceeds ceiling, throttle hard
+      // We throttle the effective particle rate so neither product
+      // exceeds the hardware-derived budget.  This prevents the user
+      // from accidentally hitting multi-second frames by cranking
+      // two sliders simultaneously.
+      let effectiveRate = params.particleRate;
+
+      // (a) Renderer cost: cap rate so rate × persistence ≤ maxVisibleHits
+      const maxByRenderer = budget.maxVisibleHits / Math.max(params.persistence, 0.2);
+      if (effectiveRate > maxByRenderer) effectiveRate = maxByRenderer;
+
+      // (b) Physics cost: cap rate so rate × numCoeffs ≤ maxPhysicsCostPerSec
+      const numCoeffs = params.lMax * params.lMax + 2 * params.lMax; // Σ(2l+1) for l=1..lMax
+      if (numCoeffs > 0) {
+        const maxByPhysics = budget.maxPhysicsCostPerSec / numCoeffs;
+        if (effectiveRate > maxByPhysics) effectiveRate = maxByPhysics;
+      }
+
+      // (c) Total buffer: cap rate so the total hit count (visible + future)
+      //     stays within 2× maxVisibleHits.  The fade-expire loop iterates
+      //     EVERY hit each frame, so this is a CPU cost cap.
+      const totalWindow = Math.max(params.persistence, 0.2)
+        + params.arrivalSpread * SPREAD_TAIL_MULT + FUTURE_MARGIN;
+      const maxTotalHits = budget.maxVisibleHits * 2;
+      const maxByBuffer = maxTotalHits / totalWindow;
+      if (effectiveRate > maxByBuffer) effectiveRate = maxByBuffer;
+
+      // (d) Reactive back-pressure: if the hit buffer is already above
+      //     the steady-state ceiling, sharply reduce emission so it
+      //     drains instead of growing further.  Prevents the "wave +
+      //     blip" oscillation where ingest fights with soft-cap culling.
+      const currentCeiling = Math.min(
+        Math.ceil(effectiveRate * params.persistence * 3),
+        budget.maxVisibleHits,
+      );
+      if (hits.length > currentCeiling * 1.5) {
+        // Halve the rate for every doubling above ceiling (exponential back-off)
+        const overshoot = hits.length / Math.max(currentCeiling, 1);
+        effectiveRate = Math.max(100, effectiveRate / overshoot);
+      }
+
+      // Floor: never drop below 100/s (keep something visible)
+      effectiveRate = Math.max(100, effectiveRate);
+
       // Request particles from worker (results arrive next frame)
-      bridge.tick(dt, simTime, params.particleRate, {
+      bridge.tick(dt, simTime, effectiveRate, {
         beta: params.beta,
         kCurvature: Number(params.kCurvature),
         perturbAmplitude: params.perturbAmplitude,
         lMax: params.lMax,
         nS: params.nS,
-        timeDilation: params.timeDilation,
+        arrivalSpread: params.arrivalSpread,
         fieldEvolution: params.fieldEvolution,
         doubleBounce: params.doubleBounce,
         betaPP: params.betaPP,
@@ -368,62 +537,96 @@ async function main() {
       });
 
       // Ingest particles from previous worker tick(s) directly into hits
-      const fresh = bridge.drain();
-      if (fresh.length > 0) ingestParticles(fresh, now);
+      const batches = bridge.drain();
+      if (batches.length > 0) ingestBatches(batches);
     }
 
-    // ── Fade-expire hits in place (no allocation) —————————————
-    // Particles go through three life stages:
-    //   born > displayTime  — not yet arrived: invisible, waiting in queue
-    //   0 ≤ age ≤ cutoff    — arrived and fading: rendered with decreasing α
-    //   age > cutoff or
-    //   fade < threshold    — fully faded: discarded
+    // ── Fade-expire & partition hits (zero allocation) ————————————
+    // Single pass: compact live hits, partitioned as visible-first.
+    //   hits[0 .. visibleCount)          — already-arrived, rendered
+    //   hits[visibleCount .. total)      — future arrivals, kept but not rendered
     //
-    // Future arrivals (age < 0) are kept in the array but never passed
-    // to the renderer.  We separate hits into two arrays:
-    //   visible[]  — age ≥ 0, still bright enough to render
-    //   pending[]  — born in future, will appear later
-    // This keeps visible count = ~rate × persistence regardless of
-    // how far into the future the arrival-time spread reaches.
-    //
-    // Use displayTime so that frozen particles don't age out.
-    // Cutoff derived from the Weibull formula: solve exp(-(t/τ)^k) = threshold
-    //   → t = τ × (-ln(threshold))^(1/k)
-    // with a small safety margin (×1.2) to avoid popping.
+    // params.persistence = user-facing "fade duration" (seconds).
+    // τ = internal Weibull scale parameter derived from the user duration.
+    // cutoff = duration × safety margin (the user's slider value is the
+    //          exact time to reach the discard threshold, so the cutoff
+    //          is just duration × a small margin for anti-pop).
     const fadeThreshold = FADE_THRESHOLD;
     const k = params.fadeSharpness;
-    const cutoff = params.persistence * Math.pow(-Math.log(fadeThreshold), 1 / k) * CUTOFF_MARGIN;
-    let writeIdx = 0;
+    const tau = fadeDurationToTau(params.persistence, k);
+    const cutoff = params.persistence * CUTOFF_MARGIN;
+    visibleCount = 0;
+    let futureIdx = 0;
     for (let i = 0; i < hits.length; i++) {
       const hit = hits[i];
       const age = displayTime - hit.born;
       if (age > cutoff) continue;        // expired — discard
       if (age < 0) {
-        // Future arrival — keep in array but skip rendering.
-        // Safety: discard if absurdly far in the future (> MAX_FUTURE_SECONDS s).
-        if (age < -MAX_FUTURE_SECONDS) continue;
-        hits[writeIdx++] = hit;
+        // Future arrival — stash in reusable buffer, append after visible.
+        if (age < -(params.arrivalSpread * SPREAD_TAIL_MULT + FUTURE_MARGIN)) continue;
+        _futureHits[futureIdx++] = hit;
         continue;
       }
       // Born: check if still bright enough to render (Weibull, matches renderer)
-      const fade = Math.exp(-Math.pow(age / params.persistence, k));
+      const fade = Math.exp(-Math.pow(age / tau, k));
       if (fade < fadeThreshold) continue; // too dim — discard
-      hits[writeIdx++] = hit;
+      hits[visibleCount++] = hit;
     }
-    hits.length = writeIdx;
+    // Append future hits after visible partition
+    for (let i = 0; i < futureIdx; i++) {
+      hits[visibleCount + i] = _futureHits[i];
+    }
+    hits.length = visibleCount + futureIdx;
+
+    // ── Soft cap: visible-only gradual drain ──────────────────────
+    // Only cull visible particles when VISIBLE count alone exceeds
+    // the expected steady state.  Future-born particles (buffered
+    // for later display) do NOT count toward the threshold.
+    //
+    // The cap is the MINIMUM of:
+    //   - 3 × steadyTarget (original heuristic)
+    //   - budget.maxVisibleHits (compound CPU budget from hardware detection)
+    // Drain rate scales with excess: 15% for mild, up to 80% for severe.
+    const steadyTarget = Math.ceil(params.particleRate * params.persistence);
+    const visibleCeiling = Math.min(steadyTarget * 3, budget.maxVisibleHits);
+    if (visibleCount > visibleCeiling) {
+      const safeTarget = Math.min(steadyTarget, budget.maxVisibleHits);
+      const excess = visibleCount - safeTarget;
+      // Scale drain rate: 15% for mild excess → 80% for ≥4× excess
+      const excessRatio = Math.min(excess / Math.max(safeTarget, 1), 4);
+      const drainFraction = 0.15 + 0.65 * Math.min(excessRatio / 4, 1);
+      const dropCount = Math.max(1, Math.ceil(excess * drainFraction));
+      // Shift visible+future left by dropCount (avoids O(N) splice overhead)
+      const newLen = hits.length - dropCount;
+      for (let i = dropCount; i < hits.length; i++) {
+        hits[i - dropCount] = hits[i];
+      }
+      hits.length = newLen;
+      visibleCount -= dropCount;
+    }
+
+    // ── Future cap: limit buffered future particles ──────────────
+    // Prevents unbounded memory growth from large arrivalSpread values.
+    // Hard limit: never buffer more future hits than maxVisibleHits.
+    const futureCount = hits.length - visibleCount;
+    const futureWindow = params.arrivalSpread * SPREAD_TAIL_MULT + FUTURE_MARGIN;
+    const maxFuture = Math.min(
+      budget.maxVisibleHits,
+      Math.max(10_000, Math.ceil(params.particleRate * futureWindow * 2)),
+    );
+    if (futureCount > maxFuture) {
+      hits.length = visibleCount + maxFuture;
+    }
 
     // Enforce emergency ceiling (prevents multi-GB RAM at extreme settings)
     if (hits.length > EMERGENCY_HIT_CAP) {
-      hits.splice(0, hits.length - EMERGENCY_HIT_CAP);
-    }
-
-    // ── Update renderer (visible hits only — skip pending future arrivals)
-    // Future particles (born > displayTime) are held in hits[] so they
-    // appear when their time comes, but the renderer only receives hits
-    // that have already arrived.  This keeps visible count ≈ rate × persistence.
-    const visibleHits: Hit[] = [];
-    for (let i = 0; i < hits.length; i++) {
-      if (hits[i].born <= displayTime) visibleHits.push(hits[i]);
+      hits = hits.slice(hits.length - EMERGENCY_HIT_CAP);
+      // Recount visible after truncation (visible-first layout preserved)
+      visibleCount = 0;
+      for (let i = 0; i < hits.length; i++) {
+        if (hits[i].born <= displayTime) visibleCount++;
+        else break;  // visible partition ends at first future hit
+      }
     }
 
     renderer.hitBaseSize = params.hitSize;
@@ -440,9 +643,31 @@ async function main() {
     renderer.saturationRange = params.saturationRange;
     renderer.ringOpacity = params.ringOpacity;
     renderer.ringColor = parseInt(params.ringColor.replace('#', ''), 16);
+    renderer.ringWidthPx = params.ringWidthPx;
+    renderer.ringBloomStrength = params.ringBloomStrength;
+    renderer.ringBloomRadius = params.ringBloomRadius;
+    renderer.ringAutoColor = params.ringAutoColor;
+
+    // When auto-colour is active, feed the computed colour back into the
+    // params object so the lil-gui colour picker (.listen()) stays in sync.
+    if (params.ringAutoColor) {
+      const hex = '#' + renderer.effectiveRingColor.toString(16).padStart(6, '0');
+      if (params.ringColor !== hex) params.ringColor = hex;
+    }
+
     renderer.softHdrExposure = params.softHdrExposure;
     renderer.particleSoftEdge = params.particleSoftEdge;
-    renderer.updateHits(visibleHits, displayTime, params.persistence);
+    renderer.autoBrightness = params.autoBrightness;
+    // Compute the maximum possible eps for auto-brightness ceiling.
+    // With perturbation, the smallest β_eff (= β × (1 − amplitude)) yields
+    // the highest energy density at bounce (eps ∝ 1/a_min⁴).
+    const minBetaEff = physics.beta * Math.max(0.001, 1 - params.perturbAmplitude);
+    const maxBetaEff = physics.beta * (1 + params.perturbAmplitude);
+    renderer.maxEps = physics.bounceProps(minBetaEff).eps;
+    renderer.minEps = physics.bounceProps(maxBetaEff).eps;
+    renderer.backgroundColor = parseInt(params.backgroundColor.replace('#', ''), 16);
+    renderer.zoom = params.zoom;
+    renderer.updateHits(hits, visibleCount, displayTime, tau);
     renderer.render();
 
     // ── FPS + HUD ─────────────────────────────────────────────────
@@ -468,7 +693,7 @@ async function main() {
         ? (params.betaPP / ECSKPhysics.BETA_CR).toFixed(2)
         : "off";
       hud.flux = arrivalRateSmooth.toFixed(0);
-      hud.visible = String(visibleHits.length);
+      hud.visible = String(visibleCount);
       hud.fps = String(fps);
       // Update screen info in HUD (may change if moved between monitors)
       const si = screenDetector.info;
@@ -486,8 +711,20 @@ async function main() {
       hud.cpuCores = String(hwInfo.cpu.logicalCores);
       hud.cpuBench = hwInfo.cpu.benchmarkScore.toFixed(2) + "×";
       hud.gpu = hwInfo.gpu.device || hwInfo.gpu.vendor;
-      hud.capability = `${(hwInfo.rawCapability * 100).toFixed(0)}% hw → ${(hwInfo.capability * 100).toFixed(0)}% eff`;
-      hud.tier = `${hwInfo.tier.toUpperCase()} (${(hwInfo.capability * 100).toFixed(0)}%)`;
+      hud.capability = `${(hwInfo.capability * 100).toFixed(0)}%`;
+      hud.tier = `${hwInfo.tier.toUpperCase()}`;
+      hud.cpuUsage = `${bridge.workerCount} / ${hwInfo.cpu.logicalCores} threads`;
+      // Compute load: max of renderer cost fraction and physics cost fraction
+      const rendererLoad = (params.particleRate * params.persistence) / budget.maxVisibleHits;
+      const numCoeffsHud = params.lMax * params.lMax + 2 * params.lMax;
+      const physicsLoad = numCoeffsHud > 0
+        ? (params.particleRate * numCoeffsHud) / budget.maxPhysicsCostPerSec
+        : 0;
+      const overallLoad = Math.max(rendererLoad, physicsLoad);
+      const loadPct = Math.round(overallLoad * 100);
+      const loadColor = overallLoad > 1 ? ' ⚠️ THROTTLED' : overallLoad > 0.8 ? ' • HIGH' : '';
+      hud.computeLoad = `${loadPct}%${loadColor}`;
+      hud.bufferFill = `${(hits.length / 1000).toFixed(0)}K / ${(EMERGENCY_HIT_CAP / 1000).toFixed(0)}K`;
       updateHUD();
     }
   }

@@ -5,17 +5,18 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Birth of a Universe — Torsion-Bounce Cosmology</title>
   <style>
+    /* Critical inline styles — prevents FOUC while JS/CSS loads */
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
     canvas { display: block; width: 100%; height: 100%; }
-    #info {
-      position: absolute; top: 10px; left: 10px; color: #aaa;
-      font: 12px/1.4 monospace; pointer-events: none;
-      text-shadow: 0 0 4px #000;
-    }
   </style>
 </head>
 <body>
+  <noscript>
+    <p style="color:#aaa;font:16px/1.6 sans-serif;text-align:center;margin-top:20vh">
+      This visualization requires JavaScript and a WebGPU-capable browser (Chrome 113+, Edge 113+).
+    </p>
+  </noscript>
   <div id="info">Loading modules...</div>
   <script type="module" src="/src/main.ts"></script>
 </body>

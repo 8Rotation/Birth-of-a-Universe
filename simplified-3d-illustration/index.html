@@ -88,7 +88,7 @@
   <p class="dim">The simulation is an infinitely thin 2D sensor at the red circle.
      It records which fluid elements on S² reach their local bounce, and when.
      No depth — only the hypersurface itself.</p>
-  <p class="dim">Drag to rotate · Scroll to zoom</p>
+  <p class="dim">Left-drag rotate · Right-drag pan · Scroll zoom</p>
 </div>
 
 <div id="hint">Left-drag rotate · Right-drag pan · Scroll zoom</div>
@@ -104,8 +104,8 @@
 <script type="importmap">
 {
   "imports": {
-    "three": "https://cdn.jsdelivr.net/npm/three@0.164.1/build/three.module.js",
-    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.164.1/examples/jsm/"
+    "three": "https://cdn.jsdelivr.net/npm/three@0.183.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.0/examples/jsm/"
   }
 }
 </script>
@@ -114,11 +114,17 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
+// Guard: show message if Three.js failed to load (CDN down)
+if (typeof THREE === 'undefined') {
+  document.body.innerHTML = '<p style="color:#c66;font:16px/1.6 sans-serif;text-align:center;margin-top:20vh">Failed to load Three.js from CDN. Check your internet connection.</p>';
+  throw new Error('Three.js CDN unavailable');
+}
+
 // ─────────────────────────────────────────────────────
 //  Physics: compute a̅(τ̅) trajectory
 // ─────────────────────────────────────────────────────
 
-const BETA = 0.12;  // representative spin parameter
+const BETA = 0.10;  // must match DEFAULT_BETA in main app
 
 function friedmannRHS(a, beta) {
   // (da̅/dτ̅)² = 1/a̅² − β/a̅⁴ − 1
@@ -127,11 +133,12 @@ function friedmannRHS(a, beta) {
 }
 
 // Bounce and turnaround scale factors
+if (4 * BETA >= 1) throw new Error(`β=${BETA} ≥ 0.25 — no real bounce`);
 const disc = Math.sqrt(1 - 4 * BETA);
 const aMin = Math.sqrt((1 - disc) / 2);
 const aMax = Math.sqrt((1 + disc) / 2);
 
-// Integrate a̅(τ̅) from bounce outward using RK4
+// Integrate a̅(τ̅) from bounce outward using left-endpoint quadrature
 // da̅/dτ̅ = sqrt(f(a̅)) during expansion, −sqrt(f(a̅)) during contraction
 function integrateTrajectory(nSteps) {
   const points = [];  // { tau, a }
@@ -169,13 +176,21 @@ const trajectory = integrateTrajectory(600);
 // ─────────────────────────────────────────────────────
 
 const scene    = new THREE.Scene();
-const camera   = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.01, 100);
-const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
-renderer.setSize(innerWidth, innerHeight);
-renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+const camera   = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.01, 100);
+
+let renderer;
+try {
+  renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+} catch (e) {
+  document.body.innerHTML = '<p style="color:#c66;font:16px/1.6 sans-serif;text-align:center;margin-top:20vh">WebGL is not available in this browser. Try Chrome, Edge, or Firefox.</p>';
+  throw e;
+}
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setClearColor(0x050508);
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.0;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
 document.body.prepend(renderer.domElement);
 
 camera.position.set(2.2, 1.0, 2.8);
@@ -387,18 +402,18 @@ const axis = new THREE.Mesh(axisGeo, axisMat);
 axis.position.y = 0;
 scene.add(axis);
 
-// Arrow tips
+// Arrow tips (both point −Y, indicating proper-time τ̅ flow: contraction → bounce → expansion)
 const arrowGeo = new THREE.ConeGeometry(0.03, 0.1, 8);
 
-const arrowUp = new THREE.Mesh(arrowGeo, new THREE.MeshBasicMaterial({ color: 0xffaa44 }));
-arrowUp.position.y = VSCALE * 1.12;
-arrowUp.rotation.z = Math.PI;
-scene.add(arrowUp);
+const arrowTop = new THREE.Mesh(arrowGeo, new THREE.MeshBasicMaterial({ color: 0xffaa44 }));
+arrowTop.position.y = VSCALE * 1.12;
+arrowTop.rotation.z = Math.PI;
+scene.add(arrowTop);
 
-const arrowDown = new THREE.Mesh(arrowGeo, new THREE.MeshBasicMaterial({ color: 0x5588ff }));
-arrowDown.position.y = -VSCALE * 1.12;
-arrowDown.rotation.z = Math.PI;
-scene.add(arrowDown);
+const arrowBottom = new THREE.Mesh(arrowGeo, new THREE.MeshBasicMaterial({ color: 0x5588ff }));
+arrowBottom.position.y = -VSCALE * 1.12;
+arrowBottom.rotation.z = Math.PI;
+scene.add(arrowBottom);
 
 // ─────────────────────────────────────────────────────
 //  "You are here" indicator (inside baby universe)
@@ -543,7 +558,7 @@ const graphPoints = trajectory.map(p => {
   return new THREE.Vector3(x, y, 0);
 });
 const graphGeo = new THREE.BufferGeometry().setFromPoints(graphPoints);
-const graphMat = new THREE.LineBasicMaterial({ color: 0x88aacc, linewidth: 2 });
+const graphMat = new THREE.LineBasicMaterial({ color: 0x88aacc });
 scene.add(new THREE.Line(graphGeo, graphMat));
 
 // Axis for graph
@@ -569,6 +584,7 @@ scene.add(bDot);
 function makeTextSprite(text, { fontSize = 42, color = '#aaccee', bg = 'rgba(0,0,0,0.5)' } = {}) {
   const canvas = document.createElement('canvas');
   const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('Could not create 2D canvas context');
   canvas.width = 1024;
   canvas.height = 128;
   ctx.fillStyle = bg;
@@ -618,8 +634,8 @@ function projectLabel(el, worldPos) {
   const v = worldPos.clone().project(camera);
   if (v.z > 1) { el.style.display = 'none'; return; }
   el.style.display = '';
-  el.style.left = ((v.x + 1) / 2 * innerWidth) + 'px';
-  el.style.top  = ((-v.y + 1) / 2 * innerHeight) + 'px';
+  el.style.left = ((v.x + 1) / 2 * window.innerWidth) + 'px';
+  el.style.top  = ((-v.y + 1) / 2 * window.innerHeight) + 'px';
 }
 
 // ─────────────────────────────────────────────────────
@@ -637,9 +653,9 @@ function updateBounceGlow(time) {
 // ─────────────────────────────────────────────────────
 
 function onResize() {
-  camera.aspect = innerWidth / innerHeight;
+  camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
-  renderer.setSize(innerWidth, innerHeight);
+  renderer.setSize(window.innerWidth, window.innerHeight);
 }
 window.addEventListener('resize', onResize);
 

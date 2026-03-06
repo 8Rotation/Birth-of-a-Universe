@@ -233,89 +233,161 @@ interface RefreshMeasurement {
 }
 
 /**
- * Measures refresh rate by timing requestAnimationFrame over ~30 frames.
- * Also analyses frame-time variance to detect VRR (variable refresh rate).
- *
- * VRR heuristic: on a fixed-rate display, frame intervals cluster tightly
- * around 1/rate (±0.5ms jitter). On VRR, the compositor may deliver frames
- * at varying intervals when the GPU finishes at different times.
- * We check the coefficient of variation (CV = stddev/mean):
- *   - CV < 0.05 → fixed rate (consistent intervals)
- *   - CV ≥ 0.05 → likely VRR (variable intervals)
- *
- * Note: this is a heuristic. A heavily loaded fixed-rate display can also
- * show variance. But for our purposes (choosing render strategies), it's
- * good enough.
+ * Try to read the native screen refresh rate from the browser.
+ * Chrome 110+ exposes `screen.refreshRate` (behind flag or origin trial).
+ * Falls back to null if not available.
  */
-function measureRefreshRate(): Promise<RefreshMeasurement> {
+function nativeRefreshRate(): number | null {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const rate = (window.screen as any).refreshRate;
+    if (typeof rate === "number" && rate > 0 && isFinite(rate)) {
+      console.log(`[screen] Native screen.refreshRate = ${rate} Hz`);
+      return rate;
+    }
+  } catch { /* not available */ }
+  return null;
+}
+
+/**
+ * Single rAF measurement pass — collects frame intervals.
+ * Uses a larger sample count (60) and skips warmup frames.
+ */
+function singleMeasurementPass(sampleCount = 60, warmupFrames = 10): Promise<number[]> {
   return new Promise((resolve) => {
     const samples: number[] = [];
-    const SAMPLE_COUNT = 30;
     let prev = 0;
-    let count = 0;
+    let frame = 0;
 
     function tick(ts: number) {
       if (prev > 0) {
+        frame++;
         const dt = ts - prev;
-        // Reject extreme outliers (tab switch, GC pause, warmup noise)
-        if (dt > 1.5 && dt < 60) {
+        // Skip warmup frames and reject extreme outliers (tab switch, GC pause)
+        if (frame > warmupFrames && dt > 1.5 && dt < 60) {
           samples.push(dt);
         }
-        count++;
       }
       prev = ts;
 
-      if (count < SAMPLE_COUNT + 5) {
+      if (samples.length < sampleCount && frame < sampleCount + warmupFrames + 20) {
         requestAnimationFrame(tick);
       } else {
-        if (samples.length < 8) {
-          resolve({
-            hz: 60, intervalMs: 16.667,
-            vrrDetected: false, vrrRange: null,
-          });
-          return;
-        }
-
-        // Sort for median
-        samples.sort((a, b) => a - b);
-        const median = samples[Math.floor(samples.length / 2)];
-        const hz = 1000 / median;
-        const snappedHz = snapToCommonRate(hz);
-
-        // VRR detection: check coefficient of variation
-        const mean = samples.reduce((s, v) => s + v, 0) / samples.length;
-        const variance = samples.reduce((s, v) => s + (v - mean) ** 2, 0) / samples.length;
-        const stddev = Math.sqrt(variance);
-        const cv = stddev / mean;
-
-        const vrrDetected = cv >= 0.05;
-        let vrrRange: [number, number] | null = null;
-
-        if (vrrDetected) {
-          // Estimate the VRR range from the spread of frame intervals
-          // Use P10/P90 to be robust against outliers
-          const p10 = samples[Math.floor(samples.length * 0.1)];
-          const p90 = samples[Math.floor(samples.length * 0.9)];
-          const highHz = Math.round(1000 / p10); // shortest interval = highest rate
-          const lowHz = Math.round(1000 / p90);  // longest interval = lowest rate
-          vrrRange = [Math.max(lowHz, 24), Math.min(highHz, 500)];
-        }
-
-        console.log(
-          `[screen] Refresh: ${snappedHz} Hz (median ${median.toFixed(2)}ms), ` +
-          `CV=${cv.toFixed(3)}${vrrDetected ? ` → VRR detected (est. ${vrrRange![0]}-${vrrRange![1]} Hz)` : " → fixed rate"}`
-        );
-
-        resolve({
-          hz: snappedHz,
-          intervalMs: median,
-          vrrDetected,
-          vrrRange,
-        });
+        resolve(samples);
       }
     }
 
     requestAnimationFrame(tick);
+  });
+}
+
+/**
+ * Analyse a set of frame-interval samples and return the Hz + VRR info.
+ * Uses a trimmed mean (discarding top/bottom 10%) for robustness.
+ */
+function analyseIntervals(samples: number[]): RefreshMeasurement {
+  if (samples.length < 8) {
+    return { hz: 60, intervalMs: 16.667, vrrDetected: false, vrrRange: null };
+  }
+
+  // Sort ascending
+  const sorted = [...samples].sort((a, b) => a - b);
+
+  // Trimmed mean: drop bottom 10% and top 10%
+  const trimLow = Math.floor(sorted.length * 0.1);
+  const trimHigh = sorted.length - trimLow;
+  const trimmed = sorted.slice(trimLow, trimHigh);
+
+  const trimmedMean = trimmed.reduce((s, v) => s + v, 0) / trimmed.length;
+  const hz = 1000 / trimmedMean;
+  const snappedHz = snapToCommonRate(hz);
+
+  // Also get median for the interval report
+  const median = sorted[Math.floor(sorted.length / 2)];
+
+  // VRR detection: coefficient of variation on the trimmed set
+  const variance = trimmed.reduce((s, v) => s + (v - trimmedMean) ** 2, 0) / trimmed.length;
+  const stddev = Math.sqrt(variance);
+  const cv = stddev / trimmedMean;
+
+  const vrrDetected = cv >= 0.05;
+  let vrrRange: [number, number] | null = null;
+
+  if (vrrDetected) {
+    const p10 = sorted[Math.floor(sorted.length * 0.1)];
+    const p90 = sorted[Math.floor(sorted.length * 0.9)];
+    const highHz = Math.round(1000 / p10);
+    const lowHz = Math.round(1000 / p90);
+    vrrRange = [Math.max(lowHz, 24), Math.min(highHz, 500)];
+  }
+
+  console.log(
+    `[screen] Refresh pass: ${snappedHz} Hz (trimmed mean ${trimmedMean.toFixed(2)}ms, median ${median.toFixed(2)}ms), ` +
+    `CV=${cv.toFixed(3)}${vrrDetected ? ` → VRR detected (est. ${vrrRange![0]}-${vrrRange![1]} Hz)` : " → fixed rate"}`
+  );
+
+  return { hz: snappedHz, intervalMs: median, vrrDetected, vrrRange };
+}
+
+/**
+ * Measures refresh rate using a robust multi-pass approach:
+ * 1. Check native screen.refreshRate API (Chrome 110+) — instant & accurate.
+ * 2. Fall back to two rAF measurement passes, each with 60 samples + warmup.
+ *    If both passes agree, use that value.  If they disagree, prefer the
+ *    higher rate (more likely the true rate; lower is usually from load).
+ *
+ * Also analyses frame-time variance to detect VRR (variable refresh rate).
+ */
+function measureRefreshRate(): Promise<RefreshMeasurement> {
+  return new Promise(async (resolve) => {
+    // ── Attempt 1: native API (instant, most reliable) ──────────
+    const native = nativeRefreshRate();
+    if (native !== null) {
+      const snapped = snapToCommonRate(native);
+      // Still do a quick rAF pass for VRR detection
+      const samples = await singleMeasurementPass(40, 5);
+      const analysis = analyseIntervals(samples);
+      resolve({
+        hz: snapped,
+        intervalMs: 1000 / snapped,
+        vrrDetected: analysis.vrrDetected,
+        vrrRange: analysis.vrrRange,
+      });
+      return;
+    }
+
+    // ── Attempt 2: two rAF measurement passes with consensus ────
+    const samples1 = await singleMeasurementPass(60, 10);
+    const pass1 = analyseIntervals(samples1);
+
+    const samples2 = await singleMeasurementPass(60, 5);
+    const pass2 = analyseIntervals(samples2);
+
+    let finalHz: number;
+    if (pass1.hz === pass2.hz) {
+      // Both passes agree — high confidence
+      finalHz = pass1.hz;
+      console.log(`[screen] Both passes agree: ${finalHz} Hz`);
+    } else {
+      // Disagree: prefer the higher rate (load/jitter usually drags
+      // measurements DOWN, so the higher reading is more likely correct)
+      finalHz = Math.max(pass1.hz, pass2.hz);
+      console.log(
+        `[screen] Passes disagree (${pass1.hz} vs ${pass2.hz} Hz) → using higher: ${finalHz} Hz`
+      );
+    }
+
+    // Merge VRR info from the more stable pass (lower CV = better data)
+    const bestPass = (pass1.vrrDetected === pass2.vrrDetected)
+      ? pass1  // both agree on VRR status, use first
+      : (pass1.intervalMs < pass2.intervalMs ? pass1 : pass2);
+
+    resolve({
+      hz: finalHz,
+      intervalMs: bestPass.intervalMs,
+      vrrDetected: bestPass.vrrDetected,
+      vrrRange: bestPass.vrrRange,
+    });
   });
 }
 
@@ -332,9 +404,8 @@ function buildInfo(
   const vh = window.innerHeight;
 
   // Physical screen resolution
-  // screen.width/height report CSS pixels on Windows/Linux (need ×DPR),
-  // but physical pixels on macOS. We multiply by DPR uniformly and
-  // accept a slight over-report on macOS — it still classifies correctly.
+  // All modern browsers report CSS pixels for screen.width/height,
+  // regardless of platform. Multiply by DPR to get physical pixels.
   const sw = Math.round(window.screen.width * dpr);
   const sh = Math.round(window.screen.height * dpr);
   const rw = Math.round(vw * dpr);
@@ -494,15 +565,13 @@ export function epsToNits(
   eps: number,
   peakNits: number,
   minNits = 20,
+  epsDim = EPS_DIM,
+  epsBright = EPS_BRIGHT,
 ): number {
-  // Reference range matching the physics:
-  //   β = 0.20  → eps ≈ 13   (low energy, strong torsion)
-  //   β → 0     → eps → ∞    (high energy, weak torsion)
-  // We anchor the bright end at eps = 10 000 (a_min = 0.1).
-
-  const t = Math.max(0, Math.min(1,
-    (eps - EPS_DIM) / (EPS_BRIGHT - EPS_DIM),
-  ));
+  const range = epsBright - epsDim;
+  const t = range > 0
+    ? Math.max(0, Math.min(1, (eps - epsDim) / range))
+    : 0.5;
   return minNits + t * (peakNits - minNits);
 }
 

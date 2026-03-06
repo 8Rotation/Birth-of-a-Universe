@@ -8,10 +8,10 @@
  * Message protocol
  * ────────────────
  * Main → Worker:
- *   {type:'init',   beta, kCurvature, perturbAmplitude, lMax, nS, timeDilation, seed, fieldEvolution, doubleBounce, betaPP}
- *   {type:'tick',   dt, simTime, particleRate, beta, kCurvature, perturbAmplitude, lMax, nS, timeDilation, fieldEvolution, doubleBounce, betaPP}
+ *   {type:'init',   beta, kCurvature, perturbAmplitude, lMax, nS, arrivalSpread, seed, fieldEvolution, doubleBounce, betaPP, coeffs?: Float64Array}
+ *   {type:'tick',   dt, simTime, particleRate, beta, kCurvature, perturbAmplitude, lMax, nS, arrivalSpread, fieldEvolution, doubleBounce, betaPP, coeffs?: Float64Array}
  *   {type:'updateBeta', beta, kCurvature}
- *   {type:'reset',  beta, kCurvature, perturbAmplitude, lMax, nS, timeDilation, seed, fieldEvolution, doubleBounce, betaPP}
+ *   {type:'reset',  beta, kCurvature, perturbAmplitude, lMax, nS, arrivalSpread, seed, fieldEvolution, doubleBounce, betaPP, coeffs?: Float64Array}
  *
  * Worker → Main:
  *   {type:'particles', count, data: Float32Array | null}
@@ -23,6 +23,7 @@
 
 import { ECSKPhysics } from "./ecsk-physics.js";
 import { StreamEmitter } from "./shell.js";
+import type { EmitterConfig } from "./shell.js";
 
 const STRIDE = 8;
 
@@ -35,13 +36,44 @@ const STRIDE = 8;
  */
 const MAX_PARTICLES_PER_TICK = 50_000;
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
-const _self = self as any;
+// Worker global scope — typed to expose onmessage/postMessage without full `any`.
+// DedicatedWorkerGlobalScope is in lib.webworker.d.ts (not included alongside DOM),
+// so we use a narrow interface instead.
+interface WorkerSelf {
+  onmessage: ((e: MessageEvent) => void) | null;
+  postMessage(message: unknown, transfer?: Transferable[]): void;
+}
+const _self: WorkerSelf = self as unknown as WorkerSelf;
 
 let physics: ECSKPhysics;
 let emitter: StreamEmitter;
 let generation = 0;
 let currentK = 1;  // spatial curvature, default closed
+
+/** Extract an EmitterConfig (with defaults via Partial) from a worker message. */
+function configFromMsg(msg: any): Partial<EmitterConfig> {
+  return {
+    perturbAmplitude: msg.perturbAmplitude,
+    lMax: msg.lMax,
+    nS: msg.nS,
+    arrivalSpread: msg.arrivalSpread,
+    fieldEvolution: msg.fieldEvolution,
+    doubleBounce: msg.doubleBounce ?? false,
+    betaPP: msg.betaPP ?? 0,
+    silkDamping: msg.silkDamping,
+    hueMin: msg.hueMin,
+    hueRange: msg.hueRange,
+    brightnessFloor: msg.brightnessFloor,
+    brightnessCeil: msg.brightnessCeil,
+    dbSecondHueShift: msg.dbSecondHueShift,
+    dbSecondBriScale: msg.dbSecondBriScale,
+    ppHueShift: msg.ppHueShift,
+    ppBriBoost: msg.ppBriBoost,
+    ppSizeScale: msg.ppSizeScale,
+    ppBaseDelay: msg.ppBaseDelay,
+    ppScatterRange: msg.ppScatterRange,
+  };
+}
 
 _self.onmessage = (e: MessageEvent) => {
   const msg = e.data;
@@ -51,31 +83,9 @@ _self.onmessage = (e: MessageEvent) => {
       generation = msg.generation ?? 0;
       currentK = msg.kCurvature ?? 1;
       physics = new ECSKPhysics(msg.beta, currentK);
-      emitter = new StreamEmitter(
-        physics,
-        {
-          perturbAmplitude: msg.perturbAmplitude,
-          lMax: msg.lMax,
-          nS: msg.nS,
-          timeDilation: msg.timeDilation,
-          fieldEvolution: msg.fieldEvolution,
-          doubleBounce: msg.doubleBounce ?? false,
-          betaPP: msg.betaPP ?? 0,
-          silkDamping: msg.silkDamping,
-          hueMin: msg.hueMin,
-          hueRange: msg.hueRange,
-          brightnessFloor: msg.brightnessFloor,
-          brightnessCeil: msg.brightnessCeil,
-          dbSecondHueShift: msg.dbSecondHueShift,
-          dbSecondBriScale: msg.dbSecondBriScale,
-          ppHueShift: msg.ppHueShift,
-          ppBriBoost: msg.ppBriBoost,
-          ppSizeScale: msg.ppSizeScale,
-          ppBaseDelay: msg.ppBaseDelay,
-          ppScatterRange: msg.ppScatterRange,
-        },
-        msg.seed,
-      );
+      emitter = new StreamEmitter(physics, configFromMsg(msg), msg.seed);
+      // If the bridge sends centrally-evolved coefficients, apply them
+      if (msg.coeffs) emitter.applyCoeffs(msg.coeffs as Float64Array);
       break;
     }
 
@@ -88,33 +98,11 @@ _self.onmessage = (e: MessageEvent) => {
 
     case "reset": {
       generation = msg.generation ?? generation;
-      currentK = msg.kCurvature ?? currentK;
+      currentK = msg.kCurvature ?? 1;
       physics = new ECSKPhysics(msg.beta, currentK);
-      emitter = new StreamEmitter(
-        physics,
-        {
-          perturbAmplitude: msg.perturbAmplitude,
-          lMax: msg.lMax,
-          nS: msg.nS,
-          timeDilation: msg.timeDilation,
-          fieldEvolution: msg.fieldEvolution,
-          doubleBounce: msg.doubleBounce ?? false,
-          betaPP: msg.betaPP ?? 0,
-          silkDamping: msg.silkDamping,
-          hueMin: msg.hueMin,
-          hueRange: msg.hueRange,
-          brightnessFloor: msg.brightnessFloor,
-          brightnessCeil: msg.brightnessCeil,
-          dbSecondHueShift: msg.dbSecondHueShift,
-          dbSecondBriScale: msg.dbSecondBriScale,
-          ppHueShift: msg.ppHueShift,
-          ppBriBoost: msg.ppBriBoost,
-          ppSizeScale: msg.ppSizeScale,
-          ppBaseDelay: msg.ppBaseDelay,
-          ppScatterRange: msg.ppScatterRange,
-        },
-        msg.seed,
-      );
+      emitter = new StreamEmitter(physics, configFromMsg(msg), msg.seed);
+      // If the bridge sends centrally-evolved coefficients, apply them
+      if (msg.coeffs) emitter.applyCoeffs(msg.coeffs as Float64Array);
       break;
     }
 
@@ -137,30 +125,12 @@ _self.onmessage = (e: MessageEvent) => {
       }
 
       // Sync emitter with latest slider values
-      emitter.update(
-        physics,
-        {
-          perturbAmplitude: msg.perturbAmplitude,
-          lMax: msg.lMax,
-          nS: msg.nS,
-          timeDilation: msg.timeDilation,
-          fieldEvolution: msg.fieldEvolution,
-          doubleBounce: msg.doubleBounce ?? false,
-          betaPP: msg.betaPP ?? 0,
-          silkDamping: msg.silkDamping,
-          hueMin: msg.hueMin,
-          hueRange: msg.hueRange,
-          brightnessFloor: msg.brightnessFloor,
-          brightnessCeil: msg.brightnessCeil,
-          dbSecondHueShift: msg.dbSecondHueShift,
-          dbSecondBriScale: msg.dbSecondBriScale,
-          ppHueShift: msg.ppHueShift,
-          ppBriBoost: msg.ppBriBoost,
-          ppSizeScale: msg.ppSizeScale,
-          ppBaseDelay: msg.ppBaseDelay,
-          ppScatterRange: msg.ppScatterRange,
-        },
-      );
+      emitter.update(physics, configFromMsg(msg));
+
+      // Apply centrally-evolved coefficients (multi-worker coherence).
+      // When the bridge sends coeffs, the emitter skips its own O-U
+      // evolution and uses these authoritative values instead.
+      if (msg.coeffs) emitter.applyCoeffs(msg.coeffs as Float64Array);
 
       // Cap particle rate so the worker never chokes on a single tick
       const cappedRate = Math.min(msg.particleRate, MAX_PARTICLES_PER_TICK / Math.max(msg.dt, 1e-4));
