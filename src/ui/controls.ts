@@ -63,6 +63,7 @@ export interface SensorParams {
   bloomStrength: number;
   bloomRadius: number;
   bloomThreshold: number;
+  bloomQuality: 'auto' | 'high' | 'low';
 
   // Fade
   fadeSharpness: number;    // Weibull shape: 1=exponential, >1=sharp cutoff, <1=long tail
@@ -110,7 +111,8 @@ export interface HUDData {
   visible: string;
   fps: string;
   cpuUsage: string;
-  computeLoad: string;
+  cpuLoad: string;
+  gpuLoad: string;
   bufferFill: string;
   screen: string;
   hz: string;
@@ -362,6 +364,7 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
     bloomStrength: 1.2,
     bloomRadius: 0.3,
     bloomThreshold: 0.05,
+    bloomQuality: 'auto',
     fadeSharpness: 1.0,
     lightnessFloor: 0.20,
     lightnessRange: 0.65,
@@ -526,6 +529,7 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
   bloomFolder.add(params, "bloomEnabled").name("Bloom").onChange(() => {
     updateConditionalFolders();
   });
+  const bloomQualityCtrl = bloomFolder.add(params, "bloomQuality", ['auto', 'high', 'low']).name("Bloom quality");
 
   const camera = gui.addFolder("Camera");
   camera.addColor(params, "backgroundColor").name("Background colour");
@@ -728,6 +732,9 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
         }
       }
     }
+
+    // Show/hide bloom quality dropdown (non-numeric, separate from numericDefs)
+    bloomQualityCtrl.domElement.style.display = params.bloomEnabled ? "" : "none";
   }
 
   // Monitor betaPP changes to show/hide production tuning
@@ -757,7 +764,8 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
     visible: "0",
     fps: "0",
     cpuUsage: "1 / ? threads",
-    computeLoad: "0%",
+    cpuLoad: "0%",
+    gpuLoad: "0%",
     bufferFill: "0",
     screen: "detecting...",
     hz: "--",
@@ -790,7 +798,8 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
     perfReadout.add(hud, "visible").name("On screen").listen().disable(),
     perfReadout.add(hud, "fps").name("Frame rate").listen().disable(),
     perfReadout.add(hud, "cpuUsage").name("CPU threads used").listen().disable(),
-    perfReadout.add(hud, "computeLoad").name("Compute load").listen().disable(),
+    perfReadout.add(hud, "cpuLoad").name("CPU load").listen().disable(),
+    perfReadout.add(hud, "gpuLoad").name("GPU load").listen().disable(),
     perfReadout.add(hud, "bufferFill").name("Buffer fill").listen().disable(),
   );
 
@@ -931,6 +940,7 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
   for (const ctrl of bloomFolder.controllersRecursive()) {
     const prop = (ctrl as unknown as { property: string }).property;
     if (prop === "bloomEnabled") attachTooltip(ctrl.domElement, "bloomEnabled");
+    if (prop === "bloomQuality") attachTooltip(ctrl.domElement, "bloomQuality");
   }
   for (const ctrl of camera.controllersRecursive()) {
     const prop = (ctrl as unknown as { property: string }).property;
@@ -949,7 +959,7 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
   // Match by property name from the HUD data object
   const readoutHudKeys: string[] = [
     "beta", "aMin", "wEff", "torsionRatio", "ppStrength",
-    "flux", "visible", "fps", "cpuUsage", "computeLoad", "bufferFill",
+    "flux", "visible", "fps", "cpuUsage", "cpuLoad", "gpuLoad", "bufferFill",
     "screen", "hz", "hdr", "gamut",
     "cpuCores", "cpuBench", "gpu", "capability", "tier",
   ];

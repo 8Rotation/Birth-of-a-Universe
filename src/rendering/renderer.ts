@@ -177,6 +177,9 @@ export class SensorRenderer {
   bloomStrength: number;
   bloomRadius: number;
   bloomThreshold: number;
+  bloomQuality: 'auto' | 'high' | 'low' = 'auto';
+  /** Hardware-tier resolved quality for 'auto' mode (set by main.ts). */
+  bloomAutoResolvedQuality: 'high' | 'low' = 'high';
   fadeSharpness = 1.0;
 
   // Color tuning
@@ -554,6 +557,25 @@ export class SensorRenderer {
     this._ringScene = new THREE.Scene();
     this._ringScene.add(this.diskRing);
 
+    // Show the first frame immediately (lightweight no-bloom path),
+    // then compile bloom shaders in the background.
+    this.useBloom = false;
+    this._ready = true;
+    console.log(`[sensor] Ready — initial GPU buffer ${this._capacity} hits (grows as needed)`);
+
+    // Fire bloom compilation after the first frame renders.
+    // requestAnimationFrame ensures the first paint happens without
+    // bloom shader compilation blocking it.
+    requestAnimationFrame(() => this._initBloom());
+  }
+
+  /**
+   * Compile the two-pass bloom pipeline in the background.
+   * Called from init() without await so the first frame renders immediately
+   * via the lightweight no-bloom path. Once compilation succeeds,
+   * `this.useBloom` is set to true and subsequent frames use bloom.
+   */
+  private _initBloom(): void {
     // ── Two-pass bloom pipeline ───────────────────────────────────────
     // Pass 1: particles (main scene) + particle bloom
     // Pass 2: ring scene + ring bloom
@@ -582,6 +604,25 @@ export class SensorRenderer {
         0.0,
       );
       this._ringBloomNode = ringBloom;
+
+      // ── Bloom quality: patch setSize for resolution scaling ─────────
+      // BloomNode.updateBefore calls setSize(drawWidth, drawHeight) every
+      // frame. Intercepting it lets us halve the bloom resolution for
+      // 'low' quality (~4x fewer pixels) without recreating the pipeline.
+      const renderer = this;
+      for (const node of [particleBloom, ringBloom]) {
+        const origSetSize = node.setSize.bind(node);
+        node.setSize = (w: number, h: number) => {
+          const q = renderer.bloomQuality === 'auto'
+            ? renderer.bloomAutoResolvedQuality
+            : renderer.bloomQuality;
+          if (q === 'low') {
+            origSetSize(Math.round(w / 2), Math.round(h / 2));
+          } else {
+            origSetSize(w, h);
+          }
+        };
+      }
 
       // ── Outward-only ring bloom mask ─────────────────────────────────
       // Map screen UV → world-space distance from disk centre.
@@ -613,9 +654,6 @@ export class SensorRenderer {
       this.scene.add(this.diskRing);
       this.useBloom = false;
     }
-
-    this._ready = true;
-    console.log(`[sensor] Ready — initial GPU buffer ${this._capacity} hits (grows as needed)`);
   }
 
   /**
@@ -904,17 +942,37 @@ export class SensorRenderer {
       this._frustumHalfH.value = V;
     }
 
-    if (this.useBloom && this.pipeline) {
+    // ── Render path selection ────────────────────────────────────────
+    // When bloom is enabled and the pipeline is available, use the full
+    // multi-pass bloom pipeline.  Otherwise fall back to a lightweight
+    // two-pass render (particles + ring scene) with no bloom.
+    // Skip bloom entirely when there are no visible particles — the
+    // full-screen gaussian blur passes would just process black textures.
+    // Also skip when both bloom strengths are zero — the blur produces
+    // no visible output so the multi-pass pipeline is pure waste.
+    const needsBloom = this.useBloom && this.pipeline
+      && this.sprite.count > 0
+      && (this.bloomStrength > 0 || this.ringBloomStrength > 0);
+    if (needsBloom) {
       try {
-        this.pipeline.render();
+        this.pipeline!.render();
       } catch (e) {
         console.warn("[sensor] Sync render failed, trying async:", e);
-        this.pipeline.renderAsync().catch((e2: unknown) => {
+        this.pipeline!.renderAsync().catch((e2: unknown) => {
           console.error("[sensor] Both render paths failed:", e2);
         });
       }
     } else {
+      // Lightweight no-bloom path: render particles, then overlay ring
+      const r = this.renderer as any;
+      r.autoClear = true;
       this.renderer.render(this.scene, this.camera);
+      // Overlay the ring scene on top (additive, no clear)
+      if (this._ringScene && this.ringOpacity > 0) {
+        r.autoClear = false;
+        this.renderer.render(this._ringScene, this.camera);
+        r.autoClear = true;
+      }
     }
   }
 

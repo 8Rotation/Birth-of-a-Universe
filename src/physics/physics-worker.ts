@@ -116,6 +116,8 @@ _self.onmessage = (e: MessageEvent) => {
       // then silently discards every response as "stale".
       if (msg.generation !== undefined) generation = msg.generation;
 
+      const tickStart = performance.now();
+
       // Continuously track β and k from tick params so slider drags
       // propagate without a disruptive generation bump.
       const tickK = msg.kCurvature ?? currentK;
@@ -137,8 +139,10 @@ _self.onmessage = (e: MessageEvent) => {
       const particles = emitter.tick(msg.dt, msg.simTime, cappedRate);
       const count = particles.length;
 
+      const tickElapsedMs = performance.now() - tickStart;
+
       if (count === 0) {
-        _self.postMessage({ type: "particles", count: 0, data: null, generation });
+        _self.postMessage({ type: "particles", count: 0, data: null, generation, tickMs: tickElapsedMs });
         break;
       }
 
@@ -159,7 +163,7 @@ _self.onmessage = (e: MessageEvent) => {
 
       // Transfer the ArrayBuffer (zero-copy handoff to main thread)
       _self.postMessage(
-        { type: "particles", count, data: buf, generation },
+        { type: "particles", count, data: buf, generation, tickMs: tickElapsedMs },
         [buf.buffer],
       );
       break;

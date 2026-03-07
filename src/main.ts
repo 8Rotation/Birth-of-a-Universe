@@ -78,20 +78,25 @@ function setInfo(text: string) {
 
 async function main() {
   setInfo("Initializing ECSK Bounce Sensor...");
+  const t0 = performance.now();
 
-  // ── 0a. Detect screen characteristics ─────────────────────────────
-  //   Must run before hardware detection so we can feed renderPixels
-  //   into the capability score.
+  // ── 0a. Fire hardware benchmarks immediately (no await) ───────────
+  //   CPU bench + GPU adapter query don't need renderPixels, so they
+  //   run in parallel with the rAF-based screen measurement below.
+  const hwDetector = new HardwareDetector();
+  hwDetector.startBenchmarks();
+
+  // ── 0b. Detect screen characteristics ─────────────────────────────
   const screenDetector = new ScreenDetector();
   const screenInfo = await screenDetector.init();
-  console.log(`[main] ${screenInfo.summary}`);
+  console.log(`[main] Screen detection: ${(performance.now() - t0).toFixed(0)} ms — ${screenInfo.summary}`);
 
   const renderPixels = screenInfo.renderWidth * screenInfo.renderHeight;
 
-  // ── 0b. Detect hardware capabilities (includes screen penalty) ────
-  const hwDetector = new HardwareDetector();
-  const hwInfo = await hwDetector.detect(renderPixels);
-  console.log(`[main] ${hwInfo.summary}`);
+  // ── 0c. Finalize hardware detection (applies screen penalty) ──────
+  const t1 = performance.now();
+  const hwInfo = await hwDetector.finalize(renderPixels);
+  console.log(`[main] Hardware detection: ${(performance.now() - t1).toFixed(0)} ms — ${hwInfo.summary}`);
 
   // Budget already incorporates screen-resolution penalty
   const budget = hwInfo.budget;
@@ -100,6 +105,7 @@ async function main() {
   EMERGENCY_HIT_CAP = budget.emergencyHitCap;
 
   // ── 1. Initialize renderer ────────────────────────────────────────
+  const t2 = performance.now();
   const renderer = new SensorRenderer({
     initialCapacity: budget.initialGpuCapacity,
     bloomStrength: 1.2,
@@ -107,8 +113,12 @@ async function main() {
     bloomThreshold: 0.05,
   });
 
+  // Resolve 'auto' bloom quality based on hardware capability score
+  renderer.bloomAutoResolvedQuality = hwInfo.capability >= 0.6 ? 'high' : 'low';
+
   try {
     await renderer.init(screenInfo);
+    console.log(`[main] Renderer init: ${(performance.now() - t2).toFixed(0)} ms`);
   } catch (e) {
     setInfo(`WebGPU init failed: ${e}`);
     console.error(e);
@@ -167,6 +177,7 @@ async function main() {
   let flowDirty = false;
 
   // ── 4. Controls (auto-configured from hardware budget) ────────────
+  const tCtrl = performance.now();
   const { params, hud, updateHUD, setHDRMode } = createSensorControls(() => {
     // Full reset: terminate and recreate all workers (recovers from
     // crashes), wipe all particle state, and re-sync timing.
@@ -251,10 +262,12 @@ async function main() {
 
   // Communicate detected HDR mode to controls so irrelevant sliders are hidden
   setHDRMode(renderer.hdrMode);
+  console.log(`[main] Controls creation: ${(performance.now() - tCtrl).toFixed(0)} ms`);
 
   // ── 5. Physics worker (off-thread emission) ────────────────────
   // Random seed per session so the perturbation field differs on each
   // reload.  Using a time-based seed with bit mixing for decent entropy.
+  const t3 = performance.now();
   const sessionSeed = (Date.now() ^ (Math.random() * 0xFFFFFFFF)) >>> 0;
 
   const bridge = new PhysicsBridge({
@@ -283,6 +296,8 @@ async function main() {
   }, budget.recommendedWorkers);
 
   // ── 6. Direct particle routing ───────────────────────────────────
+  console.log(`[main] Worker spawn: ${(performance.now() - t3).toFixed(0)} ms`);
+  console.log(`[main] Total init: ${(performance.now() - t0).toFixed(0)} ms`);
   // Particles from the worker go straight into hits[] — no heap, no
   // arrival-time gating, no per-frame caps.  Reads directly from the
   // worker's transferred Float32Array to avoid per-particle object
@@ -318,6 +333,11 @@ async function main() {
   let fpsTime = 0;
   let fps = 0;
   let rateTime = 0;
+
+  // ── GPU / render timing accumulators ────────────────────────────
+  let renderMsAccum = 0;   // total ms spent in renderer.render() this interval
+  let renderFrameCount = 0; // frames rendered this interval
+  let gpuLoadSmooth = 0;    // EMA-smoothed GPU load (0–1)
 
   setInfo(""); // Clear loading message
 
@@ -636,6 +656,7 @@ async function main() {
     renderer.bloomStrength = params.bloomStrength;
     renderer.bloomRadius = params.bloomRadius;
     renderer.bloomThreshold = params.bloomThreshold;
+    renderer.bloomQuality = params.bloomQuality;
     renderer.fadeSharpness = params.fadeSharpness;
     renderer.lightnessFloor = params.lightnessFloor;
     renderer.lightnessRange = params.lightnessRange;
@@ -670,7 +691,10 @@ async function main() {
     renderer.backgroundColor = parseInt(params.backgroundColor.replace('#', ''), 16);
     renderer.zoom = params.zoom;
     renderer.updateHits(hits, visibleCount, displayTime, tau);
+    const renderStart = performance.now();
     renderer.render();
+    renderMsAccum += performance.now() - renderStart;
+    renderFrameCount++;
 
     // ── FPS + HUD ─────────────────────────────────────────────────
     frameCount++;
@@ -716,16 +740,24 @@ async function main() {
       hud.capability = `${(hwInfo.capability * 100).toFixed(0)}%`;
       hud.tier = `${hwInfo.tier.toUpperCase()}`;
       hud.cpuUsage = `${bridge.workerCount} / ${hwInfo.cpu.logicalCores} threads`;
-      // Compute load: max of renderer cost fraction and physics cost fraction
-      const rendererLoad = (params.particleRate * params.persistence) / budget.maxVisibleHits;
-      const numCoeffsHud = params.lMax * params.lMax + 2 * params.lMax;
-      const physicsLoad = numCoeffsHud > 0
-        ? (params.particleRate * numCoeffsHud) / budget.maxPhysicsCostPerSec
-        : 0;
-      const overallLoad = Math.max(rendererLoad, physicsLoad);
-      const loadPct = Math.round(overallLoad * 100);
-      const loadColor = overallLoad > 1 ? ' ⚠️ THROTTLED' : overallLoad > 0.8 ? ' • HIGH' : '';
-      hud.computeLoad = `${loadPct}%${loadColor}`;
+      // CPU load: measured worker utilization (fraction of available worker time)
+      const measuredCpuLoad = bridge.updateCpuLoad(fpsTime + (fpsTime === 0 ? FPS_SAMPLE_INTERVAL : 0));
+      const cpuPct = Math.round(measuredCpuLoad * 100);
+      const cpuColor = measuredCpuLoad > 0.9 ? ' ⚠️ HIGH' : measuredCpuLoad > 0.7 ? ' • BUSY' : '';
+      hud.cpuLoad = `${cpuPct}%${cpuColor}`;
+      // GPU load: measured render time as fraction of frame budget
+      if (renderFrameCount > 0) {
+        const avgRenderMs = renderMsAccum / renderFrameCount;
+        const targetFpsVal = targetFps > 0 ? targetFps : (screenDetector.info.refreshRate || 60);
+        const frameBudgetMs = 1000 / targetFpsVal;
+        const rawGpuLoad = avgRenderMs / frameBudgetMs;
+        gpuLoadSmooth = gpuLoadSmooth * 0.6 + rawGpuLoad * 0.4;
+      }
+      renderMsAccum = 0;
+      renderFrameCount = 0;
+      const gpuPct = Math.round(gpuLoadSmooth * 100);
+      const gpuColor = gpuLoadSmooth > 0.9 ? ' ⚠️ HIGH' : gpuLoadSmooth > 0.7 ? ' • BUSY' : '';
+      hud.gpuLoad = `${gpuPct}%${gpuColor}`;
       hud.bufferFill = `${(hits.length / 1000).toFixed(0)}K / ${(EMERGENCY_HIT_CAP / 1000).toFixed(0)}K`;
       updateHUD();
     }

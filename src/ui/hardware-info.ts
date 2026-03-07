@@ -528,27 +528,38 @@ function buildSummary(
 
 export class HardwareDetector {
   private _info: HardwareInfo | null = null;
+  private _benchPromise: Promise<[GpuInfo, number]> | null = null;
 
   /**
-   * Detect hardware + screen capabilities and produce a continuous
-   * ComputeBudget scaled to the effective capability.
+   * Kick off CPU benchmark + GPU adapter query immediately.
+   * Neither depends on renderPixels, so this can run in parallel
+   * with screen detection.  Call finalize() once renderPixels is known.
    *
-   * @param renderPixels  Effective render-pixel count (viewportW × viewportH × DPR²).
-   *                      Pass 0 or omit to skip screen penalty (raw hardware only).
-   * @param gpuAdapter    Optional pre-existing WebGPU adapter.
+   * @param gpuAdapter  Optional pre-existing WebGPU adapter.
    */
-  async detect(
-    renderPixels = 0,
-    gpuAdapter?: GPUAdapter | null,
-  ): Promise<HardwareInfo> {
+  startBenchmarks(gpuAdapter?: GPUAdapter | null): void {
+    if (this._benchPromise) return; // already started
     console.log("[hardware] Detecting hardware capabilities...");
-
-    const [gpu, benchResult] = await Promise.all([
+    this._benchPromise = Promise.all([
       detectGpu(gpuAdapter),
       new Promise<number>((resolve) => {
         setTimeout(() => resolve(cpuBenchmark()), 0);
       }),
     ]);
+  }
+
+  /**
+   * Await the benchmarks kicked off by startBenchmarks() and apply
+   * the screen-resolution penalty to produce the final HardwareInfo.
+   *
+   * @param renderPixels  Effective render-pixel count (viewportW × viewportH × DPR²).
+   *                      Pass 0 or omit to skip screen penalty.
+   */
+  async finalize(renderPixels = 0): Promise<HardwareInfo> {
+    if (!this._benchPromise) {
+      this.startBenchmarks();
+    }
+    const [gpu, benchResult] = await this._benchPromise!;
 
     const cores = detectCpuCores();
     const memGB = detectDeviceMemory();
@@ -601,6 +612,21 @@ export class HardwareDetector {
     );
 
     return this._info;
+  }
+
+  /**
+   * Backward-compatible wrapper: runs startBenchmarks() + finalize()
+   * sequentially.
+   *
+   * @param renderPixels  Effective render-pixel count.
+   * @param gpuAdapter    Optional pre-existing WebGPU adapter.
+   */
+  async detect(
+    renderPixels = 0,
+    gpuAdapter?: GPUAdapter | null,
+  ): Promise<HardwareInfo> {
+    this.startBenchmarks(gpuAdapter);
+    return this.finalize(renderPixels);
   }
 
   /** Last detected hardware info (null before detect() completes). */

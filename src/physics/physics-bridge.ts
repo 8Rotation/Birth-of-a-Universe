@@ -68,6 +68,15 @@ export class PhysicsBridge {
   private generation = 0;
   readonly workerCount: number;
 
+  // ── CPU timing aggregation ──────────────────────────────────────
+  // Workers report elapsed ms per tick; we aggregate into utilization %.
+  private _workerTickMsAccum = 0;   // total worker ms accumulated
+  private _workerTickCount = 0;     // number of tick reports received
+  private _cpuLoadSmooth = 0;       // EMA-smoothed CPU load (0–1)
+
+  /** EMA-smoothed CPU utilization (0–1): fraction of available worker time used for physics. */
+  get cpuLoad(): number { return this._cpuLoadSmooth; }
+
   // ── Centralised perturbation state ──────────────────────────────
   // Evolved on the main thread; broadcast to all workers each tick
   // so the spatial pattern is coherent across workers.
@@ -112,6 +121,11 @@ export class PhysicsBridge {
           // Store raw Float32Array — no per-particle object creation
           this.batches.push({ data: msg.data as Float32Array, count: msg.count as number });
         }
+        // Accumulate worker CPU timing (reported on every tick response)
+        if (typeof msg.tickMs === 'number') {
+          this._workerTickMsAccum += msg.tickMs;
+          this._workerTickCount++;
+        }
       };
 
       worker.onerror = (err: ErrorEvent) => {
@@ -132,6 +146,24 @@ export class PhysicsBridge {
     if (this.workerCount > 1) {
       console.log(`[bridge] Created ${this.workerCount} physics workers (centralised coefficients)`);
     }
+  }
+
+  /**
+   * Compute and return EMA-smoothed CPU utilization, then reset accumulators.
+   * Call once per HUD update interval (e.g. every 0.8s).
+   * @param dtSec  Elapsed wall-clock seconds since last call.
+   */
+  updateCpuLoad(dtSec: number): number {
+    if (this._workerTickCount > 0 && dtSec > 0) {
+      // Total available worker time in this interval (ms)
+      const availableMs = this.workerCount * dtSec * 1000;
+      const rawLoad = availableMs > 0 ? this._workerTickMsAccum / availableMs : 0;
+      // EMA smoothing (α ≈ 0.4 for responsive yet stable display)
+      this._cpuLoadSmooth = this._cpuLoadSmooth * 0.6 + rawLoad * 0.4;
+    }
+    this._workerTickMsAccum = 0;
+    this._workerTickCount = 0;
+    return this._cpuLoadSmooth;
   }
 
   /** Pack coefficient `c` values into a Float64Array for transfer. */
@@ -335,6 +367,10 @@ export class PhysicsBridge {
         if (msg.type === "particles" && msg.count > 0 && msg.data) {
           if (msg.generation !== undefined && msg.generation < this.generation) return;
           this.batches.push({ data: msg.data as Float32Array, count: msg.count as number });
+        }
+        if (typeof msg.tickMs === 'number') {
+          this._workerTickMsAccum += msg.tickMs;
+          this._workerTickCount++;
         }
       };
 

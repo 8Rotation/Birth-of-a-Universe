@@ -734,6 +734,20 @@ export const TOOLTIPS: Record<string, Tooltip> = {
     notes: "Only active when Bloom is enabled.",
   },
 
+  bloomQuality: {
+    simple: "Resolution of the bloom effect (GPU cost vs. visual quality).",
+    detail:
+      "High: Full-resolution bloom (current default). Best visual quality.\n" +
+      "Low: Half-resolution bloom (~4× fewer pixels). Noticeably softer glow " +
+      "but significantly cheaper — useful on integrated GPUs or high-res displays.\n" +
+      "Auto: Selects High or Low based on your detected hardware capability score.",
+    performance:
+      "Low quality reduces bloom GPU cost by roughly 50–75%. " +
+      "If bloom is the bottleneck (check GPU Load), switching to Low " +
+      "may restore smooth frame rates without disabling bloom entirely.",
+    notes: "Only active when Bloom is enabled.",
+  },
+
   bloomRadius: {
     simple: "How far the glow spreads from bright particles.",
     visual:
@@ -927,16 +941,28 @@ export const READOUT_TOOLTIPS: Record<string, Tooltip> = {
       "More workers = higher sustained particle throughput on multi-core CPUs.\n" +
       "Worker count is set automatically based on your hardware capability score.",
   },
-  computeLoad: {
-    simple: "Combined compute cost of your current settings (% of budget).",
+  cpuLoad: {
+    simple: "Measured CPU physics utilization (% of available worker time).",
     detail:
-      "Estimates the combined cost across two axes:\n\n" +
-      "  Renderer (GPU): particle_rate × persistence (= visible particle count)\n" +
-      "  Physics (CPU): particle_rate × (ℓ_max + 1)²\n\n" +
-      "Above 100%: the birth rate is automatically throttled to keep the " +
-      "simulation responsive. Reduce birth rate, fade duration, or ℓ_max " +
-      "to bring it under budget.\n\n" +
-      "This is the single best indicator of whether your settings are sustainable.",
+      "Real-time measurement of how much worker thread time is spent on " +
+      "physics computation (spherical harmonics, particle emission, packing).\n\n" +
+      "Driven by: birth rate × (ℓ_max + 1)².\n" +
+      "High values mean your CPU workers are near saturation — reduce " +
+      "birth rate or ℓ_max to free headroom.",
+  },
+  gpuLoad: {
+    simple: "Measured GPU render cost (% of frame budget at your refresh rate).",
+    detail:
+      "Measures wall-clock time spent in the render submission call as a " +
+      "fraction of each frame's time budget (1000 ms ÷ refresh rate).\n\n" +
+      "This is CPU-side submission timing, not true GPU execution time. " +
+      "However, the bloom pipeline's synchronous render call blocks " +
+      "proportionally to GPU work, making this a close proxy for actual " +
+      "GPU load when bloom is active.\n\n" +
+      "Bloom (two full-screen multi-pass gaussian blurs) is the primary " +
+      "GPU cost driver — it dominates over particle rendering. When bloom " +
+      "is bypassed (no visible particles or bloom disabled), this drops " +
+      "to near-zero, accurately matching Task Manager GPU usage.",
   },
   bufferFill: {
     simple: "GPU particle buffer usage (current / ceiling).",
