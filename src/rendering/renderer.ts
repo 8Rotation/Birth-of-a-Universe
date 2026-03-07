@@ -110,6 +110,16 @@ const RING_SEGMENTS = 128;
 const DEFAULT_INITIAL_CAPACITY = 65_536;
 /** Fixed outer radius for circular particle clipping. */
 const CIRCLE_OUTER_R = 0.50;
+
+// ── Auto-brightness constants ─────────────────────────────────────────────
+/** Log-scale reference for eps→brightness mapping (must match shell.ts). */
+const EPS_LOG_REF = Math.log(10001);
+/** Reference hit.brightness level for auto-gain normalisation (midrange). */
+const AUTO_BRI_REF = 0.5;
+/** Reference hitBaseSize for particle-size overlap correction. */
+const AUTO_BRI_SIZE_REF = 1.0;
+/** Exponent for size-overlap dampening: √(ref/size).  0.5 = square root. */
+const AUTO_BRI_SIZE_POW = 0.5;
 // ── Sensor Renderer ───────────────────────────────────────────────────────
 
 export class SensorRenderer {
@@ -194,6 +204,12 @@ export class SensorRenderer {
 
   // Particle edge softness (0 = hard, 0.5 = very soft)
   particleSoftEdge = 0.05;
+
+  // ── Brightness-range encoding (must match shell.ts EmitterConfig) ───
+  /** Brightness floor: minimum hit.brightness value for log-eps mapping. */
+  brightnessFloor = 0.15;
+  /** Brightness ceiling: maximum hit.brightness value for log-eps mapping. */
+  brightnessCeil = 1.0;
 
   // ── Scene controls ─────────────────────────────────────────────────
   /** Background colour (CSS hex). Applied via setClearColor each frame. */
@@ -620,31 +636,63 @@ export class SensorRenderer {
     const pos = this.posAttr.array as Float32Array;
     const col = this.colorAttr.array as Float32Array;
 
-    // ── Auto-brightness: physics-based ceiling ───────────────────────
-    // Instead of a reactive EMA (which flickers due to overlapping bright
-    // particles), compute the maximum *possible* scale deterministically
-    // from the physics: the brightest particle that *could* exist at the
-    // current β and perturbation amplitude has eps = maxEps, fade = 1.
+    // ── Auto-brightness: physics-based ceiling + size correction ─────
+    // Deterministic — no EMA, no flicker.  Computes the theoretical peak
+    // RGB channel for the brightest *possible* particle at the current
+    // physics settings (maxEps, fade = 1) and normalises against a fixed
+    // reference level.  A size-overlap correction dampens large-particle
+    // whiteout (additive blending area ∝ size²) while boosting small-
+    // particle visibility.
     let autoGain = 1;
     if (this.autoBrightness) {
-      let ceilingScale: number;
       if (this._hdrMode !== 'none') {
-        // Use dynamic eps bounds for HDR auto-brightness ceiling
-        const ceilingNits = epsToNits(this.maxEps, this._peakNits, 20, this.minEps, this.maxEps);
-        ceilingScale = (ceilingNits / SDR_REFERENCE_WHITE_NITS)
-          * (this.brightnessMultiplier / SensorRenderer.SDR_BRIGHTNESS_REF);
+        // HDR: base color is at fixed L=0.5 — peak channel ≈ satMax.
+        // Normalise so the brightest possible particle fills the display
+        // HDR range (peak nits).  All chroma is preserved; brightness
+        // differentiation comes entirely from the eps→nits RGB scale.
+        const sMax = Math.min(1.0, this.saturationFloor + this.saturationRange);
+        const maxNits = epsToNits(this.maxEps, this._peakNits, 20, this.minEps, this.maxEps);
+        const maxLinear = maxNits / SDR_REFERENCE_WHITE_NITS;
+        const maxScale = maxLinear * (this.brightnessMultiplier / SensorRenderer.SDR_BRIGHTNESS_REF);
+        const target = this._peakNits / SDR_REFERENCE_WHITE_NITS;
+        if (sMax * maxScale > 0.001) {
+          autoGain = target / (sMax * maxScale);
+        }
       } else {
-        ceilingScale = this.brightnessMultiplier;
+        // SDR: brightness baked into HSL — normalise against theoretical
+        // peak lightness/saturation so ACES keeps colours visible.
+        const maxBri = Math.min(
+          this.brightnessCeil,
+          Math.max(this.brightnessFloor, Math.log(this.maxEps + 1) / EPS_LOG_REF),
+        );
+        const maxL   = this.lightnessFloor + maxBri * this.lightnessRange;
+        const maxSat = this.saturationFloor + (1 - maxBri) * this.saturationRange;
+        const maxC   = (1 - Math.abs(2 * maxL - 1)) * maxSat;
+        const peakRGB = Math.min(1.0, maxL + maxC * 0.5);
+
+        const refL   = this.lightnessFloor + AUTO_BRI_REF * this.lightnessRange;
+        const refSat = this.saturationFloor + (1 - AUTO_BRI_REF) * this.saturationRange;
+        const refC   = (1 - Math.abs(2 * refL - 1)) * refSat;
+        const refRGB = Math.min(1.0, refL + refC * 0.5);
+
+        if (peakRGB > 0.001) {
+          autoGain = refRGB / peakRGB;
+        }
       }
-      if (ceilingScale > 0) {
-        // Normalise so the theoretical brightest particle hits refScale.
-        const refScale = this._hdrMode !== 'none'
-          ? (this._peakNits / SDR_REFERENCE_WHITE_NITS)
-            * (this.brightnessMultiplier / SensorRenderer.SDR_BRIGHTNESS_REF)
-          : this.brightnessMultiplier;
-        autoGain = refScale / ceilingScale;
-      }
+
+      // Size-overlap correction: larger particles overlap more under
+      // additive blending.  √(ref / size) dampens large sizes and
+      // boosts small sizes so bright dots stay vivid without whiteout.
+      const sz = Math.max(0.1, this.hitBaseSize);
+      autoGain *= Math.pow(AUTO_BRI_SIZE_REF / sz, AUTO_BRI_SIZE_POW);
+
+      // Clamp to sane range
+      autoGain = Math.max(0.05, Math.min(autoGain, 20));
     }
+
+    // ── HDR base-color: fixed L=0.5 + max saturation for full chroma ──
+    // Pre-compute outside the loop for efficiency.
+    const hdrSatMax = Math.min(1.0, this.saturationFloor + this.saturationRange);
 
     for (let i = 0; i < n; i++) {
       const hit = hits[i];
@@ -669,11 +717,20 @@ export class SensorRenderer {
       const fade = Math.exp(-Math.pow(age / persistence, this.fadeSharpness));
 
       // HSL → RGB with physics encoding.
-      // brightness drives lightness and saturation (tunable ranges).
-      // Identical in both SDR and HDR — the base color character is the same.
-      const lightness = this.lightnessFloor + hit.brightness * this.lightnessRange;
-      const saturation = this.saturationFloor + (1 - hit.brightness) * this.saturationRange;
-      const [r, g, b] = hslToRGB(hit.hue, saturation, lightness);
+      //
+      // SDR: brightness drives lightness AND saturation (tunable ranges).
+      //      ACES compresses the result to display range.
+      // HDR: fixed L=0.5 and max saturation preserves full chroma at all
+      //      energy levels.  A bright blue stays blue — all brightness
+      //      differentiation comes from the eps→nits RGB scale below.
+      let r: number, g: number, b: number;
+      if (this._hdrMode !== 'none') {
+        [r, g, b] = hslToRGB(hit.hue, hdrSatMax, 0.5);
+      } else {
+        const lightness = this.lightnessFloor + hit.brightness * this.lightnessRange;
+        const saturation = this.saturationFloor + (1 - hit.brightness) * this.saturationRange;
+        [r, g, b] = hslToRGB(hit.hue, saturation, lightness);
+      }
 
       // ── Brightness scaling ───────────────────────────────────────────
       // Same structure (fade × scale × multiplier), different scale.

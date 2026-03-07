@@ -235,29 +235,64 @@ const OLED_CSS = `
 .ecsk-tooltip {
   position: fixed;
   z-index: 10000;
-  max-width: 340px;
-  padding: 8px 10px;
-  border-radius: 4px;
-  background: #111;
-  border: 1px solid #333;
+  max-width: 420px;
+  min-width: 280px;
+  padding: 10px 14px 12px;
+  border-radius: 6px;
+  background: #0d0d0d;
+  border: 1px solid #2a2a2a;
   color: #ccc;
-  font: 11px/1.45 'Segoe UI', system-ui, sans-serif;
+  font: 11px/1.5 'Segoe UI', system-ui, sans-serif;
   pointer-events: none;
   opacity: 0;
   transition: opacity 0.15s ease;
-  box-shadow: 0 2px 12px rgba(0,0,0,0.7);
+  box-shadow: 0 4px 24px rgba(0,0,0,0.8);
+  max-height: 80vh;
+  overflow-y: auto;
 }
+.ecsk-tooltip::-webkit-scrollbar { width: 3px; }
+.ecsk-tooltip::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }
 .ecsk-tooltip.visible { opacity: 1; }
 .ecsk-tooltip .tt-simple {
   color: #eee;
   font-weight: 600;
-  margin-bottom: 4px;
+  font-size: 12px;
+  margin-bottom: 6px;
+  line-height: 1.4;
 }
+.ecsk-tooltip .tt-section {
+  margin-top: 6px;
+  padding-top: 5px;
+  border-top: 1px solid #1e1e1e;
+}
+.ecsk-tooltip .tt-label {
+  color: #777;
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 2px;
+}
+.ecsk-tooltip .tt-body {
+  color: #aaa;
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+.ecsk-tooltip .tt-section.tt-perf .tt-label { color: #b87333; }
+.ecsk-tooltip .tt-section.tt-science .tt-label { color: #7799bb; }
+.ecsk-tooltip .tt-section.tt-range .tt-label { color: #88aa66; }
+.ecsk-tooltip .tt-section.tt-visual .tt-label { color: #aa88cc; }
+.ecsk-tooltip .tt-section.tt-notes .tt-label { color: #888; }
+/* Legacy detail fallback (readout tooltips) */
 .ecsk-tooltip .tt-detail {
   color: #999;
-  font-size: 10px;
-  line-height: 1.4;
+  font-size: 10.5px;
+  line-height: 1.45;
   white-space: pre-wrap;
+  margin-top: 6px;
+  padding-top: 5px;
+  border-top: 1px solid #1e1e1e;
 }
 `;
 
@@ -337,10 +372,10 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
     ringWidthPx: 2,
     ringBloomStrength: 0.8,
     ringBloomRadius: 0.4,
-    ringAutoColor: false,
+    ringAutoColor: true,
     softHdrExposure: 1.6,
     particleSoftEdge: 0.05,
-    autoBrightness: false,
+    autoBrightness: true,
     backgroundColor: "#000000",
     zoom: 1.0,
     frozen: false,
@@ -780,19 +815,50 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
   // ── Tooltip system ──────────────────────────────────────────────────
   const tooltipEl = document.createElement("div");
   tooltipEl.className = "ecsk-tooltip";
-  tooltipEl.innerHTML = '<div class="tt-simple"></div><div class="tt-detail"></div>';
   document.body.appendChild(tooltipEl);
-  const ttSimple = tooltipEl.querySelector(".tt-simple") as HTMLElement;
-  const ttDetail = tooltipEl.querySelector(".tt-detail") as HTMLElement;
+
+  /** Build structured tooltip HTML from a Tooltip object. */
+  function buildTooltipHTML(tip: Tooltip): string {
+    let html = `<div class="tt-simple">${escapeHTML(tip.simple)}</div>`;
+    // Structured sections (control tooltips)
+    const sections: Array<[string, string, string | undefined]> = [
+      ["tt-visual",  "What changes",  tip.visual],
+      ["tt-science", "Science",       tip.science],
+      ["tt-range",   "Typical range", tip.range],
+      ["tt-perf",    "Performance",   tip.performance],
+      ["tt-notes",   "Notes",         tip.notes],
+    ];
+    let hasStructured = false;
+    for (const [cls, label, content] of sections) {
+      if (!content) continue;
+      hasStructured = true;
+      html += `<div class="tt-section ${cls}">` +
+        `<div class="tt-label">${label}</div>` +
+        `<div class="tt-body">${escapeHTML(content)}</div></div>`;
+    }
+    // Legacy fallback (readout tooltips with plain `detail`)
+    if (!hasStructured && tip.detail) {
+      html += `<div class="tt-detail">${escapeHTML(tip.detail)}</div>`;
+    }
+    return html;
+  }
+
+  function escapeHTML(s: string): string {
+    return s
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/\n/g, "<br>");
+  }
 
   let tooltipTimer: ReturnType<typeof setTimeout> | null = null;
 
   function showTooltip(el: HTMLElement, tip: Tooltip): void {
-    ttSimple.textContent = tip.simple;
-    ttDetail.textContent = tip.detail;
+    tooltipEl.innerHTML = buildTooltipHTML(tip);
     // Position: to the left of the control element (or right for left-panel)
     const rect = el.getBoundingClientRect();
-    const ttWidth = 340; // max-width from CSS
+    const ttWidth = 420; // max-width from CSS
     // Try placing to the left; if no room, place to the right
     let left = rect.left - ttWidth - 8;
     if (left < 4) left = rect.right + 8;

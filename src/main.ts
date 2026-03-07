@@ -658,6 +658,8 @@ async function main() {
     renderer.softHdrExposure = params.softHdrExposure;
     renderer.particleSoftEdge = params.particleSoftEdge;
     renderer.autoBrightness = params.autoBrightness;
+    renderer.brightnessFloor = params.brightnessFloor;
+    renderer.brightnessCeil = params.brightnessCeil;
     // Compute the maximum possible eps for auto-brightness ceiling.
     // With perturbation, the smallest β_eff (= β × (1 − amplitude)) yields
     // the highest energy density at bounce (eps ∝ 1/a_min⁴).

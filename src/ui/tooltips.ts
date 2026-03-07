@@ -1,542 +1,842 @@
 /**
- * tooltips.ts — All tooltip text for the ECSK Bounce Sensor UI.
+ * tooltips.ts — Structured tooltip text for the ECSK Bounce Sensor UI.
  *
- * Each entry has a short `simple` line (shown on hover) and a longer
- * `detail` block (shown on click / expanded hover).
+ * Each tooltip has a short header, plus optional structured sections:
+ *   visual       — what changes on screen
+ *   science      — the physics / math behind the parameter
+ *   range        — typical values and what they mean
+ *   performance  — CPU / GPU cost implications
+ *   notes        — interactions with other controls, caveats
  *
- * Extracted from controls.ts so the layout code stays focused on logic.
+ * Readout tooltips use simple + detail (read-only display, no performance
+ * cost or range since the user doesn't set these directly).
  */
 
 export interface Tooltip {
   simple: string;
-  detail: string;
+  visual?: string;
+  science?: string;
+  range?: string;
+  performance?: string;
+  notes?: string;
+  /** Legacy fallback — plain detail string (readout tooltips). */
+  detail?: string;
 }
 
 // ── Control-panel tooltips ──────────────────────────────────────────────
 
 export const TOOLTIPS: Record<string, Tooltip> = {
-  // ── Override Mode ─────────────────────────────────────────
+
+  // ═══════════════════════════════════════════════════════════════════
+  //  Override Mode
+  // ═══════════════════════════════════════════════════════════════════
   overrideMode: {
-    simple: "Unlocks all slider limits so you can type any value.",
-    detail:
-      "Normally every slider is clamped to a physically sensible range. " +
-      "Override Mode removes those clamps and lets you enter extreme values " +
-      "directly.  Useful for stress-testing or artistic exploration but can " +
-      "produce unphysical results or crash the GPU. Sliders turn red to warn you.",
+    simple: "Unlock all slider limits — type any value directly.",
+    visual:
+      "Slider rails turn red. All numeric controls accept values far beyond their normal range.",
+    science:
+      "Normal slider bounds are chosen for physical plausibility within ECSK theory. " +
+      "Override removes those bounds for stress-testing, artistic exploration, " +
+      "or probing extreme regimes. Results outside normal bounds are generally unphysical.",
+    performance:
+      "No direct cost from the toggle itself, but extreme values (e.g. ℓ_max = 512, " +
+      "birth rate = 10 M/s) can saturate your GPU or freeze the tab.",
+    notes:
+      "Override mode does NOT change step size for most sliders (except birth rate → 1000). " +
+      "Parameters remain valid — the physics engine clamps β < 0.25 internally regardless.",
   },
 
-  // ── Collapse Physics ──────────────────────────────────────
+  // ═══════════════════════════════════════════════════════════════════
+  //  Collapse Physics
+  // ═══════════════════════════════════════════════════════════════════
   kCurvature: {
-    simple: "Shape of space: open, flat, or closed universe.",
-    detail:
-      "Sets the spatial curvature parameter k in the Friedmann equation. " +
-      "k = +1 (closed) is standard for torsion-bounce cosmology — the universe " +
-      "reaches a maximum size then recollapses.  k = 0 (flat) matches ΛCDM. " +
-      "k = −1 (open) gives a hyperbolic geometry. " +
-      "Only k = +1 supports the double-bounce feature.\n" +
-      "Physically accurate: k = +1 (Popławski 2010–2025). " +
-      "Changing this resets the physics engine.",
+    simple: "Spatial curvature of the baby universe: open, flat, or closed.",
+    visual:
+      "Changes the overall density and timing of the bounce pattern. k = +1 produces " +
+      "a bounded, recollapsing cosmos; k = 0 and k = −1 expand indefinitely after the bounce.",
+    science:
+      "Sets the curvature parameter k in the dimensionless Friedmann equation:\n" +
+      "  (dā/dτ̄)² = 1/ā² − β/ā⁴ − k\n\n" +
+      "k = +1 (closed): the universe reaches a maximum size then recollapses. " +
+      "Bounce turning points: ā²_min = [1 − √(1−4β)] / 2.\n" +
+      "k = 0 (flat): matches standard ΛCDM spatial geometry. ā²_min = β.\n" +
+      "k = −1 (open): hyperbolic geometry. ā²_min = [−1 + √(1+4β)] / 2.\n\n" +
+      "ECSK theory strongly favours k = +1 for universes born inside black holes " +
+      "(Popławski 2010–2025; Unger & Popławski 2019; Cubero & Popławski 2019).",
+    range:
+      "k = +1 (closed) — physically preferred, supports double bounce.\n" +
+      "k = 0 (flat) — matches ΛCDM observations.\n" +
+      "k = −1 (open) — hyperbolic, allowed but less motivated by ECSK.",
+    performance:
+      "Negligible. Changes the bounce-point formula but the computation is O(1).",
+    notes:
+      "Only k = +1 supports the double-bounce toggle. " +
+      "Changing k resets the physics engine and clears particles.",
   },
+
   doubleBounce: {
-    simple: "Adds a rhythmic pulsation of the bounce (closed universe only).",
-    detail:
-      "In a closed (k = +1) universe with torsion, the scale factor can undergo " +
-      "multiple bounce-and-recollapse cycles before final expansion — like a ball " +
-      "bouncing on a trampoline.  This toggle enables the second-bounce modulation " +
-      "from Cubero & Popławski 2019.  Only available when Curvature k = +1. " +
-      "Unlocks the Double-Bounce Tuning folder below for hue/brightness of " +
-      "the second-bounce particles.",
+    simple: "Rhythmic double-bounce pulsation (closed universe only).",
+    visual:
+      "Particles arrive in two distinct waves per cycle, with the second wave " +
+      "shifted in hue and brightness. Creates a rhythmic pulsation pattern " +
+      "across the sensor disk.",
+    science:
+      "In a closed (k = +1) ECSK universe, the scale factor can undergo " +
+      "multiple bounce-and-recollapse cycles before final expansion — analogous " +
+      "to a ball bouncing on a trampoline. The collapse overshoots, bounces, " +
+      "re-expands, reaches a local maximum, collapses again, and re-bounces. " +
+      "From Cubero & Popławski 2019 (§26): the closed-universe threshold " +
+      "C > e^{−1/2} determines whether a second collapse occurs.",
+    range:
+      "On / Off only. Only available when Curvature k = +1.",
+    performance:
+      "Minimal. Adds a modulation function to the visual encoding — no extra " +
+      "physics computation per particle.",
+    notes:
+      "Unlocks the Double-Bounce Tuning folder (hue shift, brightness scale for " +
+      "the second bounce wave). Auto-disabled if k ≠ +1.",
   },
+
   beta: {
-    simple: "Spin–torsion coupling strength. Higher = stronger bounce.",
-    detail:
-      "The dimensionless spin parameter β controls how strongly fermion spin " +
-      "couples to spacetime torsion.  It sets the minimum scale factor a_min " +
-      "at the bounce and the effective equation of state w_eff. " +
-      "Physically accurate range: 0.01–0.20. Default 0.10 is a " +
-      "representative mid-range value (Popławski 2010b eq. 27). " +
-      "Very low β (~0.005) gives an extremely dense bounce; very high β " +
-      "(~0.249) gives a gentle bounce approaching de Sitter.\n" +
-      "Affects: bounce density, colour mapping (w_eff), time-dilation " +
-      "slider range, and perturbation sensitivity.",
+    simple: "Spin–torsion coupling strength — how strongly fermion spin resists collapse.",
+    visual:
+      "Higher β → gentler bounce with warmer colours (low w_eff). Lower β → violent, " +
+      "dense bounce with cooler/bluer tones (high w_eff). Dramatically changes the " +
+      "colour palette, brightness distribution, and timing structure of the pattern.",
+    science:
+      "The dimensionless spin parameter β = αn₀²/ε₀ is the ratio of torsion energy " +
+      "to radiation energy at the bounce. It sets the minimum scale factor:\n" +
+      "  ā²_min = [1 − √(1 − 4β)] / 2  (for k = +1)\n\n" +
+      "At the bounce, the effective equation of state is:\n" +
+      "  w_eff = (ā² − 3β) / (3(ā² − β))\n\n" +
+      "β → 0: bounce at extreme density (a_min → 0), torsion barely prevents singularity.\n" +
+      "β → 1/4: bounce at low density (a_min → 1/√2), nearly de Sitter inflation.\n\n" +
+      "From Popławski 2010b eq. 27; Unger & Popławski 2019 eq. 2, 7.\n" +
+      "The coupling constant: α = κ(ℏc)²/32, where κ = 8πG/c⁴.",
+    range:
+      "0.005 – 0.249 (must be < 1/4 for a finite bounce to exist).\n\n" +
+      "0.005 – 0.02: Extremely dense, violent bounce. Hot colours, high energy density.\n" +
+      "0.05 – 0.15: Mid-range (default 0.10). Rich colour variation, moderate density.\n" +
+      "0.15 – 0.249: Gentle bounce approaching de Sitter. Narrow colour palette, low density.",
+    performance:
+      "Negligible. One-time O(1) calculation per particle.",
+    notes:
+      "Primary physics knob. Affects: colour mapping (w_eff), brightness (energy density), " +
+      "arrival time spread (sensitivity dT/dβ), and perturbation response. " +
+      "Interacts with perturbation amplitude — together they determine the visual richness.",
   },
+
   perturbAmplitude: {
-    simple: "How lumpy the bounce surface is — more = more colour variation.",
-    detail:
-      "Sets the RMS amplitude of the spherical-harmonic perturbation field δ " +
-      "over the S² bounce hypersurface.  Each region gets β_eff = β(1 + δ), " +
-      "which shifts its colour (via w_eff) and arrival time. " +
-      "Typical: 0.05–0.20.  Default 0.12 gives moderate structure. " +
-      "High values (> 0.3) create dramatic colour contrasts but become " +
-      "increasingly unphysical.  Interacts with β and time dilation: " +
-      "higher amplitude widens the arrival-time spread.",
+    simple: "How lumpy the bounce surface is — regions bounce at different times and colours.",
+    visual:
+      "Low amplitude: uniform, nearly monochrome disk. " +
+      "High amplitude: dramatic colour contrasts and structured arrival-time patterns. " +
+      "The perturbation creates the angular structure (blobs, filaments, dipoles) visible on the sensor.",
+    science:
+      "Sets the RMS amplitude of the spherical-harmonic perturbation field δ(θ,φ) " +
+      "on the S² bounce hypersurface. Each comoving fluid element gets a locally " +
+      "perturbed spin parameter β_eff = β(1 + δ), which shifts its bounce properties:\n" +
+      "  • Different equation of state → different hue\n" +
+      "  • Different energy density → different brightness\n" +
+      "  • Different bounce time → temporal structure\n\n" +
+      "Uses the separate-universe approximation, validated by the algebraic (non-propagating) " +
+      "nature of torsion in ECSK theory (Hehl et al. 1976 eq. 3.22).",
+    range:
+      "0.001 – 0.6 (normal slider).\n\n" +
+      "0.001 – 0.05: Subtle perturbation — nearly homogeneous bounce.\n" +
+      "0.05 – 0.20: Moderate structure (default 0.12). Visible colour gradients.\n" +
+      "0.20 – 0.60: Strong perturbation — dramatic contrasts but increasingly unphysical\n" +
+      "  (the linear separate-universe approximation breaks down).",
+    performance:
+      "Negligible. Scales the pre-computed perturbation coefficients — no extra computation.",
+    notes:
+      "Interacts with β (higher β × higher amplitude = wider arrival-time spread). " +
+      "Interacts with ℓ_max and spectral tilt (together they shape the angular pattern). " +
+      "At high amplitudes, some regions may have β_eff < 0.002 (clamped internally).",
   },
+
   lMax: {
-    simple: "Detail level of the lumpy pattern — more = finer structure.",
-    detail:
-      "Maximum spherical-harmonic degree l in the perturbation field. " +
-      "l = 1–2 gives large-scale blobs; l = 8–16 gives fine filamentary " +
-      "structure; l > 32 approaches a Jackson-Pollock look. " +
-      "Physically accurate for CMB-like spectrum: l = 6–12. Default 8. " +
-      "Higher values use significantly more CPU — the number of harmonic " +
-      "coefficients grows as (l+1)².  Interacts with spectral index n_s " +
-      "and Silk damping.",
+    simple: "Angular detail of the perturbation pattern — more harmonics = finer structure.",
+    visual:
+      "ℓ = 1–2: large-scale blobs (dipole, quadrupole).\n" +
+      "ℓ = 4–8: medium filamentary structure.\n" +
+      "ℓ = 16–32: fine intricate patterns.\n" +
+      "ℓ > 64: Jackson Pollock territory — nearly random speckle.",
+    science:
+      "Maximum spherical-harmonic degree ℓ in the perturbation expansion:\n" +
+      "  δ(θ,φ) = Σ_{l=1}^{ℓ_max} Σ_{m=-l}^{l} c_lm Y_lm(θ,φ)\n\n" +
+      "The power spectrum follows a nearly scale-invariant (Harrison–Zel'dovich) form:\n" +
+      "  C_l ∝ l^(n_s − 1) × exp(−(l/l_silk)²)\n\n" +
+      "where n_s is the spectral index and l_silk controls Silk damping. " +
+      "The number of harmonic coefficients is (ℓ_max + 1)² − 1.",
+    range:
+      "1 – 16+ (hardware-dependent upper limit).\n\n" +
+      "1 – 2: Dipole/quadrupole only. Very smooth, large-scale patterns.\n" +
+      "4 – 8: Default range. Good balance of structure and performance.\n" +
+      "8 – 16: Fine detail, physically motivated for CMB-like spectra.\n" +
+      "16 – 96: Very fine detail, artistically interesting but computationally expensive.",
+    performance:
+      "HIGH IMPACT. Physics CPU cost scales as O(ℓ²) per particle.\n" +
+      "ℓ = 8: ~80 coefficients. ℓ = 16: ~288 coefficients. ℓ = 64: ~4160 coefficients.\n" +
+      "Combined cost: particle_rate × (ℓ+1)² per second.\n" +
+      "The Compute Load readout reflects this — watch it when adjusting.",
+    notes:
+      "Interacts with spectral tilt n_s (shapes power distribution) and Silk damping " +
+      "(suppresses high-ℓ modes). High ℓ_max with low Silk damping = maximum detail.\n" +
+      "Hardware tier sets the default and slider maximum.",
   },
+
   nS: {
-    simple: "Tilts the power spectrum — below 1 boosts large blobs, above 1 boosts fine detail.",
-    detail:
-      "Spectral index of the primordial perturbation power spectrum. " +
-      "n_s = 1.0 (Harrison–Zel'dovich) gives equal power per log scale. " +
-      "Planck 2018 best fit: n_s ≈ 0.965 (slightly red, favouring large scales). " +
-      "Default: 0.965. Range 0.5–1.5 covers red-to-blue tilts. " +
-      "Works with l_max and Silk damping to shape the overall pattern: " +
-      "red tilt (< 1) + high Silk damping smooths fine detail; " +
-      "blue tilt (> 1) + low damping makes everything speckly.",
+    simple: "Tilts the power spectrum — favours large blobs (red) or fine detail (blue).",
+    visual:
+      "n_s < 1 (red tilt): large-scale patterns dominate. Smooth, blob-like structures.\n" +
+      "n_s = 1 (scale-invariant): equal power at every angular scale.\n" +
+      "n_s > 1 (blue tilt): fine-scale speckle dominates. Noisy, detailed texture.",
+    science:
+      "Spectral index of the primordial perturbation power spectrum on the bounce S²:\n" +
+      "  P(l) ∝ l^(n_s − 1)\n\n" +
+      "n_s = 1.0: Harrison–Zel'dovich (exactly scale-invariant).\n" +
+      "n_s = 0.965: Planck 2018 best-fit (slightly red, favouring large scales).\n\n" +
+      "Sadatian & Hosseini 2025 derive n_s ≈ 0.965 from their torsion coupling " +
+      "parameter ξ ≈ 0.4 (their eq. 37), consistent with standard inflationary predictions " +
+      "and the Planck measurement.",
+    range:
+      "0.5 – 1.5.\n\n" +
+      "0.5 – 0.9: Strongly red-tilted. Dominated by large-scale (low-ℓ) power.\n" +
+      "0.96 – 0.97: Observationally preferred (Planck 2018). Default: 0.965.\n" +
+      "1.0: Exactly scale-invariant (Harrison–Zel'dovich).\n" +
+      "1.0 – 1.5: Blue-tilted. Boosted fine-scale power — not observed in CMB.",
+    performance:
+      "Negligible. Only changes the coefficient weights during generation — " +
+      "no per-particle cost change.",
+    notes:
+      "Works with ℓ_max and Silk damping to shape the overall pattern:\n" +
+      "  Red tilt + high Silk damping → smooth, large-scale blobs.\n" +
+      "  Blue tilt + low Silk damping → fine-grained speckle.\n" +
+      "  Scale-invariant + moderate damping → naturalistic CMB-like patterns.",
   },
+
   silkDamping: {
-    simple: "Smooths out fine details in the pattern, like a blur filter.",
-    detail:
-      "Applies exponential suppression to high-l harmonic modes, mimicking " +
-      "Silk (photon diffusion) damping of primordial perturbations. " +
-      "At 0 there's no suppression — all scales contribute equally (given n_s). " +
-      "At 0.6 (default, physically motivated) high-l modes are " +
-      "suppressed, giving smoother large-scale structure. " +
-      "At 1.0 only the lowest modes survive. " +
-      "Interacts with l_max (no effect if l_max is already low) " +
-      "and n_s (both shape the power distribution).",
+    simple: "Smooths out fine angular detail — mimics photon diffusion damping.",
+    visual:
+      "0: All angular scales contribute equally (given n_s). Sharp fine detail.\n" +
+      "0.6 (default): High-ℓ modes suppressed. Smooth large-scale structure.\n" +
+      "1.0: Only the lowest ℓ modes survive. Very smooth, blob-like pattern.",
+    science:
+      "Applies exponential damping to high-multipole modes:\n" +
+      "  C_l → C_l × exp(−(l / l_silk)²)\n" +
+      "  where l_silk = damping_ratio × ℓ_max\n\n" +
+      "Models Silk damping (photon diffusion damping) from the early universe, " +
+      "where photon random walks erase density perturbations below the diffusion " +
+      "scale. In the real CMB, this suppresses modes above ℓ ≈ 1000. Here it's " +
+      "applied to the bounce perturbation spectrum as a physically motivated filter.",
+    range:
+      "0 – 1.\n\n" +
+      "0: No damping — all modes at full power (noisy if ℓ_max is high).\n" +
+      "0.3 – 0.6: Moderate damping (default 0.6). Physically motivated.\n" +
+      "0.8 – 1.0: Heavy damping — only very low ℓ modes survive.",
+    performance:
+      "Negligible. Only modifies coefficient weights during generation.",
+    notes:
+      "Has no visible effect if ℓ_max is already low (e.g. ℓ = 2). " +
+      "Maximum effect when ℓ_max ≥ 8. " +
+      "Interacts with n_s — both shape the power distribution across scales.",
   },
+
   betaPP: {
-    simple: "Turns on particle production — matter being created at the bounce.",
-    detail:
-      "Particle production rate β_pp from Popławski 2014 eq. 40–46; 2021 eq. 8. " +
-      "When > 0, a fraction of geometric particles are tagged as 'produced' " +
-      "matter (shown with shifted colour and size). " +
-      "The critical threshold β_cr ≈ 1/929 ≈ 0.00108. Below this: subtle effect; " +
-      "above: vigorous production. Default: 0 (off). " +
-      "Typical range: 0.0001–0.005. " +
-      "When active, unlocks the Production Tuning folder with visual controls. " +
-      "Affects the Readout panel β_pp/β_cr ratio.",
+    simple: "Particle–antiparticle pair production rate at the bounce.",
+    visual:
+      "When > 0, a fraction of particles are tagged as 'produced' matter and " +
+      "displayed with shifted colour, brightness, and size. Creates a visual " +
+      "layering effect — geometric bounce particles plus production events.",
+    science:
+      "Models the creation of particle–antiparticle pairs from the extreme spacetime " +
+      "curvature at the bounce (Schwinger-like mechanism in curved spacetime).\n\n" +
+      "The particle production rate β_pp is from Popławski 2014 eq. 40–46; 2021 eq. 8.\n" +
+      "The critical threshold: β_cr ≈ 1/929 ≈ 0.00108.\n" +
+      "Below β_cr: subcritical — production is present but subtle.\n" +
+      "Above β_cr: supercritical — vigorous production, significant matter creation.\n\n" +
+      "The mechanism is analogous to the Schwinger effect (QED pair production in strong " +
+      "electric fields) but driven by spacetime curvature rather than electric field strength.",
+    range:
+      "0 – 0.005 (normal slider).\n\n" +
+      "0: Off (default). No particle production.\n" +
+      "0.0001 – 0.001: Subcritical. Subtle production events.\n" +
+      "0.00108: Critical threshold (β_cr = 1/929).\n" +
+      "0.001 – 0.005: Supercritical. Vigorous production — many tagged particles.",
+    performance:
+      "Low. Adds a branch per particle for tagging — negligible CPU cost. " +
+      "Slightly more GPU work if produced particles use different visual attributes.",
+    notes:
+      "Unlocks the Production Tuning folder (hue shift, brightness, size, timing). " +
+      "Updates the β_pp/β_cr ratio in the Readout panel.",
   },
 
-  // ── Double-Bounce Tuning ──────────────────────────────────
+  // ═══════════════════════════════════════════════════════════════════
+  //  Double-Bounce Tuning
+  // ═══════════════════════════════════════════════════════════════════
   dbSecondHueShift: {
-    simple: "Shifts the colour of second-bounce particles to distinguish them.",
-    detail:
-      "Hue offset in degrees applied to particles from the second bounce cycle. " +
-      "Default: +15° (slightly warmer). " +
-      "Set to 0 for no visual distinction; large values (±60–180°) " +
-      "make the two bounces dramatically different colours. " +
-      "Only active when double bounce is enabled (k = +1).",
+    simple: "Colour shift for second-bounce particles (degrees on the hue wheel).",
+    visual:
+      "Offsets the hue of particles from the second bounce cycle. " +
+      "+15° (default): slightly warmer. ±60–180°: dramatically different colours " +
+      "between first and second bounces.",
+    range: "−180° to +180°. Default: +15°. Set to 0 for no visual distinction.",
+    performance: "None. Purely visual — a constant offset in the hue encoding.",
+    notes: "Only active when double bounce is enabled and k = +1.",
   },
+
   dbSecondBriScale: {
-    simple: "Makes second-bounce particles dimmer or brighter.",
-    detail:
-      "Brightness multiplier for second-bounce particles relative to first-bounce. " +
-      "Default: 0.82 (slightly dimmer, physically motivated by energy loss). " +
-      "Range: 0.1 (barely visible) to 2.0 (brighter than first bounce). " +
-      "Only active when double bounce is enabled.",
+    simple: "Brightness multiplier for second-bounce particles.",
+    visual:
+      "< 1: second bounce is dimmer (physically motivated — energy loss between bounces).\n" +
+      "> 1: second bounce is brighter (artistic emphasis).",
+    range:
+      "0.1 – 2.0. Default: 0.82.\n" +
+      "0.82 represents ~18% energy loss between bounces (physically motivated).",
+    performance: "None. Single multiply per particle.",
+    notes: "Only active when double bounce is enabled and k = +1.",
   },
 
-  // ── Production Tuning ─────────────────────────────────────
+  // ═══════════════════════════════════════════════════════════════════
+  //  Production Tuning
+  // ═══════════════════════════════════════════════════════════════════
   ppHueShift: {
-    simple: "Shifts the colour of produced particles to distinguish them.",
-    detail:
-      "Hue offset in degrees applied to particle-production events. " +
-      "Default: +60° (shifted toward green/blue from the base ramp). " +
-      "Helps visually separate newly produced matter from geometric " +
-      "(torsion-bounce) particles. " +
-      "Only visible when β_pp > 0.",
+    simple: "Colour shift for newly produced particles (degrees).",
+    visual:
+      "Distinguishes pair-produced matter from geometric bounce particles. " +
+      "+60° (default) shifts production events toward green/blue.",
+    range: "−180° to +180°. Default: +60°.",
+    performance: "None. Constant hue offset.",
+    notes: "Only visible when β_pp > 0.",
   },
+
   ppBriBoost: {
-    simple: "Makes produced particles brighter or dimmer.",
-    detail:
-      "Brightness multiplier for particle-production events. " +
-      "Default: 1.3 (slightly brighter than normal particles). " +
-      "Higher values make production events stand out; lower values " +
-      "blend them into the background. " +
-      "Only visible when β_pp > 0.",
+    simple: "Brightness multiplier for produced particles.",
+    visual:
+      "Makes production events stand out (> 1) or blend in (< 1) relative " +
+      "to normal bounce particles.",
+    range: "0.1 – 3.0. Default: 1.3 (slightly brighter than normal).",
+    performance: "None. Single multiply.",
+    notes: "Only visible when β_pp > 0.",
   },
+
   ppSizeScale: {
-    simple: "Makes produced particles larger or smaller.",
-    detail:
-      "Size multiplier for produced particles relative to normal hits. " +
-      "Default: 0.7 (slightly smaller — distinguishes them from torsion hits). " +
-      "Range: 0.1 (tiny dots) to 3.0 (prominent blobs). " +
-      "Only visible when β_pp > 0.",
+    simple: "Size multiplier for produced particles.",
+    visual:
+      "< 1: produced particles are smaller (default 0.7 — subtle dots).\n" +
+      "> 1: produced particles are larger (prominent blobs).",
+    range: "0.1 – 3.0. Default: 0.7.",
+    performance: "None. Scales the sprite size.",
+    notes: "Only visible when β_pp > 0.",
   },
+
   ppBaseDelay: {
-    simple: "How long after the bounce before produced particles appear.",
-    detail:
-      "Base delay fraction for production timing. Shifts production-particle " +
-      "arrival times relative to the geometric bounce. " +
-      "Default: 1.5 (particles appear somewhat after normal hits). " +
-      "Higher values push production later, lower brings them closer " +
-      "to the main bounce wavefront. " +
-      "Interacts with PP scatter range and time dilation. " +
-      "Only visible when β_pp > 0.",
+    simple: "Time delay before produced particles appear after the bounce.",
+    visual:
+      "Higher values push production events later than the geometric bounce wavefront, " +
+      "creating a trailing layer of produced particles.",
+    range: "0 – 5.0. Default: 1.5. Higher = later arrival.",
+    performance: "None. Offsets the arrival time.",
+    notes: "Interacts with PP scatter range and arrival spread. Only visible when β_pp > 0.",
   },
+
   ppScatterRange: {
-    simple: "Spreads production particles over a wider time window.",
-    detail:
-      "Scatter range fraction for production timing. Adds random spread " +
-      "to when produced particles appear. " +
-      "Default: 1.0. Higher values scatter them over a wider interval; " +
-      "0 makes them all appear at exactly the base delay. " +
-      "Interacts with PP base delay and time dilation. " +
-      "Only visible when β_pp > 0.",
+    simple: "Temporal scatter of produced particles around the base delay.",
+    visual:
+      "0: all produced particles appear at exactly the base delay.\n" +
+      "Higher: spreads them over a wider time window, creating a diffuse production layer.",
+    range: "0 – 5.0. Default: 1.0.",
+    performance: "None. Random offset per particle.",
+    notes: "Interacts with PP base delay. Only visible when β_pp > 0.",
   },
 
-  // ── Flow ──────────────────────────────────────────────────
+  // ═══════════════════════════════════════════════════════════════════
+  //  Flow
+  // ═══════════════════════════════════════════════════════════════════
   frozen: {
-    simple: "Pauses time — particles stop aging and no new ones appear.",
-    detail:
-      "Freezes the simulation clock. Already-visible particles stay at " +
-      "their current brightness (no fading).  No new particles are emitted " +
-      "and the worker is paused. Unfreeze to resume from exactly where you left off.",
+    simple: "Pause the simulation — particles stop ageing, no new ones appear.",
+    visual: "Everything freezes in place. Existing particles hold their current brightness.",
+    performance: "Reduces CPU to near zero while paused (workers are suspended).",
+    notes: "Unfreeze to resume from exactly where you left off. Physics state is preserved.",
   },
+
   reset: {
-    simple: "Clears all visible particles and resets the timer.",
-    detail:
-      "Wipes every particle currently on screen and resets the arrival counter. " +
-      "The physics engine and worker keep running, so new particles fill in " +
-      "immediately at the current settings. Useful after changing physics " +
-      "parameters to start fresh.",
+    simple: "Clear all visible particles and restart the timer.",
+    visual: "The sensor disk goes dark, then fills back in as new particles arrive.",
+    performance: "Momentary spike as the buffer is cleared and workers restart.",
+    notes:
+      "Does not change any settings — only clears the particle buffer. " +
+      "Combine with Reset Settings for a full restart.",
   },
+
   resetSettings: {
-    simple: "Restores all sliders and toggles to their default values.",
-    detail:
-      "Resets every parameter (physics, flow, display, bloom, etc.) back to " +
-      "the initial defaults determined at startup. Does not clear existing " +
-      "particles — combine with Reset to start completely fresh.",
+    simple: "Restore every slider and toggle to its startup default.",
+    visual: "All controls snap back to their initial values. Particles are also cleared.",
+    notes:
+      "Defaults are determined by your hardware tier at startup. " +
+      "Also triggers a full Reset (particle clear + worker restart).",
   },
+
   randomSettings: {
-    simple: "Randomises all settings within their normal slider ranges.",
-    detail:
-      "Picks random values for every numeric parameter (within its normal min/max), " +
-      "randomises boolean toggles, curvature, and colours. Great for exploring " +
-      "unexpected visual combinations. Use Reset Settings to return to defaults.",
+    simple: "Randomise all settings within safe ranges — explore unexpected combinations.",
+    visual:
+      "Every numeric parameter gets a random value. Boolean toggles are randomised. " +
+      "Curvature k is uniformly random among {−1, 0, +1}. Colours are randomised.",
+    performance:
+      "A compound-cost safety clamp ensures the randomised combination stays within " +
+      "your hardware budget. particle_rate is scaled down if the combination of " +
+      "persistence, ℓ_max, and birth rate would exceed safe limits.",
+    notes:
+      "Background colour, zoom, and target framerate are excluded from randomisation. " +
+      "Use Reset Settings to return to defaults.",
   },
+
   targetFps: {
-    simple: "Limits how often the simulation updates and renders.",
-    detail:
-      "VSync = render at your monitor's native refresh rate (best quality). " +
-      "Lower values (e.g. 60, 30) reduce GPU and main-thread load by " +
-      "skipping frames. Useful if high refresh rates cause stuttering " +
-      "at extreme particle counts. Physics workers still run continuously " +
-      "between rendered frames, so particles accumulate normally.",
+    simple: "Limit the rendering frame rate to reduce GPU load.",
+    visual:
+      "VSync: render at your monitor's native refresh rate (smoothest).\n" +
+      "Lower caps (60, 30): skip render frames, saving GPU. " +
+      "Particles still accumulate normally between frames.",
+    performance:
+      "Directly reduces GPU work. At 30 fps you use roughly half the GPU of 60 fps. " +
+      "Physics workers run continuously regardless of this setting.",
+    notes:
+      "If you see stuttering at high particle counts, try capping to 60 fps. " +
+      "The detected refresh rate is shown on the VSync label.",
   },
+
   particleRate: {
-    simple: "How many new particles appear per second. More = denser image.",
-    detail:
-      "Target emission rate in particles per second (Poisson stream). " +
-      "The visible count at equilibrium is roughly rate × persistence. " +
-      "Default: 2000/s (hardware-dependent). " +
-      "Range: 100 (sparse) to 100,000+ (GPU-limited). " +
-      "Higher rates need more GPU memory and CPU for physics. " +
-      "Interacts strongly with persistence (together they set particle count) " +
-      "and hit size (dense particle fields look better with smaller hits).",
+    simple: "How many new particles appear per second — the primary density control.",
+    visual:
+      "Higher = denser, more filled-in image. Lower = sparse, individual dots visible.\n" +
+      "Visible particle count at equilibrium ≈ rate × fade duration.",
+    science:
+      "Particles are emitted as a continuous Poisson stream at this target rate. " +
+      "Each particle's arrival time is offset by the perturbation field δ(θ,φ) " +
+      "to create the angular structure of the bounce pattern.",
+    range:
+      "100 – 200,000+ (hardware-dependent slider max).\n\n" +
+      "100 – 500: Very sparse. Individual particle trajectories visible.\n" +
+      "1,000 – 3,000: Default range. Good balance of density and performance.\n" +
+      "5,000 – 20,000: Dense. Patterns are richly filled in.\n" +
+      "20,000+: Very dense — requires powerful GPU and short persistence.",
+    performance:
+      "HIGH IMPACT. Each particle requires:\n" +
+      "  • CPU: (ℓ_max + 1)² harmonic evaluations (physics worker)\n" +
+      "  • GPU: one instanced sprite per visible particle\n" +
+      "  • RAM: ~48 bytes per live particle\n\n" +
+      "Compound cost: rate × persistence = visible particles (GPU load).\n" +
+      "Compound cost: rate × (ℓ+1)² = physics evaluations/sec (CPU load).\n" +
+      "The Compute Load readout shows the combined effect.",
+    notes:
+      "This is the strongest performance lever. Halving the rate roughly halves " +
+      "both CPU and GPU load. Interacts with persistence (together they set particle count) " +
+      "and ℓ_max (together they set physics cost).",
   },
+
   fieldEvolution: {
-    simple: "How fast the lumpy pattern drifts over time. 0 = frozen pattern.",
-    detail:
-      "Ornstein–Uhlenbeck mean-reversion rate for the perturbation field. " +
-      "At 0 the pattern is frozen in time — the bounce surface never changes. " +
-      "At 0.1 (default) it evolves slowly, giving a gentle drifting effect. " +
-      "At 2+ the pattern changes rapidly between frames. " +
-      "Interacts with l_max (more modes = richer drift) and persistence " +
-      "(long persistence smooths rapid evolution into a blend).",
+    simple: "How fast the perturbation pattern drifts over time.",
+    visual:
+      "0: Frozen — the pattern never changes. The same blobs sit in the same places.\n" +
+      "0.1 (default): Gentle drift — pattern evolves slowly, creating a living texture.\n" +
+      "1+: Rapid evolution — the pattern changes dramatically between frames.",
+    science:
+      "Models the perturbation field as an Ornstein–Uhlenbeck process with this " +
+      "mean-reversion rate (1/s). The harmonic coefficients c_lm evolve as:\n" +
+      "  dc_lm = −rate × c_lm × dt + σ × dW\n\n" +
+      "This gives a statistically stationary random field that preserves the " +
+      "power spectrum while smoothly varying in time.",
+    range:
+      "0 – 2.\n\n" +
+      "0: Frozen pattern (static bounce surface).\n" +
+      "0.01 – 0.1: Slow drift. Patterns evolve over 10–100 seconds.\n" +
+      "0.1 – 0.5: Moderate evolution (default 0.1). Noticeable changes over seconds.\n" +
+      "0.5 – 2: Fast evolution. Patterns change visibly every frame.",
+    performance:
+      "Low. One multiply-add per coefficient per frame, regardless of particle count.\n" +
+      "Cost ∝ (ℓ_max + 1)² per frame (not per particle).",
+    notes:
+      "Interacts with persistence — long persistence smooths rapid evolution into a blend. " +
+      "Interacts with ℓ_max — more modes = richer, more detailed drift.",
   },
+
   arrivalSpread: {
-    simple: "How many seconds the perturbation pattern takes to sweep across the sphere.",
-    detail:
-      "Controls the temporal spread of particle arrivals in seconds. " +
-      "Each particle's bounce time is shifted by its local perturbation δ — " +
-      "this slider sets how many wall-clock seconds that shift spans. " +
-      "Default: 1.0 s. Range: 0.01 s (10 ms) to ~120 s. " +
-      "\n\nAt very low values (< 0.1 s) all particles arrive almost simultaneously " +
-      "\u2014 you see the full birth rate on screen but no spatial structure. " +
-      "This is 'flooding': every particle born this frame is instantly visible. " +
-      "Visually dense but no sense of the bounce wavefront sweeping across. " +
-      "\n\nAt moderate values (0.5\u20135 s) the perturbation pattern becomes " +
-      "visible as a rolling wavefront of colour and brightness. " +
-      "This is the sweet spot for seeing the physics. " +
-      "\n\nAt high values (> 10 s) particles trickle in slowly, revealing " +
-      "the finest angular detail but most particles are queued in the future " +
-      "buffer (not yet visible). " +
-      "\n\nFor best efficiency, keep this roughly equal to or less than Fade duration " +
-      "(persistence) \u2014 otherwise many particles fade before arriving. " +
-      "Interacts with perturbation amplitude, β, and persistence.",
+    simple: "How many seconds the bounce wavefront takes to sweep across the sphere.",
+    visual:
+      "Controls how the perturbation pattern unfolds in time:\n\n" +
+      "Very low (< 0.1 s): All particles arrive nearly simultaneously — the disk fills " +
+      "uniformly with no visible spatial structure. Dense but structureless.\n\n" +
+      "Moderate (0.5 – 5 s): The perturbation pattern becomes a rolling wavefront of " +
+      "colour and brightness sweeping across the disk. This is the sweet spot for " +
+      "seeing the physics.\n\n" +
+      "High (> 10 s): Particles trickle in slowly, revealing the finest angular detail " +
+      "but most are queued in the future buffer (not yet visible). Sparse at any given moment.",
+    science:
+      "Each particle's arrival time is offset by:\n" +
+      "  τ_arrive = now + (arrivalSpread / |sens × β × amplitude|) × sens × β × δ(θ,φ)\n\n" +
+      "where δ is the local perturbation at that point on S². The slider directly " +
+      "sets the total time window in seconds over which the perturbation pattern unfolds.",
+    range:
+      "0.01 – 120 s (hardware-dependent max).\n\n" +
+      "0.01 – 0.1: Near-simultaneous arrival ('flooding'). No spatial structure visible.\n" +
+      "0.5 – 2.0: Default range (1.0 s). Best for viewing the bounce structure.\n" +
+      "2 – 10: Slow unfold. Reveals fine angular detail over longer timescales.\n" +
+      "10 – 120: Very slow. Most particles are in the future buffer.",
+    performance:
+      "Moderate indirect cost. High values mean many particles exist in the future buffer " +
+      "(allocated but not yet visible). Each buffered particle uses ~48 bytes of RAM.\n" +
+      "For best efficiency, keep arrival spread ≤ fade duration.",
+    notes:
+      "Key interaction: if arrival spread >> persistence, particles fade before some regions " +
+      "even arrive — the disk is never fully lit. If arrival spread << persistence, the full " +
+      "pattern is always visible simultaneously (no wavefront sweep).",
   },
 
-  // ── Hue Ramp ──────────────────────────────────────────────
+  // ═══════════════════════════════════════════════════════════════════
+  //  Hue Ramp
+  // ═══════════════════════════════════════════════════════════════════
   hueMin: {
-    simple: "Starting colour of the physics-to-colour mapping.",
-    detail:
-      "Hue angle in degrees where the colour ramp begins. " +
-      "Default: 25° (warm red/orange). The largest w_eff (stiffest " +
-      "equation of state) maps here. " +
-      "Range: 0–360°. 0° = red, 120° = green, 240° = blue. " +
-      "Works with hue range to define the full colour palette.",
-  },
-  hueRange: {
-    simple: "Width of the colour palette in degrees.",
-    detail:
-      "How many degrees the colour ramp spans from hue start. " +
-      "Default: 245° (covers most of the spectrum from red through blue). " +
-      "Smaller values compress the palette (subtle gradients); " +
-      "larger values use more of the rainbow. " +
-      "The softest w_eff maps to hue_start + hue_range. " +
-      "Works with hue start. Both are purely visual — they don't " +
-      "affect physics.",
-  },
-  brightnessFloor: {
-    simple: "Minimum brightness any particle can have.",
-    detail:
-      "Lower limit of the brightness normalisation (0–1). " +
-      "Default: 0.15. Particles at the dimmest end of the physics range " +
-      "map to this value. Higher floor = more uniformly bright; lower = " +
-      "more contrast between bright and dim regions. " +
-      "Works with brightness ceiling. Both feed into the HSL encoding " +
-      "before the display brightness multiplier is applied.",
-  },
-  brightnessCeil: {
-    simple: "Maximum brightness any particle can have.",
-    detail:
-      "Upper limit of the brightness normalisation (0–1). " +
-      "Default: 1.0. Particles at the brightest end of the physics range " +
-      "map to this value. Lowering it compresses the bright end. " +
-      "Works with brightness floor.",
+    simple: "Starting colour of the physics-to-colour mapping (hue wheel degrees).",
+    visual:
+      "Sets where on the colour wheel the highest w_eff (stiffest matter) maps. " +
+      "Default 25° = warm red/orange.",
+    science:
+      "The effective equation of state w_eff is mapped linearly to a hue range:\n" +
+      "  hue = hueMin + (w_norm) × hueRange\n" +
+      "where w_norm is the normalised w_eff (0 = stiffest, 1 = softest).\n\n" +
+      "Reference: 0° = red, 60° = yellow, 120° = green, 180° = cyan, 240° = blue, 300° = magenta.",
+    range: "0 – 360°. Default: 25°. Purely visual — does not affect physics.",
+    performance: "None.",
   },
 
-  // ── Display ───────────────────────────────────────────────
+  hueRange: {
+    simple: "Width of the colour palette in degrees — how much of the spectrum to use.",
+    visual:
+      "Small range (30–60°): subtle monochromatic gradients.\n" +
+      "Large range (180–360°): full rainbow from stiffest to softest w_eff.",
+    range: "0 – 360°. Default: 245° (warm spectrum from red through blue).",
+    performance: "None.",
+    notes: "Works with hue start. Both are purely visual.",
+  },
+
+  brightnessFloor: {
+    simple: "Minimum physics brightness before display processing.",
+    visual:
+      "Higher floor = more uniformly bright particles (less contrast). " +
+      "Lower floor = darker dim regions (more contrast).",
+    range: "0 – 1. Default: 0.15.",
+    performance: "None.",
+    notes: "Applied before the display brightness multiplier and HSL encoding.",
+  },
+
+  brightnessCeil: {
+    simple: "Maximum physics brightness before display processing.",
+    visual:
+      "Lowering this compresses the bright end — the brightest particles " +
+      "become less distinct from mid-brightness ones.",
+    range: "0 – 1. Default: 1.0.",
+    performance: "None.",
+    notes: "Works with brightness floor to define the physical brightness range.",
+  },
+
+  // ═══════════════════════════════════════════════════════════════════
+  //  Particles
+  // ═══════════════════════════════════════════════════════════════════
   roundParticles: {
-    simple: "Circular particles vs square particles.",
-    detail:
-      "When on, each particle is a soft-edged circle (via fragment shader " +
-      "soft-edge clipping). When off, particles are square sprites. " +
-      "Circles look more natural; squares are slightly cheaper to render. " +
-      "The softness of the circle edge is controlled by the Particle edge slider.",
+    simple: "Circular vs square particle sprites.",
+    visual:
+      "On (default): soft-edged circles. More natural, sensor-like appearance.\n" +
+      "Off: square sprites. Slightly crisper at very small sizes.",
+    performance:
+      "Minimal difference. Round particles use a smoothstep discard in the fragment " +
+      "shader — roughly 2–3 extra GPU instructions per particle.",
+    notes: "Enables the Edge Softness slider (only relevant for round particles).",
   },
-  bloomEnabled: {
-    simple: "Adds a glow effect around bright particles.",
-    detail:
-      "Enables a multi-pass bloom post-processing effect. " +
-      "Bright particles bleed light outward, simulating camera sensor bloom " +
-      "or the HDR halo of a real high-energy event. " +
-      "Performance cost: moderate (3–5 extra render passes). " +
-      "Bloom strength, radius, and threshold fine-tune the effect. " +
-      "Auto-disabled on low-tier hardware.",
-  },
+
   autoBrightness: {
-    simple: "Auto-exposure: brightest particle → peak display luminance.",
-    detail:
-      "When enabled, the renderer dynamically scales brightness so the " +
-      "brightest visible particle always uses the full luminance range " +
-      "of the display.  Prevents scenarios where everything looks dim " +
-      "(e.g. all particles heavily faded or low energy density). " +
-      "Uses an asymmetric EMA: instant ramp-up for new bright particles, " +
-      "smooth ≈ 0.5 s decay on fade-out. " +
-      "Hides the manual Brightness slider (they conflict). " +
-      "Works in both SDR and HDR modes.",
+    simple: "Automatic exposure — normalises brightness to current physics settings.",
+    visual:
+      "On: brightness auto-adjusts so the display stays consistently visible as you " +
+      "change β and perturbation settings. No manual tuning needed.\n" +
+      "Off: brightness is on a raw physics scale — you control it manually.",
+    science:
+      "Computes the theoretical brightest and dimmest particles at the current β " +
+      "and perturbation amplitude. Normalises the brightness range so the mapping " +
+      "from energy density to display luminance stays perceptually consistent.\n" +
+      "Includes a size-overlap correction: small particles get boosted brightness " +
+      "while large overlapping particles are dampened (prevents whiteout under " +
+      "additive blending).\n" +
+      "Fully deterministic — no reactive tracking, no flicker.",
+    performance: "Negligible. O(1) calculation per frame.",
+    notes: "Hides the manual Brightness slider when enabled (they conflict).",
   },
-  ringColor: {
-    simple: "Colour of the circular boundary ring around the projection disk.",
-    detail:
-      "The thin circle visible around the particle display area is the " +
-      "boundary of the Lambert equal-area projection of the S² sphere. " +
-      "This picker sets its colour. Default: dark brown (#502008). " +
-      "The ring is quite subtle by design — increase Ring opacity to " +
-      "make colour changes more visible. " +
-      "Purely cosmetic — no effect on physics.",
+
+  bloomEnabled: {
+    simple: "Post-processing glow effect around bright particles.",
+    visual:
+      "Simulates camera sensor bloom / HDR halo. Bright particles bleed light " +
+      "outward, creating a warm glow. Enhances the sense of luminous energy.",
+    performance:
+      "MODERATE. Adds 3–5 extra full-screen render passes per frame.\n" +
+      "Cost scales with screen resolution, not particle count.\n" +
+      "Auto-disabled on low-tier hardware at startup.",
+    notes:
+      "Unlocks Bloom Intensity, Bloom Spread, and Bloom Threshold sliders.",
   },
-  backgroundColor: {
-    simple: "Background colour behind the particle display.",
-    detail:
-      "The overall scene background colour. Default: pure black (#000000). " +
-      "Can be changed for contrast, screenshots, or aesthetic reasons. " +
-      "Purely cosmetic — no effect on physics or particle colours.",
-  },
+
   hitSize: {
-    simple: "Makes particles bigger or smaller.",
-    detail:
-      "Base size of each particle sprite in pixels (before screen-density " +
-      "scaling).  Default: 1.0 px. " +
-      "Range: 1 (dots) to 30 (large blobs). " +
-      "Interacts with particle rate: high rate + large hits = solid fill; " +
-      "high rate + small hits = fine-grained texture. " +
-      "Automatically scaled by screen density (retina displays get " +
-      "proportionally smaller physical pixels).",
+    simple: "Base size of each particle sprite in pixels.",
+    visual:
+      "1 px (default): fine dots. Good for high particle counts.\n" +
+      "5–10 px: medium dots. Each particle is clearly visible.\n" +
+      "10–30 px: large blobs. Creates an impressionistic, painterly look.",
+    range: "1 – 30 px (normal). Auto-scaled by screen pixel density (retina).",
+    performance:
+      "Low-moderate. Larger particles = more pixel fill per sprite.\n" +
+      "At very large sizes with high particle counts, GPU fill rate becomes the bottleneck.",
+    notes:
+      "Interacts with particle rate: high rate + small size = fine texture. " +
+      "High rate + large size = solid-fill appearance.",
   },
+
   brightness: {
-    simple: "Overall brightness multiplier — makes everything brighter or dimmer.",
-    detail:
-      "Multiplies the final colour of every particle after all other " +
-      "colour processing (HSL encoding, fade, HDR mapping). " +
-      "Default: 5.0 (calibrated so default β fills the visible range). " +
-      "Range: 0.1 (barely visible) to 5.0+. " +
-      "In HDR mode, brightness is normalised so the default position " +
-      "approximates nits-accurate display. " +
-      "Interacts with bloom (bright particles trigger more bloom) " +
-      "and HDR exposure (in soft-HDR mode).",
+    simple: "Manual brightness multiplier (when auto-brightness is off).",
+    visual:
+      "Multiplies the final colour of every particle. Higher = brighter overall image.",
+    range:
+      "0.1 – 5.0. Default: 5.0 (calibrated for default β).\n" +
+      "< 1: Very dim. > 5: Risk of whiteout with additive blending.",
+    performance: "None. Single multiply in the shader.",
+    notes:
+      "Only visible when Auto Brightness is off. " +
+      "Interacts with bloom (brighter particles trigger more bloom).",
   },
+
   persistence: {
-    simple: "How long particles remain visible before fading away.",
-    detail:
-      "Total visible duration of each particle in seconds. Internally " +
-      "converted to a Weibull fade time constant τ so that brightness " +
-      "drops below the visibility threshold at exactly this time. " +
-      "Default: 1.0 s. " +
-      "Range: 0.1 (instant flash) to 12+ (long streamer trails). " +
-      "Visible particle count ≈ rate × persistence, so doubling persistence " +
-      "doubles the number of particles on screen (and GPU memory). " +
-      "Interacts with fade curve (shape of the decay) " +
-      "and particle rate.",
+    simple: "How long each particle remains visible before fading to black.",
+    visual:
+      "Short (0.2 s): particles flash and vanish. Only the newest wavefront is visible.\n" +
+      "Medium (1–3 s): several seconds of history visible simultaneously.\n" +
+      "Long (5+ s): dense buildup of overlapping layers, painterly trails.",
+    science:
+      "Internally converted to a Weibull fade time constant τ so that brightness " +
+      "drops below the visibility threshold at exactly this time:\n" +
+      "  B(t) = exp(−(t/τ)^k)\n" +
+      "where k is the fade sharpness parameter.",
+    range:
+      "0.2 – 12+ s (hardware-dependent max). Default: 1.0 s.\n\n" +
+      "0.2 – 0.5: Flash mode. Only instantaneous wavefront visible.\n" +
+      "0.5 – 2.0: Balanced (default). Current + recent history.\n" +
+      "2 – 5: Dense layers. Rich visual buildup.\n" +
+      "5 – 120: Very dense. Millions of particles on screen — GPU-intensive.",
+    performance:
+      "HIGH IMPACT. Visible particles ≈ birth_rate × persistence.\n" +
+      "Doubling persistence doubles the particle count on screen (and GPU memory).\n" +
+      "Example: 2000/s × 3 s = 6,000 particles. 2000/s × 30 s = 60,000 particles.",
+    notes:
+      "Primary performance lever alongside birth rate. " +
+      "Interacts with fade sharpness (shape of the decay curve). " +
+      "Watch the Compute Load readout when adjusting.",
   },
-  bloomStrength: {
-    simple: "How intense the glow effect is.",
-    detail:
-      "Multiplier on the bloom pass output. " +
-      "Default: 1.2. Range: 0 (no bloom visible) to 3+ (heavy glow). " +
-      "Only active when Bloom is enabled. " +
-      "Interacts with bloom threshold (brighter threshold = fewer " +
-      "particles trigger bloom) and brightness multiplier.",
-  },
-  bloomRadius: {
-    simple: "How far the glow spreads from bright particles.",
-    detail:
-      "Controls the spatial extent of the bloom halo. " +
-      "0 = tight halo (sits on top of the particle, reads as blur). " +
-      "1 = wide spread (large diffuse glow). Default: 0.3. " +
-      "Only active when Bloom is enabled. " +
-      "Internally controls mip-level weight distribution in the bloom " +
-      "shader, so the effect is logarithmic rather than linear.",
-  },
-  bloomThreshold: {
-    simple: "How bright a particle must be to trigger the glow.",
-    detail:
-      "Minimum colour brightness that contributes to the bloom pass. " +
-      "Default: 0.05 (almost all particles bloom a little). " +
-      "Higher values (0.3–0.5) limit bloom to only the very brightest " +
-      "particles, creating a more selective highlight effect. " +
-      "Only active when Bloom is enabled.",
-  },
+
   fadeSharpness: {
-    simple: "Shape of the fade curve — gradual tail vs sharp cutoff.",
-    detail:
-      "Weibull shape parameter k for the particle fade function. " +
-      "k = 1: standard exponential decay (gradual fade, default). " +
-      "k < 1: long tail — particles linger at low brightness for a long time. " +
-      "k > 1: sharp cutoff — particles stay bright then vanish abruptly. " +
-      "k = 2: Gaussian-style bell curve. k = 4: nearly binary on/off. " +
-      "Default: 1.0. Interacts with fade duration (the time scale).",
+    simple: "Shape of the fade curve — gradual tail vs abrupt cutoff.",
+    visual:
+      "k = 0.5: Long tail — particles linger at low brightness for a long time.\n" +
+      "k = 1.0 (default): Exponential decay. Natural falloff.\n" +
+      "k = 2.0: Gaussian bell — stays bright then fades quickly.\n" +
+      "k = 4.0: Nearly binary on/off — visible then suddenly gone.",
+    science:
+      "Weibull shape parameter k in the fade function:\n" +
+      "  B(t) = exp(−(t/τ)^k)\n\n" +
+      "k < 1: heavy-tailed (memoryless). k = 1: exponential (standard). " +
+      "k > 1: light-tailed (sharp cutoff).",
+    range: "0.3 – 4.0. Default: 1.0 (exponential).",
+    performance: "None. Changes the shader fade computation only.",
+    notes: "Interacts with fade duration (the time scale of the decay).",
   },
+
+  particleSoftEdge: {
+    simple: "How soft the edges of round particles are.",
+    visual:
+      "0: Perfectly hard circle edge (may show aliasing).\n" +
+      "0.05 (default): Subtle anti-aliased softness.\n" +
+      "0.2+: Prominent soft glow halo around each particle.",
+    range: "0 – 0.3. Default: 0.05.",
+    performance: "None. Fixed-cost smoothstep in the fragment shader.",
+    notes: "Only visible when Round Particles is enabled.",
+  },
+
+  // ═══════════════════════════════════════════════════════════════════
+  //  Ring
+  // ═══════════════════════════════════════════════════════════════════
   ringOpacity: {
-    simple: "How visible the projection boundary circle is.",
-    detail:
-      "Opacity of the Lambert disk boundary ring — the thin circle " +
-      "surrounding the particle display area. " +
-      "Default: 0.5. Range: 0 (invisible) to 1 (fully opaque). " +
-      "The ring marks the edge of the equal-area projection from " +
-      "the S² bounce surface to the 2D display.",
+    simple: "Visibility of the circular boundary ring around the projection disk.",
+    visual:
+      "The ring marks the edge of the Lambert equal-area projection of the S² " +
+      "bounce surface onto the 2D display. 0 = invisible, 1 = fully opaque.",
+    range: "0 – 1. Default: 0.5.",
+    performance: "None.",
   },
-  ringWidthPx: {
-    simple: "Thickness of the boundary ring in pixels.",
-    detail:
-      "Width of the solid boundary ring in CSS pixels. " +
-      "Inner edge is always flush at the projection boundary (r=2.0); " +
-      "the ring grows outward only. Converted to world units each frame " +
-      "based on zoom and viewport size. Default: 2 px. " +
-      "0.5 = hairline, 5+ = bold.",
-  },
-  ringBloomStrength: {
-    simple: "How bright the ring's bloom glow is.",
-    detail:
-      "Controls the intensity of the ring's own bloom post-processing " +
-      "effect, completely independent of particle bloom. " +
-      "0 = no bloom (ring is crisp). Higher values produce a stronger " +
-      "light-bleed halo. Default: 0.8.",
-  },
-  ringBloomRadius: {
-    simple: "How far the ring's bloom spreads outward.",
-    detail:
-      "Controls how far the ring bloom extends from the ring edge. " +
-      "0 = tight glow hugging the ring, 1 = wide diffuse glow. " +
-      "This is the ring's own bloom radius, independent of particle bloom. " +
-      "Default: 0.4.",
+
+  ringColor: {
+    simple: "Colour of the projection boundary ring.",
+    visual: "Click to open a colour picker. The ring is quite subtle at default opacity.",
+    notes:
+      "Overridden when Auto-Colour is enabled (ring tracks dominant particle hue).",
   },
 
   ringAutoColor: {
     simple: "Automatically match ring colour to the dominant particle hue.",
-    detail:
-      "When enabled, the ring colour tracks the brightness-weighted " +
-      "average hue of all visible particles. This keeps the ring " +
-      "colour harmonious with whatever physics settings you're using. " +
-      "Disable to pick a fixed ring colour manually.",
-  },
-  softHdrExposure: {
-    simple: "Brightness of the display in soft-HDR mode.",
-    detail:
-      "Tone-mapping exposure for the soft-HDR rendering path (linear " +
-      "tone mapping on a standard canvas). Default: 1.6. " +
-      "Only active when your display does NOT support full hardware HDR — " +
-      "the renderer falls back to 'soft HDR' which simulates extended " +
-      "brightness range through linear tone mapping. " +
-      "Higher values brighten the overall image; lower compresses it. " +
-      "Has NO effect in full HDR mode (the display handles mapping) " +
-      "or on SDR-only displays. Check the Readout → HDR field to see " +
-      "which mode you're in.",
-  },
-  particleSoftEdge: {
-    simple: "How soft or hard the edges of round particles are.",
-    detail:
-      "Controls the smoothstep transition width at the edge of circular " +
-      "particles.  0 = perfectly hard circle edge (aliased). " +
-      "0.05 (default) = subtle anti-aliased softness. " +
-      "0.2+ = prominent soft glow around each particle. " +
-      "Only visible when Round particles is enabled. " +
-      "Purely visual — no physics effect.",
-  },
-  zoom: {
-    simple: "Zoom level of the sensor display.",
-    detail:
-      "Controls the orthographic camera zoom. Default 1.0 shows the " +
-      "full Lambert disk. Values > 1 zoom in (magnify detail); " +
-      "values < 1 zoom out (more border visible). " +
-      "Purely visual — does not affect physics or particle positions.",
+    visual:
+      "When enabled, the ring colour continuously tracks the brightness-weighted " +
+      "average hue of all visible particles. Keeps the ring harmonious with any " +
+      "physics settings.",
+    performance: "Negligible. Weighted average computed once per frame.",
+    notes: "Disable to use a manually picked ring colour.",
   },
 
-  // ── Color Tuning ──────────────────────────────────────────
+  ringWidthPx: {
+    simple: "Thickness of the boundary ring in pixels.",
+    visual:
+      "0.5 = hairline. 2 (default) = subtle. 5+ = bold frame.\n" +
+      "Ring grows outward from the projection boundary (never inward).",
+    range: "0.5 – 10. Default: 2 px.",
+    performance: "None.",
+  },
+
+  ringBloomStrength: {
+    simple: "Intensity of the ring's own bloom glow (independent of particle bloom).",
+    visual: "0 = crisp ring edge. Higher = soft light-bleed halo around the ring.",
+    range: "0 – 3. Default: 0.8.",
+    performance: "Low. Uses the ring's dedicated bloom pass (separate from particle bloom).",
+  },
+
+  ringBloomRadius: {
+    simple: "How far the ring's bloom glow spreads.",
+    visual: "0 = tight glow hugging the ring. 1 = wide diffuse halo.",
+    range: "0 – 1. Default: 0.4.",
+    performance: "Low. Part of the ring's bloom pass.",
+  },
+
+  // ═══════════════════════════════════════════════════════════════════
+  //  Bloom
+  // ═══════════════════════════════════════════════════════════════════
+  bloomStrength: {
+    simple: "Intensity of the particle glow effect.",
+    visual:
+      "0: No visible bloom. 1.2 (default): Moderate glow. 3+: Heavy, dreamy glow.",
+    range: "0 – 3+ (hardware-dependent max). Default: 1.2.",
+    performance:
+      "Part of the bloom pass cost (see Bloom toggle). The multiplier itself is free — " +
+      "the cost is in having bloom enabled at all.",
+    notes: "Only active when Bloom is enabled.",
+  },
+
+  bloomRadius: {
+    simple: "How far the glow spreads from bright particles.",
+    visual:
+      "0: Tight halo (reads as blur, not glow).\n" +
+      "0.3 (default): Natural glow extent.\n" +
+      "1.0: Wide, diffuse glow — entire disk takes on a warm haze.",
+    science:
+      "Controls the mip-level weight distribution in the multi-pass bloom shader. " +
+      "The effect is logarithmic rather than linear — small changes near 0 have " +
+      "more visual impact than equal changes near 1.",
+    range: "0 – 1. Default: 0.3.",
+    performance:
+      "No additional cost beyond having bloom enabled. The radius changes weights " +
+      "in the existing passes.",
+    notes: "Only active when Bloom is enabled.",
+  },
+
+  bloomThreshold: {
+    simple: "Minimum brightness for a particle to contribute to the glow.",
+    visual:
+      "Low threshold (0.05, default): Almost all particles glow at least a little.\n" +
+      "High threshold (0.3–0.5): Only the very brightest particles produce halos — " +
+      "creates a selective highlight effect.",
+    range: "0 – 1. Default: 0.05.",
+    performance:
+      "Slightly reduces bloom cost at high thresholds (fewer pixels pass the bright filter).",
+    notes: "Only active when Bloom is enabled.",
+  },
+
+  softHdrExposure: {
+    simple: "Tone-mapping brightness for soft-HDR displays.",
+    visual:
+      "Higher = brighter overall image. Lower = compressed dynamic range.",
+    science:
+      "Linear tone-mapping exposure for the soft-HDR rendering path. Only active " +
+      "when your display supports HDR but the browser can't create a full " +
+      "rgba16float canvas — the renderer falls back to linear tone mapping " +
+      "to simulate extended brightness range.",
+    range: "0.5 – 4. Default: 1.6.",
+    performance: "None. Single multiply in the final compositing pass.",
+    notes:
+      "Has NO effect in full HDR mode (display handles mapping) or on SDR-only displays. " +
+      "Check Readout → HDR mode to see which path you're using. " +
+      "Only visible when soft-HDR is active.",
+  },
+
+  // ═══════════════════════════════════════════════════════════════════
+  //  Camera
+  // ═══════════════════════════════════════════════════════════════════
+  zoom: {
+    simple: "Orthographic camera zoom level.",
+    visual:
+      "1.0 (default): Full Lambert disk visible.\n" +
+      "> 1: Zoom in — magnify detail at the centre.\n" +
+      "< 1: Zoom out — more border visible around the disk.",
+    range: "0.2 – 5. Default: 1.0.",
+    performance: "None. Changes the camera projection matrix only.",
+  },
+
+  backgroundColor: {
+    simple: "Scene background colour.",
+    visual: "Click to open picker. Default: pure black (#000000).",
+    performance: "None.",
+    notes: "Purely cosmetic. Does not affect particle colours or physics.",
+  },
+
+  // ═══════════════════════════════════════════════════════════════════
+  //  Color Tuning
+  // ═══════════════════════════════════════════════════════════════════
   lightnessFloor: {
-    simple: "Minimum lightness in the HSL colour output.",
-    detail:
-      "All particles have their HSL lightness clamped to at least this value. " +
-      "Default: 0.20. Higher values make the darkest particles brighter; " +
-      "0 allows fully black particles. " +
-      "Interacts with lightness range (floor + range must not exceed 1.0 " +
-      "for well-behaved colours).",
+    simple: "Minimum HSL lightness for all particles.",
+    visual:
+      "Higher floor = no truly dark particles (everything is at least this bright).\n" +
+      "0 = particles can be fully black.",
+    range: "0 – 0.5. Default: 0.20.",
+    performance: "None.",
+    notes: "Total max lightness = floor + range (should not exceed ~0.85 for natural colours).",
   },
+
   lightnessRange: {
-    simple: "How much lightness can vary across particles.",
-    detail:
-      "HSL lightness span above the lightness floor. " +
-      "Default: 0.65. Total max lightness = floor + range. " +
-      "Smaller range = more uniform brightness; larger = more contrast " +
+    simple: "How much lightness varies across particles.",
+    visual:
+      "Small range = more uniform brightness. Large range = more contrast " +
       "between bright and dim regions.",
+    range: "0.1 – 0.8. Default: 0.65.",
+    performance: "None.",
+    notes: "Works with lightness floor.",
   },
+
   saturationFloor: {
-    simple: "Minimum colour saturation — higher means no grey/pale particles.",
-    detail:
-      "All particles have their HSL saturation at least this value. " +
-      "Default: 0.70. Higher values ensure vivid colours everywhere; " +
-      "0 allows grey/desaturated particles. " +
-      "Interacts with saturation range.",
+    simple: "Minimum colour saturation — prevents grey/washed-out particles.",
+    visual:
+      "Higher = all particles are vivid. 0 = some particles may appear grey.",
+    range: "0 – 1. Default: 0.70.",
+    performance: "None.",
   },
+
   saturationRange: {
-    simple: "How much saturation can vary across particles.",
-    detail:
-      "HSL saturation span above the saturation floor. " +
-      "Default: 0.25. Most particles end up in the 0.70–0.95 band. " +
-      "Increase for more variation between vivid and muted particles.",
+    simple: "How much saturation varies across particles.",
+    visual:
+      "Small range = uniformly vivid. Large range = some particles more muted than others.",
+    range: "0 – 0.5. Default: 0.25 (most particles in the 0.70–0.95 saturation band).",
+    performance: "None.",
   },
 };
 
@@ -544,116 +844,181 @@ export const TOOLTIPS: Record<string, Tooltip> = {
 
 export const READOUT_TOOLTIPS: Record<string, Tooltip> = {
   beta: {
-    simple: "How strongly spin couples to spacetime torsion.",
-    detail: "The spin–torsion coupling β set by the slider. " +
-      "Higher β → gentler bounce. Lower β → more violent, denser bounce. " +
-      "Controls the colour palette and time-dilation range.",
+    simple: "Spin–torsion coupling β (from slider).",
+    detail:
+      "The current spin parameter β. Higher β → gentler bounce, warmer colours, " +
+      "lower energy density. Lower β → violent, dense bounce, cooler/bluer tones.\n\n" +
+      "This is the primary physics parameter. Range: 0.005 – 0.249.",
   },
   aMin: {
-    simple: "How compressed the universe gets at the bounce.",
-    detail: "The minimum scale factor a_min — think of it as the universe's " +
-      "smallest possible size. Closer to 0 = extremely compressed. " +
-      "Closer to 0.707 = barely compressed (gentle bounce).",
+    simple: "Minimum scale factor at the bounce — how compressed the universe gets.",
+    detail:
+      "a_min is the smallest the universe can get before torsion halts the collapse.\n\n" +
+      "For k = +1: ā²_min = [1 − √(1−4β)] / 2\n" +
+      "For k = 0:  ā²_min = β\n" +
+      "For k = −1: ā²_min = [−1 + √(1+4β)] / 2\n\n" +
+      "Close to 0 = extremely compressed (high energy density).\n" +
+      "Close to 0.707 = barely compressed (gentle bounce, low energy density).",
   },
   wEff: {
-    simple: "How 'stiff' the matter is at peak compression.",
-    detail: "w = 1/3 means radiation (normal). w = 1 means extremely stiff " +
-      "(like the early universe). w > 1 means torsion is dominating. " +
-      "Higher stiffness = faster, more violent bounce.",
+    simple: "Effective equation of state at the bounce point.",
+    detail:
+      "w_eff = (ā² − 3β) / (3(ā² − β))\n\n" +
+      "Describes how 'stiff' the matter is at peak compression:\n" +
+      "  w = 1/3: radiation (normal matter).\n" +
+      "  w = 1: extremely stiff (maximally compressed).\n" +
+      "  w > 1: torsion-dominated — superstiff. Faster, more violent bounce.\n" +
+      "  w < −1/3: accelerating expansion (repulsive).\n\n" +
+      "The hue mapping on screen directly encodes w_eff: " +
+      "stiffest → warmest colour, softest → coolest colour.",
   },
   torsionRatio: {
-    simple: "How much torsion contributes to the total energy at the bounce.",
-    detail: "S near 1.0 means torsion (from fermion spin) is the dominant " +
-      "energy source at peak compression. S near 0 means gravity dominates. " +
-      "The whole point of ECSK cosmology is that S ≈ 1 prevents the singularity.",
+    simple: "How much of the total energy at the bounce comes from torsion.",
+    detail:
+      "S = torsion energy / total energy at the bounce point.\n\n" +
+      "S ≈ 1.0: torsion (from fermion spin) dominates — this is the core " +
+      "mechanism of ECSK cosmology that prevents the singularity.\n" +
+      "S ≈ 0: gravity dominates (approaching GR behaviour — singularity).\n\n" +
+      "In standard ECSK with typical β, S is always close to 1 at the bounce. " +
+      "The whole point of the theory is that torsion takes over at extreme densities.",
   },
   ppStrength: {
-    simple: "Intensity of particle–antiparticle pair creation at the bounce.",
-    detail: "Shown as a ratio of βpp to the critical threshold (~1/929). " +
-      "Below 1 = subcritical (subtle). Above 1 = supercritical (vigorous). " +
-      "'off' when pair-production is disabled.",
+    simple: "Particle production intensity (β_pp / β_cr ratio).",
+    detail:
+      "Shown as the ratio of your β_pp setting to the critical threshold:\n" +
+      "  β_cr ≈ 1/929 ≈ 0.00108 (Popławski 2014 eq. 40–46)\n\n" +
+      "Below 1: subcritical. Pair production occurs but is subtle.\n" +
+      "Above 1: supercritical. Vigorous particle–antiparticle creation.\n" +
+      "'off' when the pair-production slider is at zero.",
   },
   flux: {
-    simple: "Smoothed count of particles arriving each second.",
-    detail: "Exponentially-smoothed arrival rate. Should roughly match " +
-      "your Birth Rate slider when the simulation is in steady state. " +
-      "If much lower, the buffer may be full or CPU can't keep up.",
+    simple: "Smoothed particle arrival rate (particles per second).",
+    detail:
+      "Exponentially-smoothed count of particles arriving each second.\n\n" +
+      "Should roughly match your Birth Rate slider at steady state. " +
+      "If significantly lower, either:\n" +
+      "  • The CPU can't keep up (check Compute Load)\n" +
+      "  • The buffer is full (check Buffer Fill)\n" +
+      "  • Many particles are in the future buffer (high arrival spread)",
   },
   visible: {
-    simple: "How many particles are currently drawn on screen.",
-    detail: "Roughly equals birth rate × fade duration at steady state. " +
-      "Capped by the emergency buffer ceiling to prevent memory exhaustion.",
+    simple: "Number of particles currently on screen.",
+    detail:
+      "At steady state: ≈ birth_rate × fade_duration.\n\n" +
+      "Example: 2000/s × 1.0 s = ~2000 visible particles.\n" +
+      "Example: 5000/s × 3.0 s = ~15,000 visible particles.\n\n" +
+      "Capped by an emergency buffer ceiling to prevent memory exhaustion. " +
+      "If this number plateaus below the expected value, the buffer is full.",
   },
   fps: {
-    simple: "How smoothly the animation is running.",
-    detail: "Frames per second. 60 = ideal. 30–60 = fine. Below 30 = " +
-      "try reducing birth rate, ripple detail (ℓmax), or disabling bloom.",
+    simple: "Rendering frame rate (frames per second).",
+    detail:
+      "60 fps: ideal (smooth animation).\n" +
+      "30–60 fps: acceptable.\n" +
+      "Below 30 fps: visibly choppy. " +
+      "Reduce birth rate, ℓ_max, persistence, or disable bloom to improve.\n\n" +
+      "If you've capped framerate via Target Framerate, this will show that cap, not VSync.",
   },
   cpuUsage: {
-    simple: "Physics threads actively generating particles.",
-    detail: "Shows workers in use vs. total CPU cores. More workers = " +
-      "higher particle throughput using multiple CPU cores. " +
-      "Count is set automatically based on your hardware score.",
+    simple: "Physics worker threads currently active.",
+    detail:
+      "Shows active workers / total CPU cores (from navigator.hardwareConcurrency).\n\n" +
+      "Each worker independently generates particles from the perturbation field. " +
+      "More workers = higher sustained particle throughput on multi-core CPUs.\n" +
+      "Worker count is set automatically based on your hardware capability score.",
   },
   computeLoad: {
-    simple: "Compound compute cost of your current settings.",
-    detail: "Estimates the combined cost of particle rate × persistence " +
-      "(renderer CPU) and particle rate × ripple detail (physics CPU). " +
-      "Above 100% the particle rate is automatically throttled to keep " +
-      "the simulation responsive. Reduce birth rate, fade duration, or " +
-      "ripple detail to lower the load.",
+    simple: "Combined compute cost of your current settings (% of budget).",
+    detail:
+      "Estimates the combined cost across two axes:\n\n" +
+      "  Renderer (GPU): particle_rate × persistence (= visible particle count)\n" +
+      "  Physics (CPU): particle_rate × (ℓ_max + 1)²\n\n" +
+      "Above 100%: the birth rate is automatically throttled to keep the " +
+      "simulation responsive. Reduce birth rate, fade duration, or ℓ_max " +
+      "to bring it under budget.\n\n" +
+      "This is the single best indicator of whether your settings are sustainable.",
   },
   bufferFill: {
-    simple: "How full the particle buffer is.",
-    detail: "Current particles stored vs. emergency ceiling. " +
-      "When this hits 100%, oldest particles are dropped to free memory. " +
-      "Reduce birth rate or fade duration if the buffer fills up.",
+    simple: "GPU particle buffer usage (current / ceiling).",
+    detail:
+      "Shows how many particles are stored vs. the emergency buffer ceiling.\n\n" +
+      "When this hits 100%, the oldest particles are silently dropped to free memory. " +
+      "You'll see the pattern lose its oldest layer.\n\n" +
+      "If it stays at 100%: reduce birth rate, persistence, or arrival spread.",
   },
   screen: {
-    simple: "Your display resolution.",
-    detail: "Physical screen resolution detected from the display. " +
-      "Higher resolution uses more GPU power for rendering.",
+    simple: "Display resolution (physical pixels).",
+    detail:
+      "Your screen's physical resolution.\n" +
+      "Higher resolution = more pixels to shade per frame = more GPU work.\n" +
+      "The renderer caps pixel ratio on lower-tier hardware to maintain performance.",
   },
   hz: {
-    simple: "Your monitor's refresh rate.",
-    detail: "Detected refresh rate in Hz. VRR = Variable Refresh Rate " +
-      "(G-Sync / FreeSync) detected. Higher refresh rates need more GPU work.",
+    simple: "Monitor refresh rate (Hz).",
+    detail:
+      "Detected refresh rate. VRR = Variable Refresh Rate (G-Sync / FreeSync).\n\n" +
+      "Higher refresh rates mean more frames to render per second. " +
+      "If performance is limited, the Target Framerate control can cap rendering " +
+      "below your native rate.",
   },
   hdr: {
-    simple: "Whether high-dynamic-range rendering is active.",
-    detail: "FULL = true HDR with extended-range canvas (best quality). " +
-      "SOFT = standard canvas with linear tone mapping (decent fallback). " +
-      "No = SDR only. The HDR exposure slider only works in SOFT mode.",
+    simple: "High-dynamic-range rendering mode.",
+    detail:
+      "FULL: True HDR with rgba16float canvas — particle brightness maps to real nits.\n" +
+      "SOFT: Standard canvas with linear tone mapping — simulates extended range.\n" +
+      "No: SDR only — standard ACES Filmic tone mapping.\n\n" +
+      "The HDR Exposure slider only works in SOFT mode. " +
+      "In FULL mode, the display hardware handles luminance mapping.",
   },
   gamut: {
-    simple: "How wide a colour range your display supports.",
-    detail: "sRGB = standard. P3 = wide gamut (richer reds and greens). " +
-      "Rec.2020 = ultra-wide (rare). Wider gamut = more vivid particles.",
+    simple: "Display colour gamut (how wide a range of colours your screen shows).",
+    detail:
+      "sRGB: Standard (covers ~35% of visible colours).\n" +
+      "P3: Wide gamut (richer reds and greens — common on modern displays).\n" +
+      "Rec.2020: Ultra-wide (very rare — professional HDR monitors).\n\n" +
+      "Wider gamut = more vivid and saturated particle colours are possible.",
   },
   cpuCores: {
-    simple: "Total CPU threads available for the browser.",
-    detail: "From navigator.hardwareConcurrency. The physics engine uses " +
-      "some of these as dedicated particle-generation threads.",
+    simple: "Total CPU threads available to the browser.",
+    detail:
+      "From navigator.hardwareConcurrency.\n\n" +
+      "The physics engine distributes work across dedicated Web Workers. " +
+      "More cores → more workers → higher particle throughput.\n" +
+      "Typical: 4 (low-end laptop) to 32+ (high-end desktop).",
   },
   cpuBench: {
-    simple: "Relative speed of your CPU (1.0× = average).",
-    detail: "Quick micro-benchmark measuring transcendental-math throughput. " +
-      "Used to auto-tune default particle rate and ripple detail.",
+    simple: "Relative CPU speed (1.0× = baseline).",
+    detail:
+      "Quick micro-benchmark measuring transcendental-math throughput " +
+      "(the same operations used in spherical harmonic evaluation).\n\n" +
+      "Used to auto-tune: default particle rate, worker count, ℓ_max.\n" +
+      "> 1.0: Faster than baseline. < 1.0: Slower.",
   },
   gpu: {
-    simple: "Your graphics card or integrated GPU.",
-    detail: "Detected from WebGPU adapter info. Used to set the capability " +
-      "score and particle buffer size. Discrete GPUs score higher.",
+    simple: "Detected graphics card or integrated GPU.",
+    detail:
+      "From WebGPU adapter info (or WebGL debug renderer name).\n\n" +
+      "Used to set the capability score and particle buffer size.\n" +
+      "Discrete GPUs (RTX, RX, Arc) score much higher than integrated (Intel UHD, etc.).",
   },
   capability: {
     simple: "Combined hardware performance score (0–100%).",
-    detail: "Blends CPU speed, core count, GPU capability, and RAM, " +
-      "then penalises for high screen resolution (more pixels = more load). " +
-      "Drives all automatic defaults: birth rate, worker count, bloom, etc.",
+    detail:
+      "Blends:\n" +
+      "  • CPU speed (benchmark result)\n" +
+      "  • CPU core count\n" +
+      "  • GPU capability (discrete vs integrated)\n" +
+      "  • Available RAM\n" +
+      "  • Penalty for high screen resolution (more pixels = more GPU load)\n\n" +
+      "Drives all automatic defaults: birth rate, worker count, bloom on/off, " +
+      "ℓ_max, persistence max, buffer size.",
   },
   tier: {
-    simple: "Performance tier label (cosmetic only).",
-    detail: "LOW / MID / HIGH / ULTRA. Just a label — all budget values " +
-      "are smoothly interpolated from the continuous capability score.",
+    simple: "Performance tier label.",
+    detail:
+      "LOW / MID / HIGH / ULTRA — a human-readable label for the capability score.\n\n" +
+      "This is cosmetic only. All budget values (birth rate, ℓ_max, bloom, etc.) " +
+      "are smoothly interpolated from the continuous capability score, not " +
+      "hard-switched at tier boundaries.",
   },
 };
