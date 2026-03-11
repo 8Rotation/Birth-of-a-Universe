@@ -296,6 +296,55 @@ const OLED_CSS = `
   padding-top: 5px;
   border-top: 1px solid #1e1e1e;
 }
+
+/* ── Mobile adaptations ────────────────────────────────────────── */
+.ecsk-mobile .ecsk-readout {
+  position: fixed !important;
+  top: auto !important;
+  bottom: 0 !important;
+  left: 0 !important;
+  right: 0 !important;
+  width: 100% !important;
+  max-height: 40vh !important;
+  overflow-y: auto !important;
+  z-index: 1001 !important;
+}
+.ecsk-mobile .ecsk-controls {
+  position: fixed !important;
+  top: 0 !important;
+  left: 0 !important;
+  right: 0 !important;
+  width: 100% !important;
+  max-height: 60vh !important;
+  overflow-y: auto !important;
+}
+/* On mobile: collapsed panels are semi-visible (no hover needed) */
+.ecsk-mobile .ecsk-panel.lil-gui.closed {
+  opacity: 0.35;
+}
+/* Tap opens to full opacity — no hover dependency */
+.ecsk-mobile .ecsk-panel.lil-gui:not(.closed) {
+  opacity: 0.95;
+}
+/* Larger touch targets */
+.ecsk-mobile .lil-gui .title {
+  font-size: 13px;
+  line-height: 32px;
+  padding: 4px 12px;
+}
+.ecsk-mobile .lil-gui .controller {
+  min-height: 32px;
+  padding: 3px 0;
+}
+.ecsk-mobile .lil-gui input, .ecsk-mobile .lil-gui select {
+  font-size: 13px;
+  min-height: 28px;
+}
+.ecsk-mobile .lil-gui {
+  --slider-knob-width: 8px;
+  --font-size: 13px;
+  --input-font-size: 13px;
+}
 `;
 
 // ── Create controls ───────────────────────────────────────────────────────
@@ -308,11 +357,17 @@ const OLED_CSS = `
  *                 values and normal-mode slider ranges.  If omitted,
  *                 falls back to mid-tier defaults.
  */
-export function createSensorControls(onReset: () => void, budget?: ComputeBudget, refreshRate = 60) {
+export function createSensorControls(onReset: () => void, budget?: ComputeBudget, refreshRate = 60, isMobile = false) {
   // ── Inject OLED theme CSS ─────────────────────────────────────────
   const styleEl = document.createElement("style");
   styleEl.textContent = OLED_CSS;
   document.head.appendChild(styleEl);
+
+  // ── Mobile mode: add class to body for CSS targeting ──────────────
+  if (isMobile) {
+    document.body.classList.add("ecsk-mobile");
+    console.log("[controls] Mobile layout active");
+  }
 
   // ── Slider limits from hardware detection (or sensible mid-tier fallback)
   const sl = budget?.sliderLimits ?? {
@@ -388,6 +443,15 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
     randomSettings: () => {},  // placeholder, wired below
   };
 
+  // ── Mobile-specific default overrides ─────────────────────────────
+  if (isMobile) {
+    params.bloomEnabled = false;
+    params.particleRate = Math.min(params.particleRate, 1000);
+    params.lMax = Math.min(params.lMax, 6);
+    params.persistence = Math.min(params.persistence, 2);
+    params.hitSize = Math.max(params.hitSize, 2);  // larger dots for small screens
+  }
+
   // Snapshot of initial param values for "Reset Settings"
   const defaults: Record<string, unknown> = {};
   for (const key of Object.keys(params) as (keyof SensorParams)[]) {
@@ -417,6 +481,7 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
   const gui = new GUI({ title: "ECSK Bounce Sensor" });
   gui.domElement.classList.add("ecsk-panel", "ecsk-controls");
   gui.domElement.style.zIndex = "1000";
+  if (isMobile) gui.close();  // start collapsed on mobile — maximise canvas
 
   // ── "What is a bounce?" link ──────────────────────────────────────
   {
@@ -436,6 +501,9 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
     });
     link.addEventListener("mouseenter", () => { link.style.color = "#bef"; });
     link.addEventListener("mouseleave", () => { link.style.color = "#8cf"; });
+    if (isMobile) {
+      Object.assign(link.style, { padding: "8px 12px 10px", fontSize: "13px" });
+    }
     // Insert right after the title bar
     const titleBar = gui.domElement.querySelector(".title");
     if (titleBar && titleBar.nextSibling) {
@@ -824,7 +892,7 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
   // ── Tooltip system ──────────────────────────────────────────────────
   const tooltipEl = document.createElement("div");
   tooltipEl.className = "ecsk-tooltip";
-  document.body.appendChild(tooltipEl);
+  if (!isMobile) document.body.appendChild(tooltipEl);  // skip on mobile (hover-only)
 
   /** Build structured tooltip HTML from a Tooltip object. */
   function buildTooltipHTML(tip: Tooltip): string {
@@ -900,6 +968,7 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
     key: string,
     tooltipMap: Record<string, Tooltip> = TOOLTIPS,
   ): void {
+    if (isMobile) return;  // tooltips are hover-only — skip on touch devices
     const tip = tooltipMap[key];
     if (!tip) return;
     domElement.addEventListener("mouseenter", () => {

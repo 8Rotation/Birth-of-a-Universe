@@ -245,7 +245,7 @@ async function main() {
     prevBetaPP             = params.betaPP;
     prevSilkDamping        = params.silkDamping;
     console.log("[main] Simulation reset (full worker restart)");
-  }, budget, screenInfo.refreshRate);
+  }, budget, screenInfo.refreshRate, screenInfo.isMobile);
 
   // Seed prev-snapshot so the first frame sees no change (NaN → real value)
   prevParticleRate      = params.particleRate;
