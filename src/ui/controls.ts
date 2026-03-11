@@ -1045,5 +1045,57 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
     updateConditionalFolders();
   }
 
-  return { gui, readoutGui, params, hud, updateHUD, setHDRMode };
+  // ── Fullscreen toggle button ───────────────────────────────────
+  {
+    const btn = document.createElement("button");
+    btn.id = "fullscreen-btn";
+    btn.title = "Toggle fullscreen";
+    // SVG expand icon (4 outward arrows)
+    const expandSVG = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>`;
+    const collapseSVG = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 14h6v6m10-10h-6V4m0 16h6v-6M4 4h6v6"/></svg>`;
+    btn.innerHTML = expandSVG;
+    document.body.appendChild(btn);
+
+    function updateIcon() {
+      const isFS = !!document.fullscreenElement;
+      btn.innerHTML = isFS ? collapseSVG : expandSVG;
+      btn.title = isFS ? "Exit fullscreen" : "Enter fullscreen";
+    }
+
+    btn.addEventListener("click", () => {
+      if (!document.fullscreenElement) {
+        document.documentElement.requestFullscreen().catch(() => {});
+      } else {
+        document.exitFullscreen().catch(() => {});
+      }
+    });
+
+    // Update icon when fullscreen changes (Esc on desktop, back on mobile)
+    document.addEventListener("fullscreenchange", updateIcon);
+    document.addEventListener("webkitfullscreenchange", updateIcon);
+  }
+
+  // ── Force HDR button (mobile-only) ─────────────────────────────
+  let onForceHDR: ((enabled: boolean) => void) | null = null;
+  if (isMobile && currentHDRMode === 'none') {
+    const btn = document.createElement("button");
+    btn.id = "force-hdr-btn";
+    btn.textContent = "Force HDR";
+    btn.title = "Enable enhanced brightness on compatible OLED screens";
+    document.body.appendChild(btn);
+
+    let forced = false;
+    btn.addEventListener("click", () => {
+      forced = !forced;
+      btn.textContent = forced ? "HDR On" : "Force HDR";
+      btn.classList.toggle("active", forced);
+      onForceHDR?.(forced);
+    });
+  }
+
+  function setForceHDRCallback(cb: (enabled: boolean) => void): void {
+    onForceHDR = cb;
+  }
+
+  return { gui, readoutGui, params, hud, updateHUD, setHDRMode, setForceHDRCallback };
 }

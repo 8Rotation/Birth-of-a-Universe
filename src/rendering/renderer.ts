@@ -259,6 +259,34 @@ export class SensorRenderer {
   /** Active HDR rendering mode ('full' | 'soft' | 'none'). */
   get hdrMode(): HDRMode { return this._hdrMode; }
 
+  /**
+   * Force soft-HDR mode on devices where detection fails (e.g. Android Chrome).
+   * Safe to call after init — only changes tone mapping, no canvas reconfiguration.
+   */
+  forceSoftHDR(peakNits = DEFAULT_HDR_PEAK_NITS): void {
+    if (this._hdrMode === 'full') return; // already in a better mode
+    this._peakNits = peakNits;
+    this.renderer.toneMapping = THREE.LinearToneMapping;
+    this.renderer.toneMappingExposure = this.softHdrExposure;
+    this._hdrMode = 'soft';
+    console.log(
+      `[sensor] HDR SOFT (forced): standard canvas + linear TM, ` +
+      `peak ~${this._peakNits} nits`
+    );
+  }
+
+  /**
+   * Revert from forced soft-HDR back to SDR (ACES Filmic).
+   */
+  disableSoftHDR(): void {
+    if (this._hdrMode !== 'soft') return;
+    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    this.renderer.toneMappingExposure = 1.0;
+    this._hdrMode = 'none';
+    this._peakNits = SDR_REFERENCE_WHITE_NITS;
+    console.log('[sensor] HDR disabled — back to SDR (ACES)');
+  }
+
   constructor(config: SensorRendererConfig) {
     this._capacity = config.initialCapacity ?? DEFAULT_INITIAL_CAPACITY;
     this.bloomStrength = config.bloomStrength ?? 1.2;
@@ -278,8 +306,9 @@ export class SensorRenderer {
     this.scene = new THREE.Scene();
 
     // ── Orthographic camera (fits Lambert disk with padding) ──────────
+    // V is scaled so the disk fills 90% of the *shorter* axis (5% margin each side).
     const aspect = window.innerWidth / window.innerHeight;
-    const V = CAMERA_HALF_SIZE;
+    const V = aspect < 1 ? CAMERA_HALF_SIZE / aspect : CAMERA_HALF_SIZE;
     this.camera = new THREE.OrthographicCamera(
       -V * aspect, V * aspect,
       V, -V,
@@ -318,9 +347,9 @@ export class SensorRenderer {
       this._peakNits = info.peakBrightnessNits ?? DEFAULT_HDR_PEAK_NITS;
     }
 
-    // Update camera aspect
+    // Update camera aspect — size disk by the *shorter* axis
     const aspect = info.viewportWidth / info.viewportHeight;
-    const V = CAMERA_HALF_SIZE;
+    const V = aspect < 1 ? CAMERA_HALF_SIZE / aspect : CAMERA_HALF_SIZE;
     this.camera.left   = -V * aspect;
     this.camera.right  =  V * aspect;
     this.camera.top    =  V;
@@ -898,8 +927,10 @@ export class SensorRenderer {
     this.renderer.setClearColor(this.backgroundColor, 1);
 
     // Zoom: scale the orthographic frustum inversely (zoom > 1 = magnify)
+    // Size disk by the *shorter* axis so it always fits with 5% margin
     const aspect = window.innerWidth / window.innerHeight;
-    const V = CAMERA_HALF_SIZE / Math.max(this.zoom, 0.01);
+    const baseV = aspect < 1 ? CAMERA_HALF_SIZE / aspect : CAMERA_HALF_SIZE;
+    const V = baseV / Math.max(this.zoom, 0.01);
     if (this.camera.left !== -V * aspect || this.camera.top !== V) {
       this.camera.left   = -V * aspect;
       this.camera.right  =  V * aspect;

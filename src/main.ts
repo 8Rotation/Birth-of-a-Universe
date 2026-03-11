@@ -178,7 +178,7 @@ async function main() {
 
   // ── 4. Controls (auto-configured from hardware budget) ────────────
   const tCtrl = performance.now();
-  const { params, hud, updateHUD, setHDRMode } = createSensorControls(() => {
+  const { params, hud, updateHUD, setHDRMode, setForceHDRCallback } = createSensorControls(() => {
     // Full reset: terminate and recreate all workers (recovers from
     // crashes), wipe all particle state, and re-sync timing.
     // Equivalent to browser reload but keeps current settings.
@@ -262,6 +262,16 @@ async function main() {
 
   // Communicate detected HDR mode to controls so irrelevant sliders are hidden
   setHDRMode(renderer.hdrMode);
+
+  // Wire the mobile Force HDR button to the renderer
+  setForceHDRCallback((enabled) => {
+    if (enabled) {
+      renderer.forceSoftHDR();
+    } else {
+      renderer.disableSoftHDR();
+    }
+    setHDRMode(renderer.hdrMode);
+  });
   console.log(`[main] Controls creation: ${(performance.now() - tCtrl).toFixed(0)} ms`);
 
   // ── 5. Physics worker (off-thread emission) ────────────────────
@@ -725,13 +735,11 @@ async function main() {
       const si = screenDetector.info;
       hud.screen = `${si.screenWidth}×${si.screenHeight}`;
       hud.hz = `${si.refreshRate}${si.vrrDetected ? " VRR" : ""}`;
-      hud.hdr = si.hdrCapable
-        ? (renderer.hdrMode === 'full'
-            ? `FULL (~${si.peakBrightnessNits ?? '?'} nits)`
-            : renderer.hdrMode === 'soft'
-              ? `SOFT (~${si.peakBrightnessNits ?? '?'} nits)`
-              : "Detected (SDR fallback)")
-        : "No";
+      hud.hdr = renderer.hdrMode === 'full'
+        ? `FULL (~${si.peakBrightnessNits ?? '?'} nits)`
+        : renderer.hdrMode === 'soft'
+          ? `SOFT${si.hdrCapable ? '' : ' (forced)'}`
+          : si.hdrCapable ? "Detected (SDR fallback)" : "No";
       hud.gamut = si.colorGamut.toUpperCase();
       // Hardware info
       hud.cpuCores = String(hwInfo.cpu.logicalCores);

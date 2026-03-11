@@ -492,13 +492,9 @@ export function hitSizeScale(info: ScreenInfo): number {
   const baseline = 1440;
   const ratio = info.renderHeight / baseline;
 
-  if (info.isMobile) {
-    // Phone: viewport is small so particles need to be relatively bigger.
-    // Cube-root scaling so they don't dominate the tiny screen.
-    return Math.max(0.8, Math.cbrt(ratio) * 1.3);
-  }
-
-  // Desktop: square-root scaling — doubling pixels → ~1.4× size
+  // Uniform square-root scaling for all devices — doubling pixels → ~1.4× size.
+  // Mobile no longer gets an extra boost: the mobile default hitSize=2
+  // (set in controls.ts) already compensates for small viewports.
   return Math.max(0.5, Math.sqrt(ratio));
 }
 
