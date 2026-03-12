@@ -476,28 +476,52 @@ const OLED_CSS = `
   line-height: 42px;
   padding: 7px 14px;
 }
-.ecsk-mobile .ecsk-readout.lil-gui:not(.lil-closed):not(.closed) {
-  overflow: hidden !important;
+.ecsk-mobile .ecsk-readout-close {
+  display: none;
 }
-.ecsk-mobile .ecsk-readout.lil-gui:not(.lil-closed):not(.closed) > .lil-title,
-.ecsk-mobile .ecsk-readout.lil-gui:not(.lil-closed):not(.closed) > .title {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  top: auto;
-  z-index: 2;
-}
-.ecsk-mobile .ecsk-readout.lil-gui:not(.lil-closed):not(.closed) > .lil-children,
-.ecsk-mobile .ecsk-readout.lil-gui:not(.lil-closed):not(.closed) > .children {
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 48px;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  -webkit-overflow-scrolling: touch;
+
+@media (orientation: portrait) {
+  .ecsk-mobile.ecsk-mobile-readout-open .ecsk-readout {
+    overflow: hidden !important;
+  }
+
+  .ecsk-mobile.ecsk-mobile-readout-open .ecsk-readout > .lil-title,
+  .ecsk-mobile.ecsk-mobile-readout-open .ecsk-readout > .title {
+    visibility: hidden;
+    pointer-events: none;
+  }
+
+  .ecsk-mobile.ecsk-mobile-readout-open .ecsk-readout > .lil-children,
+  .ecsk-mobile.ecsk-mobile-readout-open .ecsk-readout > .children {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 48px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .ecsk-mobile.ecsk-mobile-readout-open .ecsk-readout .ecsk-readout-close {
+    display: block;
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 3;
+    min-height: 48px;
+    border: 0;
+    border-top: 1px solid #222;
+    background: rgba(5, 5, 5, 0.82);
+    color: #dedede;
+    font: 700 16px/1.1 'Segoe UI', system-ui, sans-serif;
+    letter-spacing: 0.015em;
+    text-align: left;
+    padding: 10px 14px 12px;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+  }
 }
 @media (orientation: landscape) {
   .ecsk-mobile .ecsk-panel.lil-gui {
@@ -541,10 +565,15 @@ const OLED_CSS = `
     font-size: 12px;
     line-height: 1.1;
     text-align: center;
-    white-space: normal;
-    writing-mode: vertical-rl;
-    text-orientation: mixed;
+    white-space: nowrap;
     z-index: 2;
+  }
+
+  .ecsk-mobile .ecsk-panel.lil-gui > .lil-title .ecsk-panel-title-label,
+  .ecsk-mobile .ecsk-panel.lil-gui > .title .ecsk-panel-title-label {
+    display: inline-block;
+    white-space: nowrap;
+    transform-origin: center center;
   }
 
   .ecsk-mobile .ecsk-readout > .lil-title,
@@ -553,11 +582,20 @@ const OLED_CSS = `
     border-right: 1px solid #222;
   }
 
+  .ecsk-mobile .ecsk-readout > .lil-title .ecsk-panel-title-label,
+  .ecsk-mobile .ecsk-readout > .title .ecsk-panel-title-label {
+    transform: rotate(-90deg);
+  }
+
   .ecsk-mobile .ecsk-controls > .lil-title,
   .ecsk-mobile .ecsk-controls > .title {
     right: 0;
     border-left: 1px solid #222;
-    writing-mode: vertical-lr;
+  }
+
+  .ecsk-mobile .ecsk-controls > .lil-title .ecsk-panel-title-label,
+  .ecsk-mobile .ecsk-controls > .title .ecsk-panel-title-label {
+    transform: rotate(90deg);
   }
 
   .ecsk-mobile .ecsk-controls > .lil-title,
@@ -625,8 +663,8 @@ const OLED_CSS = `
 .ecsk-mobile .lil-gui .controller .lil-name {
   display: flex;
   align-items: center;
-  gap: 8px;
-  overflow: visible;
+  gap: 6px;
+  overflow: hidden;
 }
 .ecsk-mobile .lil-gui .lil-controller .lil-name.ecsk-name-with-info,
 .ecsk-mobile .lil-gui .controller .name.ecsk-name-with-info,
@@ -644,19 +682,20 @@ const OLED_CSS = `
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 19px;
-  height: 19px;
-  min-width: 19px;
+  width: 13px;
+  height: 13px;
+  min-width: 13px;
   border-radius: 50%;
   border: 1px solid #888;
   color: #ddd;
-  font-size: 11px;
+  font-size: 8px;
   font-style: italic;
   font-family: Georgia, 'Times New Roman', serif;
   line-height: 1;
   flex-shrink: 0;
   cursor: pointer;
   -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
   background: rgba(255, 255, 255, 0.08);
   padding: 0;
   box-sizing: border-box;
@@ -708,15 +747,15 @@ const OLED_CSS = `
 
 /* ── Mobile tooltip positioning ────────────────────────────────── */
 .ecsk-mobile .ecsk-tooltip {
-  left: 6vw !important;
-  right: 6vw !important;
+  left: 4vw !important;
+  right: 4vw !important;
   top: auto !important;
   bottom: 4vh !important;
-  max-width: min(88vw, 420px) !important;
+  max-width: min(92vw, 460px) !important;
   min-width: auto !important;
-  width: min(88vw, 420px) !important;
-  max-height: 52vh;
-  padding: 12px 14px 14px;
+  width: min(92vw, 460px) !important;
+  max-height: 56vh;
+  padding: 10px 12px 12px;
   background: rgba(8, 8, 8, 0.96);
   border-color: #343434;
   box-shadow: 0 10px 36px rgba(0,0,0,0.82);
@@ -726,6 +765,13 @@ const OLED_CSS = `
 }
 .ecsk-mobile .ecsk-tooltip.visible {
   pointer-events: auto;
+}
+
+@media (orientation: landscape) {
+  .ecsk-mobile .ecsk-tooltip {
+    top: 10vh !important;
+    bottom: auto !important;
+  }
 }
 `;
 
@@ -868,38 +914,22 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
   gui.domElement.style.zIndex = "1000";
   if (isMobile) gui.close();  // start collapsed on mobile — maximise canvas
 
-  const controlsTitle = gui.domElement.querySelector(".lil-title, .title") as HTMLElement | null;
-  const controlsChildren = gui.domElement.querySelector(".lil-children, .children") as HTMLElement | null;
-  if (controlsTitle) {
-    if (isMobile) {
-      controlsTitle.textContent = "Settings";
-      controlsTitle.setAttribute("aria-label", "Birth of a Universe settings");
-    } else {
-      controlsTitle.textContent = "";
-      const brandTitle = document.createElement("span");
-      brandTitle.className = "ecsk-brand-title";
-      brandTitle.textContent = "Birth of a Universe";
-      controlsTitle.appendChild(brandTitle);
-      controlsTitle.setAttribute("aria-label", "Birth of a Universe");
-    }
+  function decoratePanelTitle(guiInstance: GUI): void {
+    const titleEl = guiInstance.domElement.querySelector(".lil-title, .title") as HTMLElement | null;
+    if (!titleEl || titleEl.querySelector(".ecsk-panel-title-label")) return;
+
+    const labelText = titleEl.textContent?.trim();
+    if (!labelText) return;
+
+    titleEl.textContent = "";
+    const labelEl = document.createElement("span");
+    labelEl.className = "ecsk-panel-title-label";
+    labelEl.textContent = labelText;
+    titleEl.appendChild(labelEl);
+    titleEl.setAttribute("aria-label", labelText);
   }
 
-  if (isMobile && controlsChildren) {
-    const mobileBrandCard = document.createElement("div");
-    mobileBrandCard.className = "ecsk-mobile-brand-card";
-
-    const mobileBrandTitle = document.createElement("div");
-    mobileBrandTitle.className = "ecsk-mobile-brand-title";
-    mobileBrandTitle.textContent = "Birth of a Universe";
-
-    const mobileBrandSubtitle = document.createElement("div");
-    mobileBrandSubtitle.className = "ecsk-mobile-brand-subtitle";
-    mobileBrandSubtitle.textContent = "Settings";
-
-    mobileBrandCard.appendChild(mobileBrandTitle);
-    mobileBrandCard.appendChild(mobileBrandSubtitle);
-    controlsChildren.prepend(mobileBrandCard);
-  }
+  decoratePanelTitle(gui);
 
   // ── Override Mode toggle ──────────────────────────────────────────
   const overrideState = { overrideMode: false };
@@ -1286,6 +1316,23 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
   readoutGui.domElement.style.zIndex = "999";
   readoutGui.close();  // start collapsed (nearly invisible)
 
+  decoratePanelTitle(readoutGui);
+
+  let readoutCloseBtn: HTMLButtonElement | null = null;
+  if (isMobile) {
+    readoutCloseBtn = document.createElement("button");
+    readoutCloseBtn.className = "ecsk-readout-close";
+    readoutCloseBtn.type = "button";
+    readoutCloseBtn.textContent = "Readout";
+    readoutCloseBtn.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      readoutGui.close();
+      syncMobilePanelState();
+    });
+    readoutGui.domElement.appendChild(readoutCloseBtn);
+  }
+
   let panelOverlayEl: HTMLDivElement | null = null;
 
   function isGuiClosed(guiInstance: GUI): boolean {
@@ -1532,10 +1579,6 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
         }
         showMobileTooltip(key, tip, infoBtn);
       };
-      infoBtn.addEventListener("touchstart", (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-      }, { passive: false });
       infoBtn.addEventListener("click", toggleMobileTooltip);
       nameEl.append(infoBtn, labelText);
       return;

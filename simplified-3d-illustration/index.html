@@ -27,13 +27,14 @@
     line-height: 1.6;
     pointer-events: none;
     max-width: 340px;
+    z-index: 20;
     transition: transform 0.22s ease, opacity 0.22s ease;
   }
   #legend-toggle {
     position: absolute;
     top: 16px;
     right: 16px;
-    z-index: 10;
+    z-index: 24;
     display: none;
     border: 1px solid rgba(255,255,255,0.18);
     border-radius: 999px;
@@ -84,6 +85,7 @@
   .label-3d {
     position: absolute;
     pointer-events: none;
+    z-index: 6;
     font-size: 13px;
     white-space: nowrap;
     text-shadow: 0 0 8px #000, 0 0 16px #000;
@@ -102,14 +104,24 @@
       left: 12px;
       right: 12px;
       max-width: none;
+      background: rgba(3,5,8,0.9);
+      border-color: rgba(180, 205, 235, 0.22);
+      box-shadow: 0 12px 32px rgba(0,0,0,0.52);
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
       padding: 12px 14px;
       font-size: 12px;
       line-height: 1.5;
       pointer-events: auto;
+      z-index: 30;
     }
 
     #legend h2 {
       font-size: 14px;
+    }
+
+    .label-3d {
+      z-index: 4;
     }
 
     body.legend-collapsed #legend {
