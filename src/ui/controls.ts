@@ -483,6 +483,7 @@ const OLED_CSS = `
 @media (orientation: portrait) {
   .ecsk-mobile.ecsk-mobile-readout-open .ecsk-readout {
     overflow: hidden !important;
+    height: 40vh !important;
   }
 
   .ecsk-mobile.ecsk-mobile-readout-open .ecsk-readout > .lil-title,
@@ -585,7 +586,7 @@ const OLED_CSS = `
 
   .ecsk-mobile .ecsk-readout > .lil-title .ecsk-panel-title-label,
   .ecsk-mobile .ecsk-readout > .title .ecsk-panel-title-label {
-    transform: rotate(-90deg);
+    transform: rotate(90deg);
   }
 
   .ecsk-mobile .ecsk-controls > .lil-title,
@@ -596,7 +597,7 @@ const OLED_CSS = `
 
   .ecsk-mobile .ecsk-controls > .lil-title .ecsk-panel-title-label,
   .ecsk-mobile .ecsk-controls > .title .ecsk-panel-title-label {
-    transform: rotate(90deg);
+    transform: rotate(-90deg);
   }
 
   .ecsk-mobile .ecsk-controls > .lil-title,
@@ -698,6 +699,13 @@ const OLED_CSS = `
   color: #fff;
   border-color: #b8d8ff;
   background: rgba(108, 204, 255, 0.18);
+}
+.ecsk-name-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 1 1 0;
 }
 .ecsk-info-btn:active {
   background: #333;
@@ -1553,6 +1561,13 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
 
       nameEl.classList.add("ecsk-name-with-info");
 
+      // Wrap existing text in a span so it's a proper flex item (not anonymous text node)
+      const labelText = nameEl.textContent || '';
+      nameEl.textContent = '';
+      const textSpan = document.createElement('span');
+      textSpan.className = 'ecsk-name-text';
+      textSpan.textContent = labelText;
+
       const infoBtn = document.createElement("button");
       infoBtn.className = "ecsk-info-btn";
       infoBtn.textContent = "i";
@@ -1568,7 +1583,8 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
         showMobileTooltip(key, tip, infoBtn);
       };
       infoBtn.addEventListener("click", toggleMobileTooltip);
-      nameEl.prepend(infoBtn);
+      nameEl.appendChild(infoBtn);
+      nameEl.appendChild(textSpan);
       return;
     }
 
