@@ -223,6 +223,14 @@ const OLED_CSS = `
 .ecsk-panel.lil-gui:not(.lil-closed):not(.closed):hover {
   opacity: 1;
 }
+.ecsk-readout.lil-gui.lil-closed,
+.ecsk-readout.lil-gui.closed {
+  opacity: 0.12;
+}
+.ecsk-readout.lil-gui.lil-closed:hover,
+.ecsk-readout.lil-gui.closed:hover {
+  opacity: 0.92;
+}
 
 /* ── Override mode (red numerics) ──────────────────────────────── */
 .ecsk-override .lil-controller.lil-number:not(.lil-disabled) {
@@ -273,17 +281,62 @@ const OLED_CSS = `
 }
 .ecsk-controls > .lil-title,
 .ecsk-controls > .title {
+  display: flex;
+  align-items: center;
   font-size: 13px;
   line-height: 24px;
   padding: 3px 10px;
   font-weight: 600;
   letter-spacing: 0.02em;
   color: #e7e7e7;
-  background-image: linear-gradient(90deg, rgba(255, 96, 96, 0.96), rgba(120, 220, 120, 0.94), rgba(110, 180, 255, 0.96));
-  -webkit-background-clip: text;
-  background-clip: text;
-  -webkit-text-fill-color: transparent;
   text-shadow: 0 0 10px rgba(120, 180, 255, 0.08);
+}
+.ecsk-controls .ecsk-brand-title {
+  display: inline-block;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  color: #f0f0f0;
+  text-shadow: 0 0 14px rgba(150, 185, 235, 0.08);
+}
+.ecsk-mobile-brand-card {
+  margin: 10px 10px 4px;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  background: linear-gradient(180deg, rgba(22, 22, 22, 0.92), rgba(8, 8, 8, 0.88));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+.ecsk-mobile-brand-title {
+  display: inline-block;
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.025em;
+  color: #f0f0f0;
+  text-shadow: 0 0 14px rgba(150, 185, 235, 0.08);
+}
+.ecsk-mobile-brand-subtitle {
+  margin-top: 4px;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #8d8d8d;
+}
+@supports ((-webkit-background-clip: text) or (background-clip: text)) {
+  .ecsk-controls .ecsk-brand-title {
+    background-image: linear-gradient(100deg, rgba(255, 241, 214, 0.98) 0%, rgba(212, 191, 142, 0.96) 32%, rgba(154, 181, 212, 0.96) 68%, rgba(205, 226, 255, 0.98) 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    -webkit-text-fill-color: transparent;
+  }
+
+  .ecsk-mobile-brand-title {
+    background-image: linear-gradient(100deg, rgba(255, 241, 214, 0.98) 0%, rgba(212, 191, 142, 0.96) 32%, rgba(154, 181, 212, 0.96) 68%, rgba(205, 226, 255, 0.98) 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    -webkit-text-fill-color: transparent;
+  }
 }
 /* Thin scrollbar for the controls panel */
 .ecsk-controls::-webkit-scrollbar { width: 4px; }
@@ -363,7 +416,7 @@ const OLED_CSS = `
   right: 0 !important;
   width: 100% !important;
   max-height: 40vh !important;
-  overflow: hidden !important;
+  overflow-y: auto !important;
   z-index: 1001 !important;
 }
 .ecsk-mobile .ecsk-controls {
@@ -380,6 +433,10 @@ const OLED_CSS = `
 .ecsk-mobile .ecsk-panel.lil-gui.lil-closed,
 .ecsk-mobile .ecsk-panel.lil-gui.closed {
   opacity: 0.25;
+}
+.ecsk-mobile .ecsk-readout.lil-gui.lil-closed,
+.ecsk-mobile .ecsk-readout.lil-gui.closed {
+  opacity: 0.38;
 }
 /* Tap opens — keep translucent so simulation stays visible */
 .ecsk-mobile .ecsk-panel.lil-gui:not(.lil-closed):not(.closed) {
@@ -412,19 +469,27 @@ const OLED_CSS = `
   -webkit-backdrop-filter: blur(4px);
 }
 .ecsk-mobile .ecsk-readout > .lil-title,
-.ecsk-mobile .ecsk-readout > .title {
+.ecsk-mobile .ecsk-readout > .title,
+.ecsk-mobile .ecsk-controls > .lil-title,
+.ecsk-mobile .ecsk-controls > .title {
+  font-size: 16px;
+  line-height: 42px;
+  padding: 7px 14px;
+}
+.ecsk-mobile .ecsk-readout.lil-gui:not(.lil-closed):not(.closed) {
+  overflow: hidden !important;
+}
+.ecsk-mobile .ecsk-readout.lil-gui:not(.lil-closed):not(.closed) > .lil-title,
+.ecsk-mobile .ecsk-readout.lil-gui:not(.lil-closed):not(.closed) > .title {
   position: absolute;
   left: 0;
   right: 0;
   bottom: 0;
   top: auto;
   z-index: 2;
-  font-size: 16px;
-  line-height: 42px;
-  padding: 7px 14px;
 }
-.ecsk-mobile .ecsk-readout > .lil-children,
-.ecsk-mobile .ecsk-readout > .children {
+.ecsk-mobile .ecsk-readout.lil-gui:not(.lil-closed):not(.closed) > .lil-children,
+.ecsk-mobile .ecsk-readout.lil-gui:not(.lil-closed):not(.closed) > .children {
   position: absolute;
   top: 0;
   left: 0;
@@ -434,13 +499,6 @@ const OLED_CSS = `
   overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
 }
-.ecsk-mobile .ecsk-controls > .lil-title,
-.ecsk-mobile .ecsk-controls > .title {
-  font-size: 16px;
-  line-height: 42px;
-  padding: 7px 14px;
-}
-
 @media (orientation: landscape) {
   .ecsk-mobile .ecsk-panel.lil-gui {
     top: 0 !important;
@@ -470,7 +528,8 @@ const OLED_CSS = `
     max-height: 100vh !important;
   }
 
-  .ecsk-mobile .ecsk-panel.lil-gui > .lil-title {
+  .ecsk-mobile .ecsk-panel.lil-gui > .lil-title,
+  .ecsk-mobile .ecsk-panel.lil-gui > .title {
     position: absolute;
     top: 0;
     bottom: 0;
@@ -488,19 +547,30 @@ const OLED_CSS = `
     z-index: 2;
   }
 
-  .ecsk-mobile .ecsk-readout > .lil-title {
+  .ecsk-mobile .ecsk-readout > .lil-title,
+  .ecsk-mobile .ecsk-readout > .title {
     left: 0;
     border-right: 1px solid #222;
   }
 
-  .ecsk-mobile .ecsk-controls > .lil-title {
+  .ecsk-mobile .ecsk-controls > .lil-title,
+  .ecsk-mobile .ecsk-controls > .title {
     right: 0;
     border-left: 1px solid #222;
     writing-mode: vertical-lr;
   }
 
+  .ecsk-mobile .ecsk-controls > .lil-title,
+  .ecsk-mobile .ecsk-controls > .title {
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
   .ecsk-mobile .ecsk-readout > .lil-children,
-  .ecsk-mobile .ecsk-controls > .lil-children {
+  .ecsk-mobile .ecsk-readout > .children,
+  .ecsk-mobile .ecsk-controls > .lil-children,
+  .ecsk-mobile .ecsk-controls > .children {
     position: absolute;
     top: 0;
     bottom: 0;
@@ -509,27 +579,18 @@ const OLED_CSS = `
     -webkit-overflow-scrolling: touch;
   }
 
-  .ecsk-mobile .ecsk-readout > .lil-children {
+  .ecsk-mobile .ecsk-readout > .lil-children,
+  .ecsk-mobile .ecsk-readout > .children {
     left: 38px;
     right: 0;
     bottom: 0;
   }
 
-  .ecsk-mobile .ecsk-controls > .lil-children {
+  .ecsk-mobile .ecsk-controls > .lil-children,
+  .ecsk-mobile .ecsk-controls > .children {
     top: 34px;
     left: 0;
     right: 38px;
-  }
-
-  .ecsk-mobile .ecsk-controls > .ecsk-bounce-link {
-    position: absolute;
-    top: 0;
-    left: 0;
-    right: 38px;
-    z-index: 2;
-    padding: 8px 10px;
-    border-bottom: 1px solid #333;
-    background: rgba(0, 0, 0, 0.28);
   }
 
   .ecsk-mobile .ecsk-panel.lil-gui.lil-closed,
@@ -553,9 +614,7 @@ const OLED_CSS = `
   }
 
   .ecsk-mobile .ecsk-panel.lil-gui.lil-closed > .lil-children,
-  .ecsk-mobile .ecsk-panel.lil-gui.closed > .children,
-  .ecsk-mobile .ecsk-panel.lil-gui.lil-closed > .ecsk-bounce-link,
-  .ecsk-mobile .ecsk-panel.lil-gui.closed > .ecsk-bounce-link {
+  .ecsk-mobile .ecsk-panel.lil-gui.closed > .children {
     pointer-events: none;
   }
 }
@@ -809,41 +868,49 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
   gui.domElement.style.zIndex = "1000";
   if (isMobile) gui.close();  // start collapsed on mobile — maximise canvas
 
-  // ── "What is a bounce?" link ──────────────────────────────────────
-  {
-    const link = document.createElement("a");
-    link.className = "ecsk-bounce-link";
-    link.textContent = "Open 3D Bounce Explainer  ↗";
-    link.href = "simplified-3d-illustration/index.html";
-    link.target = "_blank";
-    link.rel = "noopener";
-    Object.assign(link.style, {
-      display: "block",
-      padding: "4px 12px 6px",
-      fontSize: "11px",
-      color: "#8cf",
-      textDecoration: "none",
-      borderBottom: "1px solid #333",
-      cursor: "pointer",
-    });
-    link.addEventListener("mouseenter", () => { link.style.color = "#bef"; });
-    link.addEventListener("mouseleave", () => { link.style.color = "#8cf"; });
+  const controlsTitle = gui.domElement.querySelector(".lil-title, .title") as HTMLElement | null;
+  const controlsChildren = gui.domElement.querySelector(".lil-children, .children") as HTMLElement | null;
+  if (controlsTitle) {
     if (isMobile) {
-      Object.assign(link.style, { padding: "8px 12px 10px", fontSize: "13px" });
-    }
-    // Insert right after the title bar
-    const titleBar = gui.domElement.querySelector(".lil-title, .title");
-    const children = gui.domElement.querySelector(".lil-children, .children");
-    if (titleBar?.parentNode && children) {
-      titleBar.parentNode.insertBefore(link, children);
+      controlsTitle.textContent = "Settings";
+      controlsTitle.setAttribute("aria-label", "Birth of a Universe settings");
     } else {
-      children?.prepend(link);
+      controlsTitle.textContent = "";
+      const brandTitle = document.createElement("span");
+      brandTitle.className = "ecsk-brand-title";
+      brandTitle.textContent = "Birth of a Universe";
+      controlsTitle.appendChild(brandTitle);
+      controlsTitle.setAttribute("aria-label", "Birth of a Universe");
     }
+  }
+
+  if (isMobile && controlsChildren) {
+    const mobileBrandCard = document.createElement("div");
+    mobileBrandCard.className = "ecsk-mobile-brand-card";
+
+    const mobileBrandTitle = document.createElement("div");
+    mobileBrandTitle.className = "ecsk-mobile-brand-title";
+    mobileBrandTitle.textContent = "Birth of a Universe";
+
+    const mobileBrandSubtitle = document.createElement("div");
+    mobileBrandSubtitle.className = "ecsk-mobile-brand-subtitle";
+    mobileBrandSubtitle.textContent = "Settings";
+
+    mobileBrandCard.appendChild(mobileBrandTitle);
+    mobileBrandCard.appendChild(mobileBrandSubtitle);
+    controlsChildren.prepend(mobileBrandCard);
   }
 
   // ── Override Mode toggle ──────────────────────────────────────────
   const overrideState = { overrideMode: false };
   let overrideCtrl: Controller;
+
+  const openActions = {
+    openBounceExplainer: () => {
+      window.open("simplified-3d-illustration/index.html", "_blank", "noopener");
+    },
+  };
+  gui.add(openActions, "openBounceExplainer").name("What am I looking at? ↗");
 
   // ── Collapse Physics ──────────────────────────────────────────────
   const physics = gui.addFolder("Collapse Physics");

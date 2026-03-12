@@ -27,6 +27,30 @@
     line-height: 1.6;
     pointer-events: none;
     max-width: 340px;
+    transition: transform 0.22s ease, opacity 0.22s ease;
+  }
+  #legend-toggle {
+    position: absolute;
+    top: 16px;
+    right: 16px;
+    z-index: 10;
+    display: none;
+    border: 1px solid rgba(255,255,255,0.18);
+    border-radius: 999px;
+    background: rgba(0,0,0,0.76);
+    color: #f3f3f3;
+    padding: 10px 14px;
+    font: 600 12px/1 'Segoe UI', system-ui, sans-serif;
+    letter-spacing: 0.03em;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+  }
+  #legend-toggle:hover {
+    background: rgba(24,24,24,0.9);
+  }
+  #legend-toggle:focus-visible {
+    outline: 2px solid #66aaff;
+    outline-offset: 2px;
   }
   #legend h2 {
     font-size: 15px;
@@ -65,29 +89,72 @@
     text-shadow: 0 0 8px #000, 0 0 16px #000;
     transform: translate(-50%, -50%);
   }
+
+  @media (max-width: 768px) {
+    #legend-toggle {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    #legend {
+      top: 64px;
+      left: 12px;
+      right: 12px;
+      max-width: none;
+      padding: 12px 14px;
+      font-size: 12px;
+      line-height: 1.5;
+      pointer-events: auto;
+    }
+
+    #legend h2 {
+      font-size: 14px;
+    }
+
+    body.legend-collapsed #legend {
+      transform: translateY(calc(-100% - 18px));
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    #hint {
+      bottom: 10px;
+      width: calc(100% - 24px);
+      padding: 6px 10px;
+      text-align: center;
+      font-size: 10px;
+    }
+  }
 </style>
 </head>
 <body>
 
+<button id="legend-toggle" type="button" aria-controls="legend" aria-expanded="false">Show text</button>
+
 <div id="legend">
   <h2>Birth of a Universe — ECSK Bounce</h2>
-  <p>A massive star collapses past its event horizon. Its interior becomes a
-     closed universe whose scale factor <em>a̅</em> shrinks toward zero.</p>
-  <p>In Einstein-Cartan theory, fermion spin produces <b>torsion</b> — a repulsive
-     term (−β/a̅⁴) that grows faster than gravity (1/a̅²), halting the collapse
-     at a finite minimum scale factor a̅<sub>min</sub>.</p>
-  <p>The surface shows S² (the 2-sphere of spatial directions) evolving in
-     proper time τ̅. Its radius at each height is the scale factor a̅(τ̅),
-     computed from the Friedmann equation:</p>
+  <p>You are looking at a simplified picture of a star collapsing into a black hole,
+    then bouncing into a new expanding universe in Einstein-Cartan theory.</p>
+  <p>The tube-like surface shows how the size of that closed interior universe changes
+    over time. Higher up, the universe is collapsing. At the narrow red ring, the
+    collapse stops. Below that, the baby universe expands.</p>
+  <p>In this model, particle spin creates <b>torsion</b> — a repulsive effect that becomes
+    stronger faster than ordinary gravity during extreme compression, so the collapse
+    halts at a finite minimum size instead of crushing to a point (a singularity).</p>
+  <p>This drawing shows a single cut through the geometry so you can read it on screen.
+    In the full picture, the collapsing star interior and the black hole are spherical,
+    so the same bounce structure wraps all the way around in every direction.</p>
+  <p>More formally, the radius at each height is the scale factor <em>a̅</em>(τ̅), computed from:</p>
   <p class="eq">&nbsp; (da̅/dτ̅)² = 1/a̅² − β/a̅⁴ − 1</p>
   <p><span class="amber">● Contraction</span> — parent star interior collapsing<br>
      <span style="color:#fff;font-weight:600">○ Event horizon</span> — a̅ = a̅<sub>max</sub> = r<sub>S</sub> (Schwarzschild radius)<br>
      <span class="red">● Bounce hypersurface</span> — torsion halts collapse at a̅<sub>min</sub><br>
      <span class="blue">● Expansion</span> — baby universe is born<br>
-     <span class="green">◉ Simulation slice</span> — the main app renders this exact cross-section</p>
-  <p class="dim">The simulation is an infinitely thin 2D sensor at the red circle.
-     It records which fluid elements on S² reach their local bounce, and when.
-     No depth — only the hypersurface itself.</p>
+    <span class="green">◉ Viewing axis</span> — reference line showing the direction of view from inside the baby universe</p>
+  <p class="dim">The bounce surface is a thin 2D sheet, so you do not see particles flying
+    toward or away from you in 3D. The main simulation only lights up the instant each
+    particle crosses that surface from collapse into expansion.</p>
   <p class="dim">Left-drag rotate · Right-drag pan · Scroll zoom</p>
 </div>
 
@@ -98,7 +165,7 @@
 <div id="label-horizon" class="label-3d" style="color:#ffffff;font-weight:700">Event horizon<br><span style="font-size:11px;color:#aaaaaa">a̅ = a̅<sub>max</sub> = r<sub>S</sub> (Schwarzschild radius)</span></div>
 <div id="label-bounce" class="label-3d" style="color:#ff3333;font-weight:700">Bounce hypersurface<br><span style="font-size:11px;color:#cc4444">2D sensor at this cross-section</span></div>
 <div id="label-bottom" class="label-3d" style="color:#5588ff">Baby universe<br><span style="font-size:11px;color:#336699">(expanding)</span></div>
-<div id="label-viewdir" class="label-3d" style="color:#44dd66;font-weight:600">◉ You are here<br><span style="font-size:10px;color:#33aa55">looking up at the bounce<br>(illustrative — simulation has no depth)</span></div>
+<div id="label-viewdir" class="label-3d" style="color:#44dd66;font-weight:600">Viewing axis<br><span style="font-size:10px;color:#33aa55">bounce is a 2D surface<br>only crossings light up</span></div>
 
 <!-- Three.js from CDN (r164 — latest ESM-compatible stable) -->
 <script type="importmap">
@@ -194,9 +261,11 @@ renderer.outputColorSpace = THREE.SRGBColorSpace;
 document.body.prepend(renderer.domElement);
 
 camera.position.set(2.2, 1.0, 2.8);
-camera.lookAt(0, 0, 0);
+const defaultViewTarget = new THREE.Vector3(0, -0.15, 0);
+camera.lookAt(defaultViewTarget);
 
 const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.copy(defaultViewTarget);
 controls.enableDamping = true;
 controls.dampingFactor = 0.08;
 controls.autoRotate = true;
@@ -220,6 +289,30 @@ scene.add(backLight);
 const VSCALE   = 3.0;   // vertical stretch
 const RSCALE   = 2.5;   // radial scale
 const SEGMENTS = 64;     // azimuthal segments
+const defaultViewDirection = camera.position.clone().sub(defaultViewTarget).normalize();
+
+function updateCameraFraming(useDefaultDirection = false) {
+  const verticalSpan = VSCALE * 2.55;
+  const horizontalSpan = (RSCALE + 1.2) * 2;
+  const depthSpan = RSCALE * 2;
+  const verticalFov = THREE.MathUtils.degToRad(camera.fov);
+  const horizontalFov = 2 * Math.atan(Math.tan(verticalFov / 2) * camera.aspect);
+  const fitHeightDistance = (verticalSpan / 2) / Math.tan(verticalFov / 2);
+  const fitWidthDistance = (horizontalSpan / 2) / Math.tan(horizontalFov / 2);
+  const direction = useDefaultDirection
+    ? defaultViewDirection.clone()
+    : camera.position.clone().sub(controls.target).normalize();
+
+  if (direction.lengthSq() === 0) {
+    direction.copy(defaultViewDirection);
+  }
+
+  const fitDistance = Math.max(fitHeightDistance, fitWidthDistance) + depthSpan * 0.55;
+  camera.position.copy(controls.target).add(direction.multiplyScalar(fitDistance));
+  camera.near = Math.max(0.01, fitDistance / 150);
+  camera.far = Math.max(100, fitDistance * 20);
+  camera.updateProjectionMatrix();
+}
 
 // Build a LatheGeometry from the a̅(τ̅) profile
 const tauMax = trajectory[trajectory.length - 1].tau;
@@ -425,8 +518,8 @@ scene.add(arrowBottom);
 {
   const arrowX = -RSCALE - 0.55;
   const arrowZ = 0;
-  const baseY  = -VSCALE * 0.52;  // in baby universe, above the label
-  const tipY   = -VSCALE * 0.15;  // points up toward bounce
+  const baseY  = -VSCALE * 0.40;  // lifted to clear the baby-universe label
+  const tipY   = -VSCALE * 0.12;  // shorter arrow pointing up toward bounce
 
   // Shaft
   const shaftLen = tipY - baseY;
@@ -552,29 +645,21 @@ for (let i = 0; i < FLOW_LINES; i++) {
 // ─────────────────────────────────────────────────────
 
 // Show the a̅(τ̅) curve floating beside the worldtube
+const GRAPH_AXIS_X = RSCALE + 0.3;
 const graphPoints = trajectory.map(p => {
   const y = -(p.tau / tauMax) * VSCALE;
-  const x = (p.a / aMax) * 0.8 + RSCALE + 0.3;
+  const x = (p.a / aMax) * 0.8 + GRAPH_AXIS_X;
   return new THREE.Vector3(x, y, 0);
 });
 const graphGeo = new THREE.BufferGeometry().setFromPoints(graphPoints);
 const graphMat = new THREE.LineBasicMaterial({ color: 0x88aacc });
 scene.add(new THREE.Line(graphGeo, graphMat));
 
-// Axis for graph
-const gAxisPts = [
-  new THREE.Vector3(RSCALE + 0.3, -VSCALE, 0),
-  new THREE.Vector3(RSCALE + 0.3,  VSCALE, 0),
-];
-const gAxisGeo = new THREE.BufferGeometry().setFromPoints(gAxisPts);
-const gAxisMat = new THREE.LineBasicMaterial({ color: 0x445566, transparent: true, opacity: 0.4 });
-scene.add(new THREE.Line(gAxisGeo, gAxisMat));
-
 // Mark bounce on graph
 const bDotGeo = new THREE.SphereGeometry(0.035, 12, 12);
 const bDotMat = new THREE.MeshBasicMaterial({ color: 0xff2222 });
 const bDot = new THREE.Mesh(bDotGeo, bDotMat);
-bDot.position.set((aMin / aMax) * 0.8 + RSCALE + 0.3, 0, 0);
+bDot.position.set((aMin / aMax) * 0.8 + GRAPH_AXIS_X, 0, 0);
 scene.add(bDot);
 
 // ─────────────────────────────────────────────────────
@@ -604,11 +689,13 @@ function makeTextSprite(text, { fontSize = 42, color = '#aaccee', bg = 'rgba(0,0
 }
 
 const eqSprite = makeTextSprite('(da̅/dτ̅)² = 1/a̅² − β/a̅⁴ − 1', { fontSize: 38, color: '#99bbdd' });
-eqSprite.position.set(0, -VSCALE - 0.55, 0);
+eqSprite.position.set(RSCALE + 2.15, 0.18, 0);
+eqSprite.scale.set(2.55, 0.34, 1);
 scene.add(eqSprite);
 
 const betaSprite = makeTextSprite(`β = ${BETA}    a̅_min = ${aMin.toFixed(4)}    a̅_max = ${aMax.toFixed(4)}`, { fontSize: 32, color: '#778899' });
-betaSprite.position.set(0, -VSCALE - 0.95, 0);
+betaSprite.position.set(RSCALE + 2.05, -0.18, 0);
+betaSprite.scale.set(2.1, 0.28, 1);
 scene.add(betaSprite);
 
 // ─────────────────────────────────────────────────────
@@ -621,13 +708,43 @@ const labelBounce = document.getElementById('label-bounce');
 const labelBottom = document.getElementById('label-bottom');
 
 const labelViewDir = document.getElementById('label-viewdir');
+const legend = document.getElementById('legend');
+const legendToggle = document.getElementById('legend-toggle');
+
+const mobileLegendQuery = window.matchMedia('(max-width: 768px)');
+
+function syncLegendToggle() {
+  const isMobile = mobileLegendQuery.matches;
+  const isCollapsed = document.body.classList.contains('legend-collapsed');
+  legend.hidden = false;
+  legendToggle.hidden = !isMobile;
+  legendToggle.setAttribute('aria-expanded', String(!isCollapsed));
+  legendToggle.textContent = isCollapsed ? 'Show text' : 'Hide text';
+}
+
+function applyLegendLayout(event) {
+  if (event.matches) {
+    document.body.classList.add('legend-collapsed');
+  } else {
+    document.body.classList.remove('legend-collapsed');
+  }
+  syncLegendToggle();
+}
+
+legendToggle.addEventListener('click', () => {
+  document.body.classList.toggle('legend-collapsed');
+  syncLegendToggle();
+});
+
+mobileLegendQuery.addEventListener('change', applyLegendLayout);
+applyLegendLayout(mobileLegendQuery);
 
 const labelPositions = {
   top:     new THREE.Vector3(-RSCALE - 0.4, VSCALE * 0.7, 0),
   horizon: new THREE.Vector3(-RSCALE - 0.55, VSCALE, 0),
   bounce:  new THREE.Vector3(-bounceRadius - 0.55, 0, 0),
   bottom:  new THREE.Vector3(-RSCALE - 0.4, -VSCALE * 0.7, 0),
-  viewdir: new THREE.Vector3(-RSCALE - 1.0, -VSCALE * 0.52, 0),
+  viewdir: new THREE.Vector3(-RSCALE - 0.55, -VSCALE * 0.46, 0),
 };
 
 function projectLabel(el, worldPos) {
@@ -654,10 +771,12 @@ function updateBounceGlow(time) {
 
 function onResize() {
   camera.aspect = window.innerWidth / window.innerHeight;
-  camera.updateProjectionMatrix();
+  updateCameraFraming();
   renderer.setSize(window.innerWidth, window.innerHeight);
 }
 window.addEventListener('resize', onResize);
+
+updateCameraFraming(true);
 
 const clock = new THREE.Clock();
 
