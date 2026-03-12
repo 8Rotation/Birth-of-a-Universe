@@ -64,6 +64,7 @@ export interface SensorParams {
   bloomRadius: number;
   bloomThreshold: number;
   bloomQuality: 'auto' | 'high' | 'low';
+  forceHDR: boolean;       // force soft-HDR on mobile (bypasses detection)
 
   // Fade
   fadeSharpness: number;    // Weibull shape: 1=exponential, >1=sharp cutoff, <1=long tail
@@ -78,6 +79,7 @@ export interface SensorParams {
   ringOpacity: number;      // Lambert disk boundary ring opacity
   ringColor: string;        // ring colour (hex string for color picker)
   ringWidthPx: number;       // ring thickness in CSS pixels
+  ringBloomEnabled: boolean;  // ring bloom on/off (independent of particle bloom)
   ringBloomStrength: number;  // ring-only bloom intensity
   ringBloomRadius: number;    // ring-only bloom spread
   ringAutoColor: boolean;   // auto-match ring colour to dominant particle hue
@@ -91,7 +93,8 @@ export interface SensorParams {
 
   // Playback
   frozen: boolean;
-  targetFps: number;  // 0 = VSync (render every rAF), >0 = cap framerate
+  displaySyncHz: number; // 0 = auto-detect, >0 = force auto-sync pacing to this refresh rate
+  targetFps: number;  // 0 = adaptive display sync, >0 = manual framerate cap
 
   // Actions
   reset: () => void;
@@ -320,11 +323,11 @@ const OLED_CSS = `
 }
 /* On mobile: collapsed panels are semi-visible (no hover needed) */
 .ecsk-mobile .ecsk-panel.lil-gui.closed {
-  opacity: 0.35;
+  opacity: 0.25;
 }
-/* Tap opens to full opacity — no hover dependency */
+/* Tap opens — keep translucent so simulation stays visible */
 .ecsk-mobile .ecsk-panel.lil-gui:not(.closed) {
-  opacity: 0.95;
+  opacity: 0.72;
 }
 /* Larger touch targets */
 .ecsk-mobile .lil-gui .title {
@@ -344,6 +347,76 @@ const OLED_CSS = `
   --slider-knob-width: 8px;
   --font-size: 13px;
   --input-font-size: 13px;
+  --background-color: rgba(0, 0, 0, 0.55);
+  --title-background-color: rgba(5, 5, 5, 0.5);
+  --widget-color: rgba(26, 26, 26, 0.5);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+
+/* ── Mobile tooltip info icons ─────────────────────────────────── */
+.ecsk-mobile .lil-gui .controller .name {
+  display: flex;
+  align-items: center;
+}
+.ecsk-info-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  min-width: 18px;
+  border-radius: 50%;
+  border: 1px solid #555;
+  color: #777;
+  font-size: 10px;
+  font-style: italic;
+  font-family: Georgia, 'Times New Roman', serif;
+  line-height: 1;
+  margin-left: auto;
+  flex-shrink: 0;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  background: transparent;
+  padding: 0;
+  box-sizing: border-box;
+}
+.ecsk-info-btn:active {
+  background: #333;
+  color: #ccc;
+  border-color: #777;
+}
+
+/* ── Mobile tooltip overlay (blocks interaction while tooltip is open) ── */
+.ecsk-tooltip-overlay {
+  display: none;
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 9999;
+  background: rgba(0,0,0,0.15);
+  -webkit-tap-highlight-color: transparent;
+}
+.ecsk-tooltip-overlay.visible {
+  display: block;
+}
+
+/* ── Mobile tooltip positioning ────────────────────────────────── */
+.ecsk-mobile .ecsk-tooltip {
+  left: 5vw !important;
+  right: 5vw !important;
+  top: auto !important;
+  bottom: 5vh !important;
+  max-width: 90vw !important;
+  min-width: auto !important;
+  width: auto !important;
+  max-height: 60vh;
+  pointer-events: none;
+}
+.ecsk-mobile .ecsk-tooltip.visible {
+  pointer-events: auto;
 }
 `;
 
@@ -428,15 +501,18 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
     ringOpacity: 0.50,
     ringColor: '#' + Math.floor(Math.random() * 0xFFFFFF).toString(16).padStart(6, '0'),
     ringWidthPx: 2,
+    ringBloomEnabled: true,
     ringBloomStrength: 0.8,
     ringBloomRadius: 0.4,
     ringAutoColor: true,
+    forceHDR: false,
     softHdrExposure: 1.6,
     particleSoftEdge: 0.05,
     autoBrightness: true,
     backgroundColor: "#000000",
     zoom: 1.0,
     frozen: false,
+    displaySyncHz: 0,
     targetFps: 0,  // VSync by default
     reset: onReset,
     resetSettings: () => {},  // placeholder, wired below
@@ -561,18 +637,42 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
   flow.add(params, "frozen").name("Freeze").listen();
   flow.add(params, "reset").name("⟳ Reset");
   flow.add(params, "resetSettings").name("⟳ Reset Settings");
-  flow.add(params, "randomSettings").name("🎲 Random");
+  // Random button moved to bottom bar as quick-setting
+
+  const COMMON_FPS = [240, 165, 144, 120, 90, 60, 30];
+  const COMMON_SYNC_RATES = [240, 165, 144, 120, 90, 75, 60, 50, 48, 30];
+  let fpsCtrl: Controller | null = null;
+
+  function updateTargetFpsLabel(nextRefreshRate: number): void {
+    const selectEl = fpsCtrl?.domElement.querySelector("select") as HTMLSelectElement | null;
+    const vsyncOption = selectEl?.querySelector('option[value="0"]');
+    if (vsyncOption) {
+      const effectiveRefreshRate = params.displaySyncHz > 0 ? params.displaySyncHz : nextRefreshRate;
+      const suffix = params.displaySyncHz > 0 ? " override" : "";
+      vsyncOption.textContent = `Auto (display sync: ${Math.round(effectiveRefreshRate)} Hz${suffix})`;
+    }
+  }
+
+  const displaySyncOptions: Record<string, number> = {
+    "Auto-detect": 0,
+  };
+  for (const hz of COMMON_SYNC_RATES) {
+    displaySyncOptions[`${hz} Hz`] = hz;
+  }
+  const displaySyncCtrl = flow.add(params, "displaySyncHz", displaySyncOptions).name("Display sync").onChange(() => {
+    params.displaySyncHz = Number(params.displaySyncHz);
+    updateTargetFpsLabel(refreshRate);
+  });
 
   // Target framerate dropdown — always shows all common rates so a wrong Hz
-  // detection never hides valid choices.  Detected rate shown on VSync label.
+  // detection never hides valid choices.  Detected rate shown on the auto-sync label.
   {
-    const COMMON_FPS = [240, 165, 144, 120, 90, 60, 30];
     const fpsOptions: Record<string, number> = {};
-    fpsOptions[`VSync (${refreshRate} Hz)`] = 0;
+    fpsOptions[`Auto (display sync: ${refreshRate} Hz)`] = 0;
     for (const fps of COMMON_FPS) {
       fpsOptions[`${fps} fps`] = fps;
     }
-    const fpsCtrl = flow.add(params, "targetFps", fpsOptions).name("Target framerate");
+    fpsCtrl = flow.add(params, "targetFps", fpsOptions).name("Target framerate");
     attachTooltip(fpsCtrl.domElement, "targetFps");
   }
 
@@ -592,12 +692,18 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
   const ring = gui.addFolder("Ring");
   ring.addColor(params, "ringColor").name("Ring colour").listen();
   ring.add(params, "ringAutoColor").name("Auto-colour");
+  ring.add(params, "ringBloomEnabled").name("Ring bloom").onChange(() => {
+    updateConditionalFolders();
+  });
 
-  const bloomFolder = gui.addFolder("Bloom");
-  bloomFolder.add(params, "bloomEnabled").name("Bloom").onChange(() => {
+  const bloomFolder = gui.addFolder("Particle Bloom");
+  bloomFolder.add(params, "bloomEnabled").name("Particle bloom").onChange(() => {
     updateConditionalFolders();
   });
   const bloomQualityCtrl = bloomFolder.add(params, "bloomQuality", ['auto', 'high', 'low']).name("Bloom quality");
+
+  let onForceHDR: ((enabled: boolean) => void) | null = null;
+  let forceHDRBtn: HTMLButtonElement | null = null;
 
   const camera = gui.addFolder("Camera");
   camera.addColor(params, "backgroundColor").name("Background colour");
@@ -695,6 +801,7 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
     // Randomise boolean toggles (frozen excluded)
     params.roundParticles = rand() > 0.3;    // bias toward round
     params.bloomEnabled = rand() > 0.5;
+    params.ringBloomEnabled = rand() > 0.5;
     params.ringAutoColor = rand() > 0.5;
     params.autoBrightness = rand() > 0.6;
     // kCurvature: pick -1, 0, or 1 uniformly
@@ -777,7 +884,9 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
     bloomStrength:    () => params.bloomEnabled,
     bloomRadius:      () => params.bloomEnabled,
     bloomThreshold:   () => params.bloomEnabled,
-    softHdrExposure:  () => currentHDRMode === 'soft',
+    ringBloomStrength: () => params.ringBloomEnabled,
+    ringBloomRadius:   () => params.ringBloomEnabled,
+    softHdrExposure:  () => currentHDRMode === 'soft' || params.forceHDR,
     particleSoftEdge: () => params.roundParticles,
     brightness:       () => !params.autoBrightness,
   };
@@ -803,6 +912,11 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
 
     // Show/hide bloom quality dropdown (non-numeric, separate from numericDefs)
     bloomQualityCtrl.domElement.style.display = params.bloomEnabled ? "" : "none";
+
+    // Show/hide Force HDR button in bottom bar (mobile only)
+    if (forceHDRBtn) {
+      forceHDRBtn.style.display = currentHDRMode === 'none' || params.forceHDR ? "" : "none";
+    }
   }
 
   // Monitor betaPP changes to show/hide production tuning
@@ -892,7 +1006,22 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
   // ── Tooltip system ──────────────────────────────────────────────────
   const tooltipEl = document.createElement("div");
   tooltipEl.className = "ecsk-tooltip";
-  if (!isMobile) document.body.appendChild(tooltipEl);  // skip on mobile (hover-only)
+  document.body.appendChild(tooltipEl);
+
+  // Mobile: overlay blocks all interaction behind the tooltip
+  let overlayEl: HTMLDivElement | null = null;
+  if (isMobile) {
+    overlayEl = document.createElement("div");
+    overlayEl.className = "ecsk-tooltip-overlay";
+    document.body.appendChild(overlayEl);
+    const dismissMobileTooltip = (e: Event) => {
+      e.preventDefault();
+      e.stopPropagation();
+      hideMobileTooltip();
+    };
+    overlayEl.addEventListener("touchstart", dismissMobileTooltip, { capture: true });
+    overlayEl.addEventListener("click", dismissMobileTooltip, { capture: true });
+  }
 
   /** Build structured tooltip HTML from a Tooltip object. */
   function buildTooltipHTML(tip: Tooltip): string {
@@ -957,6 +1086,18 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
     tooltipEl.classList.remove("visible");
   }
 
+  // Mobile tooltip: show with overlay, positioned via CSS
+  function showMobileTooltip(tip: Tooltip): void {
+    tooltipEl.innerHTML = buildTooltipHTML(tip);
+    tooltipEl.classList.add("visible");
+    overlayEl?.classList.add("visible");
+  }
+
+  function hideMobileTooltip(): void {
+    tooltipEl.classList.remove("visible");
+    overlayEl?.classList.remove("visible");
+  }
+
   /**
    * Attach a hover tooltip to a controller's DOM row.
    * @param domElement  The controller's .domElement
@@ -968,9 +1109,32 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
     key: string,
     tooltipMap: Record<string, Tooltip> = TOOLTIPS,
   ): void {
-    if (isMobile) return;  // tooltips are hover-only — skip on touch devices
     const tip = tooltipMap[key];
     if (!tip) return;
+
+    if (isMobile) {
+      // Mobile: add (i) info icon that opens tooltip with overlay
+      const nameEl = domElement.querySelector(".name") as HTMLElement | null;
+      if (!nameEl) return;
+      // Don't add duplicate icons (e.g. after rebuild)
+      if (nameEl.querySelector(".ecsk-info-btn")) return;
+
+      const infoBtn = document.createElement("span");
+      infoBtn.className = "ecsk-info-btn";
+      infoBtn.textContent = "i";
+      infoBtn.addEventListener("touchstart", (e) => {
+        e.stopPropagation();
+      }, { passive: true });
+      infoBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        e.preventDefault();
+        showMobileTooltip(tip);
+      });
+      nameEl.appendChild(infoBtn);
+      return;
+    }
+
+    // Desktop: hover tooltip with delay
     domElement.addEventListener("mouseenter", () => {
       tooltipTimer = setTimeout(() => showTooltip(domElement, tip), 380);
     });
@@ -989,10 +1153,10 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
   // Frozen, reset
   for (const ctrl of flow.controllersRecursive()) {
     const prop = (ctrl as unknown as { property: string }).property;
+    if (prop === "displaySyncHz") attachTooltip(ctrl.domElement, "displaySyncHz");
     if (prop === "frozen") attachTooltip(ctrl.domElement, "frozen");
     if (prop === "reset") attachTooltip(ctrl.domElement, "reset");
     if (prop === "resetSettings") attachTooltip(ctrl.domElement, "resetSettings");
-    if (prop === "randomSettings") attachTooltip(ctrl.domElement, "randomSettings");
     // targetFps tooltip is attached inline when the dropdown is created
   }
   // Round particles, bloom, ring colour, auto-colour, background
@@ -1045,57 +1209,121 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
     updateConditionalFolders();
   }
 
-  // ── Fullscreen toggle button ───────────────────────────────────
+  // ── Bottom bar: Fullscreen + Toggle UI buttons ─────────────────
   {
-    const btn = document.createElement("button");
-    btn.id = "fullscreen-btn";
-    btn.title = "Toggle fullscreen";
-    // SVG expand icon (4 outward arrows)
+    const bar = document.createElement("div");
+    bar.id = "bottom-bar";
+
+    // — Fullscreen button —
+    const fsBtn = document.createElement("button");
+    fsBtn.className = "bar-btn";
+    fsBtn.title = "Toggle fullscreen";
     const expandSVG = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>`;
     const collapseSVG = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 14h6v6m10-10h-6V4m0 16h6v-6M4 4h6v6"/></svg>`;
-    btn.innerHTML = expandSVG;
-    document.body.appendChild(btn);
+    fsBtn.innerHTML = expandSVG;
 
-    function updateIcon() {
+    function updateFsIcon() {
       const isFS = !!document.fullscreenElement;
-      btn.innerHTML = isFS ? collapseSVG : expandSVG;
-      btn.title = isFS ? "Exit fullscreen" : "Enter fullscreen";
+      fsBtn.innerHTML = isFS ? collapseSVG : expandSVG;
+      fsBtn.title = isFS ? "Exit fullscreen" : "Enter fullscreen";
     }
-
-    btn.addEventListener("click", () => {
+    fsBtn.addEventListener("click", () => {
       if (!document.fullscreenElement) {
         document.documentElement.requestFullscreen().catch(() => {});
       } else {
         document.exitFullscreen().catch(() => {});
       }
     });
+    document.addEventListener("fullscreenchange", updateFsIcon);
+    document.addEventListener("webkitfullscreenchange", updateFsIcon);
 
-    // Update icon when fullscreen changes (Esc on desktop, back on mobile)
-    document.addEventListener("fullscreenchange", updateIcon);
-    document.addEventListener("webkitfullscreenchange", updateIcon);
-  }
+    // — Toggle UI button —
+    const uiBtn = document.createElement("button");
+    uiBtn.className = "bar-btn";
+    uiBtn.title = "Hide UI";
+    const eyeOpenSVG = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>`;
+    const eyeClosedSVG = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>`;
+    uiBtn.innerHTML = eyeOpenSVG;
 
-  // ── Force HDR button (mobile-only) ─────────────────────────────
-  let onForceHDR: ((enabled: boolean) => void) | null = null;
-  if (isMobile && currentHDRMode === 'none') {
-    const btn = document.createElement("button");
-    btn.id = "force-hdr-btn";
-    btn.textContent = "Force HDR";
-    btn.title = "Enable enhanced brightness on compatible OLED screens";
-    document.body.appendChild(btn);
+    let uiHidden = false;
+    let peekTimeout: ReturnType<typeof setTimeout> | null = null;
 
-    let forced = false;
-    btn.addEventListener("click", () => {
-      forced = !forced;
-      btn.textContent = forced ? "HDR On" : "Force HDR";
-      btn.classList.toggle("active", forced);
-      onForceHDR?.(forced);
+    function hideUI() {
+      uiHidden = true;
+      document.body.classList.add("ui-hidden");
+      uiBtn.innerHTML = eyeClosedSVG;
+      uiBtn.title = "Show UI";
+    }
+
+    function showUI() {
+      uiHidden = false;
+      document.body.classList.remove("ui-hidden", "ui-peek");
+      uiBtn.innerHTML = eyeOpenSVG;
+      uiBtn.title = "Hide UI";
+      if (peekTimeout) { clearTimeout(peekTimeout); peekTimeout = null; }
+    }
+
+    function peekBar() {
+      if (!uiHidden) return;
+      document.body.classList.add("ui-peek");
+      if (peekTimeout) clearTimeout(peekTimeout);
+      peekTimeout = setTimeout(() => {
+        document.body.classList.remove("ui-peek");
+        peekTimeout = null;
+      }, 3000);
+    }
+
+    uiBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (uiHidden) showUI(); else hideUI();
     });
+
+    // Desktop: mouse movement reveals the bar when UI is hidden
+    if (!isMobile) {
+      document.addEventListener("mousemove", peekBar);
+    }
+    // Mobile: tap anywhere reveals the bar when UI is hidden
+    if (isMobile) {
+      document.addEventListener("touchstart", (e) => {
+        if (!uiHidden) return;
+        if (bar.contains(e.target as Node)) return;
+        peekBar();
+      }, { passive: true });
+    }
+
+    // — Random (dice) button —
+    const diceBtn = document.createElement("button");
+    diceBtn.className = "bar-btn";
+    diceBtn.title = "Randomize settings";
+    diceBtn.innerHTML = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8.5" cy="8.5" r="1.2" fill="currentColor" stroke="none"/><circle cx="15.5" cy="8.5" r="1.2" fill="currentColor" stroke="none"/><circle cx="8.5" cy="15.5" r="1.2" fill="currentColor" stroke="none"/><circle cx="15.5" cy="15.5" r="1.2" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.2" fill="currentColor" stroke="none"/></svg>`;
+    diceBtn.addEventListener("click", () => { params.randomSettings(); });
+
+    // — Force HDR button (mobile only) —
+    if (isMobile) {
+      forceHDRBtn = document.createElement("button");
+      forceHDRBtn.className = "bar-btn";
+      forceHDRBtn.title = "Force HDR (OLED)";
+      const hdrOffSVG = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><text x="12" y="14" text-anchor="middle" font-size="7" font-weight="bold" fill="currentColor" stroke="none">HDR</text></svg>`;
+      const hdrOnSVG = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#6cf" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><text x="12" y="14" text-anchor="middle" font-size="7" font-weight="bold" fill="#6cf" stroke="none">HDR</text></svg>`;
+      forceHDRBtn.innerHTML = hdrOffSVG;
+      forceHDRBtn.addEventListener("click", () => {
+        params.forceHDR = !params.forceHDR;
+        forceHDRBtn!.innerHTML = params.forceHDR ? hdrOnSVG : hdrOffSVG;
+        onForceHDR?.(params.forceHDR);
+        updateConditionalFolders();
+      });
+      bar.appendChild(forceHDRBtn);
+    }
+
+    bar.appendChild(diceBtn);
+    bar.appendChild(fsBtn);
+    bar.appendChild(uiBtn);
+    document.body.appendChild(bar);
   }
 
   function setForceHDRCallback(cb: (enabled: boolean) => void): void {
     onForceHDR = cb;
   }
 
-  return { gui, readoutGui, params, hud, updateHUD, setHDRMode, setForceHDRCallback };
+  return { gui, readoutGui, params, hud, updateHUD, setHDRMode, setForceHDRCallback, updateTargetFpsLabel };
 }

@@ -38,6 +38,7 @@ import {
   Fn,
   screenUV,
   vec2,
+  vec3,
 } from "three/tsl";
 import { bloom } from "three/addons/tsl/display/BloomNode.js";
 import type { ScreenInfo } from "../ui/screen-info.js";
@@ -105,7 +106,7 @@ function hslToRGB(h: number, s: number, l: number): [number, number, number] {
  *  Sized so the disk fills 90% of viewport height (5% margin each side). */
 const CAMERA_HALF_SIZE = 2.0 / 0.90;
 /** Number of line segments for the Lambert disk boundary ring. */
-const RING_SEGMENTS = 128;
+const RING_SEGMENTS = 256;
 /** Default initial GPU buffer capacity when hardware budget is unavailable. */
 const DEFAULT_INITIAL_CAPACITY = 65_536;
 /** Fixed outer radius for circular particle clipping. */
@@ -163,6 +164,14 @@ export class SensorRenderer {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private _bloomNode: any = null;
 
+  // TSL uniform multipliers — gate each bloom term in the composite.
+  // Setting the bloom node's strength to 0 alone is not enough because
+  // the gaussian blur chain can still produce non-zero output.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private _particleBloomMul: any = null;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private _ringBloomMul: any = null;
+
   private _ready = false;
 
   // GPU buffer capacity — starts at initialCapacity and doubles when exceeded.
@@ -195,6 +204,8 @@ export class SensorRenderer {
 
   // Ring geometry + bloom controls (independent of particle bloom)
   ringWidthPx = 2;           // ring thickness in CSS pixels
+  particleBloomEnabled = true; // particle bloom on/off
+  ringBloomEnabled = true;   // ring bloom on/off (independent of particle bloom)
   ringBloomStrength = 0.8;   // ring-only bloom intensity
   ringBloomRadius = 0.4;     // ring-only bloom spread
   ringAutoColor = false;     // match ring colour to dominant particle hue
@@ -669,11 +680,21 @@ export class SensorRenderer {
       const ringMask  = smoothstep(float(1.95), float(2.05), worldDist);
       const maskedRingBloom = ringBloom.mul(ringMask);
 
-      // Composite: particles + particle bloom + ring + ring bloom (outward only)
-      this.pipeline.outputNode = scenePassColor
-        .add(particleBloom)
-        .add(ringPassColor)
-        .add(maskedRingBloom);
+      // TSL uniform multipliers: definitively zero each bloom in the
+      // composite when its toggle is off, regardless of bloom-node internals.
+      this._particleBloomMul = uniform(1.0);
+      this._ringBloomMul = uniform(1.0);
+
+      // ── Background ring composite ────────────────────────────────
+      // Ring is the base layer; particles are composited on top.
+      // The ring sits at r≈2.0 (disk edge) where particles are sparse,
+      // so overlap is minimal.  No per-pixel attenuation — this avoids
+      // edge-case issues where pass-node evaluation interferes with
+      // ring visibility when bloom is active.
+      this.pipeline.outputNode = ringPassColor
+        .add(maskedRingBloom.mul(this._ringBloomMul))
+        .add(scenePassColor)
+        .add(particleBloom.mul(this._particleBloomMul));
 
       this.useBloom = true;
       console.log("[sensor] Two-pass bloom enabled (particles + ring)");
@@ -954,17 +975,25 @@ export class SensorRenderer {
     // At radius=1 the coarse mips dominate, spreading the glow outward.
     // This is the opposite of user-intuition ("0 = sharp, 1 = wide"), so we
     // invert the value before passing it through.
+    // Zero particle bloom strength when particle bloom is disabled so the
+    // pass produces no output (ring bloom may still be active independently).
     if (this._bloomNode) {
-      this._bloomNode.strength.value  = this.bloomStrength;
+      this._bloomNode.strength.value  = this.particleBloomEnabled ? this.bloomStrength : 0;
       this._bloomNode.radius.value    = 1 - this.bloomRadius;   // inverted ↔ intuitive
       this._bloomNode.threshold.value = this.bloomThreshold;
     }
 
     // Push ring bloom uniforms (same inversion convention for radius)
+    // Zero strength when ring bloom is disabled so the pass produces no output.
     if (this._ringBloomNode) {
-      this._ringBloomNode.strength.value  = this.ringBloomStrength;
+      this._ringBloomNode.strength.value  = this.ringBloomEnabled ? this.ringBloomStrength : 0;
       this._ringBloomNode.radius.value    = 1 - this.ringBloomRadius;
     }
+
+    // Gate each bloom term in the composite via uniform multipliers.
+    // This is the authoritative on/off — strength=0 is just a perf hint.
+    if (this._particleBloomMul) this._particleBloomMul.value = this.particleBloomEnabled ? 1.0 : 0.0;
+    if (this._ringBloomMul) this._ringBloomMul.value = this.ringBloomEnabled ? 1.0 : 0.0;
 
     // Keep ring-bloom mask in sync with current zoom / aspect
     if (this._frustumHalfW && this._frustumHalfH) {
@@ -977,13 +1006,13 @@ export class SensorRenderer {
     // When bloom is enabled and the pipeline is available, use the full
     // multi-pass bloom pipeline.  Otherwise fall back to a lightweight
     // two-pass render (particles + ring scene) with no bloom.
-    // Skip bloom entirely when there are no visible particles — the
-    // full-screen gaussian blur passes would just process black textures.
-    // Also skip when both bloom strengths are zero — the blur produces
-    // no visible output so the multi-pass pipeline is pure waste.
-    const needsBloom = this.useBloom && this.pipeline
-      && this.sprite.count > 0
-      && (this.bloomStrength > 0 || this.ringBloomStrength > 0);
+    // The pipeline is needed whenever either bloom toggle is on — ring
+    // bloom should work even with 0 particles since the ring has its own
+    // scene.  Skip only when both strengths are zero (pure waste).
+    const anyBloomActive =
+      (this.particleBloomEnabled && this.bloomStrength > 0)
+      || (this.ringBloomEnabled && this.ringBloomStrength > 0);
+    const needsBloom = this.useBloom && this.pipeline && anyBloomActive;
     if (needsBloom) {
       try {
         this.pipeline!.render();
@@ -994,15 +1023,17 @@ export class SensorRenderer {
         });
       }
     } else {
-      // Lightweight no-bloom path: render particles, then overlay ring
+      // Lightweight no-bloom path: ring first (background), particles on top
       const r = this.renderer as any;
-      r.autoClear = true;
-      this.renderer.render(this.scene, this.camera);
-      // Overlay the ring scene on top (additive, no clear)
       if (this._ringScene && this.ringOpacity > 0) {
-        r.autoClear = false;
-        this.renderer.render(this._ringScene, this.camera);
         r.autoClear = true;
+        this.renderer.render(this._ringScene, this.camera);
+        r.autoClear = false;
+        this.renderer.render(this.scene, this.camera);
+        r.autoClear = true;
+      } else {
+        r.autoClear = true;
+        this.renderer.render(this.scene, this.camera);
       }
     }
   }

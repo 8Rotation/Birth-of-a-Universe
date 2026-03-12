@@ -90,6 +90,23 @@ describe("bounceProps", () => {
     const bp = physics.bounceProps(0.0001);
     expect(bp.betaEff).toBe(0.002);
   });
+
+  it("w_eff is finite for k=0 (no division-by-zero)", () => {
+    const flat = new ECSKPhysics(0.10, 0);
+    const bp = flat.bounceProps(0.10);
+    expect(Number.isFinite(bp.wEff)).toBe(true);
+    expect(bp.wEff).toBe(-1); // cosmological-constant limit
+    // Perturbed β_eff should also be finite
+    const bp2 = flat.bounceProps(0.05);
+    expect(Number.isFinite(bp2.wEff)).toBe(true);
+    expect(bp2.wEff).toBe(-1);
+  });
+
+  it("w_eff is finite for k=-1", () => {
+    const open = new ECSKPhysics(0.10, -1);
+    const bp = open.bounceProps(0.10);
+    expect(Number.isFinite(bp.wEff)).toBe(true);
+  });
 });
 
 // ── productionProps ─────────────────────────────────────────────────────

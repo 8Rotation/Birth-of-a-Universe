@@ -156,18 +156,23 @@ export class ECSKPhysics {
     }
     const a = Math.sqrt(a2);
 
+    // w_eff = (a² − 3β) / (3(a² − β)).
+    // The denominator vanishes when a² = β_eff, which is always the
+    // case for k=0 at bounce (a² ≡ β_eff).  At that point ε̃ = 0
+    // (torsion exactly cancels radiation energy) while p̃ = −2β/(3a⁶)
+    // remains finite, so w → −∞.  For visual encoding we use the
+    // physical limit w = −1 (cosmological-constant behaviour:
+    // repulsive torsion dominates — Popławski 2010b eq. 24).
+    const wDenom = 3 * (a2 - be);
+    const wEff = Math.abs(wDenom) > 1e-12 ? (a2 - 3 * be) / wDenom : -1;
+
     return {
       a,
       betaEff: be,
       // Energy density at bounce: ε/ε₀ = 1/a̅⁴
       eps: 1 / (a2 * a2),
-      // Effective equation of state: w_eff = p̃/ε̃
-      // Spin-fluid convention: ε̃ = 1/a⁴ − β/a⁶, p̃ = 1/(3a⁴) − β/a⁶
-      //   → w = (a² − 3β) / (3(a² − β)) = 1 − 2/(3a²) at bounce
-      // Dirac-spinor alternative: p̃ = 1/(3a⁴) + β/a⁶
-      //   → w = (a² + 3β) / (3(a² − β)) = 4/(3a²) − 1 at bounce
-      // See EQUATION_CATALOG.md §11 cross-check 2, §14, §26.
-      wEff: (a2 - 3 * be) / (3 * (a2 - be)),
+      // Effective equation of state — see derivation above.
+      wEff,
       // Bounce kick: ä = −1/a³ + 2β/a⁵ (from D2)
       acc: -1 / (a2 * a) + (2 * be) / (a2 * a2 * a),
       // Torsion ratio: S = αn²/ε = β/a² (→ 1 in small-β limit; = 1−a² at bounce)

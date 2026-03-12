@@ -395,15 +395,29 @@ export const TOOLTIPS: Record<string, Tooltip> = {
   targetFps: {
     simple: "Limit the rendering frame rate to reduce GPU load.",
     visual:
-      "VSync: render at your monitor's native refresh rate (smoothest).\n" +
+      "Auto (display sync): render on each display refresh callback from the current monitor (smoothest).\n" +
       "Lower caps (60, 30): skip render frames, saving GPU. " +
       "Particles still accumulate normally between frames.",
     performance:
       "Directly reduces GPU work. At 30 fps you use roughly half the GPU of 60 fps. " +
-      "Physics workers run continuously regardless of this setting.",
+      "Lower caps also relax the per-frame renderer budget, so denser scenes can survive a bit longer before runtime throttling. " +
+      "Physics workers still target the same per-second throughput.",
     notes:
       "If you see stuttering at high particle counts, try capping to 60 fps. " +
-      "The detected refresh rate is shown on the VSync label.",
+      "The detected refresh rate is shown on the Auto label.",
+  },
+
+  displaySyncHz: {
+    simple: "Override the display refresh rate used by Auto display sync.",
+    visual:
+      "Auto-detect uses the browser's reported display refresh rate. " +
+      "If your browser confuses mixed-refresh monitors, force the correct rate here.\n" +
+      "This only affects the Auto display-sync mode, not explicit 30/60/120 fps caps.",
+    performance:
+      "When Auto is selected in Target framerate, this value becomes the effective pacing rate. " +
+      "Use it as a fallback when the browser reports the wrong refresh rate for an external screen.",
+    notes:
+      "Example: if a 60 Hz external monitor is misdetected as 120 Hz while a laptop panel is also active, set this to 60 Hz.",
   },
 
   particleRate: {
@@ -704,6 +718,16 @@ export const TOOLTIPS: Record<string, Tooltip> = {
       "Ring grows outward from the projection boundary (never inward).",
     range: "0.5 – 10. Default: 2 px.",
     performance: "None.",
+  },
+
+  ringBloomEnabled: {
+    simple: "Toggle the ring's own bloom glow on or off (independent of particle bloom).",
+    visual:
+      "When enabled, the ring gets its own dedicated bloom pass, creating a soft " +
+      "luminous halo around the boundary ring. Completely independent of the " +
+      "particle Bloom toggle.",
+    performance: "Low. Enables/disables the ring's dedicated bloom pass.",
+    notes: "Unlocks Ring Bloom Intensity and Ring Bloom Spread sliders.",
   },
 
   ringBloomStrength: {

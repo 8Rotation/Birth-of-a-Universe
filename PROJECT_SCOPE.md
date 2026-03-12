@@ -330,8 +330,8 @@ package.json            — three r183, lil-gui, vite 7.3.1
 - [ ] Review color assignment — current hue mapping (amber→violet via HSL) skews green;
   investigate perceptual color spaces (Oklch), wider hue sweep, or direct blackbody ramp
 - [ ] Review all default slider values for best out-of-the-box visual impact
-- [ ] Review shell rate and particles-per-shell defaults (balance density vs. performance)
 - [ ] Review and rework bloom pipeline (tune thresholds for HDR/SDR)
+- [ ] Scale Hypersurface to screen
 - [ ] Flow tails — short streaks showing arrival direction, with:
   - Length modifier (slider)
   - Toggle on/off
@@ -349,7 +349,7 @@ package.json            — three r183, lil-gui, vite 7.3.1
 - [ ] Parameter presets — save/load named configs ("gentle bounce", "critical β", "high turbulence")
 - [ ] Screenshot / high-res image export
 - [ ] Share state via URL query parameters
-- [ ] Colorblind-safe alternate palettes
+- [ ] Colorblind-safe alternate palettes and other accessibility parameters
 - [ ] Touch / mobile support (pinch-zoom, swipe, responsive layout)
 - [ ] **Performance-aware slider value coloring** — the numeric readout for each slider is
   tinted on a continuous green → orange → red gradient based on available performance

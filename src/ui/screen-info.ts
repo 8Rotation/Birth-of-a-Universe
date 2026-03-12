@@ -87,6 +87,42 @@ export interface ScreenInfo {
 
 export type ScreenChangeCallback = (info: ScreenInfo) => void;
 
+interface DetailedScreenLike {
+  width?: number;
+  height?: number;
+  devicePixelRatio?: number;
+  refreshRate?: number;
+  label?: string;
+  isInternal?: boolean;
+  isPrimary?: boolean;
+  addEventListener?: (type: string, listener: EventListenerOrEventListenerObject) => void;
+  removeEventListener?: (type: string, listener: EventListenerOrEventListenerObject) => void;
+}
+
+interface ScreenDetailsLike {
+  currentScreen?: DetailedScreenLike;
+  screens?: DetailedScreenLike[];
+  addEventListener?: (type: string, listener: EventListenerOrEventListenerObject) => void;
+  removeEventListener?: (type: string, listener: EventListenerOrEventListenerObject) => void;
+}
+
+interface NativeRefreshRateInfo {
+  rate: number;
+  source: "current-screen" | "window-screen";
+}
+
+interface ScreenMetrics {
+  screenWidth: number;
+  screenHeight: number;
+  dpr: number;
+  renderWidth: number;
+  renderHeight: number;
+}
+
+interface ExtendedScreenLike {
+  isExtended?: boolean;
+}
+
 // ── Common refresh rates (for snapping measured values) ───────────────────
 
 const COMMON_RATES = [24, 25, 30, 48, 50, 60, 72, 75, 90, 100, 120, 144, 165, 180, 240, 300, 360, 480];
@@ -104,6 +140,55 @@ function snapToCommonRate(measuredHz: number): number {
   // Only snap if within 8% of a known rate; otherwise just round
   if (bestDist / best > 0.08) return Math.round(measuredHz);
   return best;
+}
+
+function readPositiveNumber(value: unknown): number | null {
+  return typeof value === "number" && isFinite(value) && value > 0 ? value : null;
+}
+
+export function resolveNativeRefreshRate(
+  currentScreen?: DetailedScreenLike | null,
+  fallbackScreen?: DetailedScreenLike | null,
+  allowWindowScreenFallback = true,
+): NativeRefreshRateInfo | null {
+  const currentRate = readPositiveNumber(currentScreen?.refreshRate);
+  if (currentRate !== null) {
+    return { rate: currentRate, source: "current-screen" };
+  }
+
+  if (!allowWindowScreenFallback) {
+    return null;
+  }
+
+  const fallbackRate = readPositiveNumber(fallbackScreen?.refreshRate);
+  if (fallbackRate !== null) {
+    return { rate: fallbackRate, source: "window-screen" };
+  }
+
+  return null;
+}
+
+export function resolveScreenMetrics(
+  currentScreen?: DetailedScreenLike | null,
+  fallbackWindowScreen?: Pick<Screen, "width" | "height"> | null,
+  viewport?: { width: number; height: number },
+  fallbackDpr?: number,
+): ScreenMetrics {
+  const dpr = readPositiveNumber(currentScreen?.devicePixelRatio) ??
+    readPositiveNumber(fallbackDpr) ??
+    1;
+  const screenWidthCss = readPositiveNumber(currentScreen?.width) ?? fallbackWindowScreen?.width ?? 0;
+  const screenHeightCss = readPositiveNumber(currentScreen?.height) ?? fallbackWindowScreen?.height ?? 0;
+  const viewportWidth = viewport?.width ?? 0;
+  const viewportHeight = viewport?.height ?? 0;
+
+  return {
+    screenWidth: Math.round(screenWidthCss * dpr),
+    screenHeight: Math.round(screenHeightCss * dpr),
+    dpr,
+    renderWidth: Math.round(viewportWidth * dpr),
+    renderHeight: Math.round(viewportHeight * dpr),
+  };
 }
 
 // ── Display category ──────────────────────────────────────────────────────
@@ -223,6 +308,15 @@ async function detectPeakBrightness(hdrCapable: boolean): Promise<number | null>
   return null;
 }
 
+async function getScreenDetails(): Promise<ScreenDetailsLike | null> {
+  try {
+    const details = await (window as Window & { getScreenDetails?: () => Promise<ScreenDetailsLike> }).getScreenDetails?.();
+    return details ?? null;
+  } catch {
+    return null;
+  }
+}
+
 // ── VRR detection heuristic ───────────────────────────────────────────────
 
 interface RefreshMeasurement {
@@ -232,21 +326,53 @@ interface RefreshMeasurement {
   vrrRange: [number, number] | null;
 }
 
+function isExtendedDesktop(screenLike?: ExtendedScreenLike | null): boolean {
+  return Boolean(screenLike?.isExtended);
+}
+
+function isNearMultiple(higherHz: number, lowerHz: number): boolean {
+  if (lowerHz <= 0) return false;
+  const ratio = higherHz / lowerHz;
+  const rounded = Math.round(ratio);
+  return rounded >= 2 && rounded <= 4 && Math.abs(ratio - rounded) <= 0.08;
+}
+
+export function resolveMeasuredRefreshRate(
+  pass1: RefreshMeasurement,
+  pass2: RefreshMeasurement,
+  preferConservativeRate: boolean,
+): number {
+  if (pass1.hz === pass2.hz) {
+    return pass1.hz;
+  }
+
+  const higherHz = Math.max(pass1.hz, pass2.hz);
+  const lowerHz = Math.min(pass1.hz, pass2.hz);
+
+  if (preferConservativeRate && isNearMultiple(higherHz, lowerHz)) {
+    return lowerHz;
+  }
+
+  return higherHz;
+}
+
 /**
  * Try to read the native screen refresh rate from the browser.
  * Chrome 110+ exposes `screen.refreshRate` (behind flag or origin trial).
  * Falls back to null if not available.
  */
-function nativeRefreshRate(): number | null {
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const rate = (window.screen as any).refreshRate;
-    if (typeof rate === "number" && rate > 0 && isFinite(rate)) {
-      console.log(`[screen] Native screen.refreshRate = ${rate} Hz`);
-      return rate;
-    }
-  } catch { /* not available */ }
-  return null;
+function nativeRefreshRate(currentScreen?: DetailedScreenLike | null): NativeRefreshRateInfo | null {
+  const native = resolveNativeRefreshRate(
+    currentScreen,
+    window.screen as DetailedScreenLike,
+    !isExtendedDesktop(window.screen as Screen & ExtendedScreenLike),
+  );
+  if (native !== null) {
+    console.log(`[screen] Native ${native.source}.refreshRate = ${native.rate} Hz`);
+  } else if (isExtendedDesktop(window.screen as Screen & ExtendedScreenLike)) {
+    console.log("[screen] Ignoring generic window.screen.refreshRate on extended desktop; using per-screen/rAF detection only");
+  }
+  return native;
 }
 
 /**
@@ -338,12 +464,12 @@ function analyseIntervals(samples: number[]): RefreshMeasurement {
  *
  * Also analyses frame-time variance to detect VRR (variable refresh rate).
  */
-function measureRefreshRate(): Promise<RefreshMeasurement> {
+function measureRefreshRate(currentScreen?: DetailedScreenLike | null): Promise<RefreshMeasurement> {
   return new Promise(async (resolve) => {
     // ── Attempt 1: native API (instant, most reliable) ──────────
-    const native = nativeRefreshRate();
+    const native = nativeRefreshRate(currentScreen);
     if (native !== null) {
-      const snapped = snapToCommonRate(native);
+      const snapped = snapToCommonRate(native.rate);
       // Still do a quick rAF pass for VRR detection
       const samples = await singleMeasurementPass(40, 5);
       const analysis = analyseIntervals(samples);
@@ -369,11 +495,13 @@ function measureRefreshRate(): Promise<RefreshMeasurement> {
       finalHz = pass1.hz;
       console.log(`[screen] Both passes agree: ${finalHz} Hz`);
     } else {
-      // Disagree: prefer the higher rate (load/jitter usually drags
-      // measurements DOWN, so the higher reading is more likely correct)
-      finalHz = Math.max(pass1.hz, pass2.hz);
+      const preferConservativeRate = isExtendedDesktop(window.screen as Screen & ExtendedScreenLike);
+      finalHz = resolveMeasuredRefreshRate(pass1, pass2, preferConservativeRate);
+      const strategy = finalHz === Math.min(pass1.hz, pass2.hz)
+        ? "using lower harmonic on extended desktop"
+        : "using higher";
       console.log(
-        `[screen] Passes disagree (${pass1.hz} vs ${pass2.hz} Hz) → using higher: ${finalHz} Hz`
+        `[screen] Passes disagree (${pass1.hz} vs ${pass2.hz} Hz) → ${strategy}: ${finalHz} Hz`
       );
     }
 
@@ -398,18 +526,17 @@ function buildInfo(
   hdrCapable: boolean,
   colorGamut: "srgb" | "p3" | "rec2020",
   peakNits: number | null,
+  currentScreen?: DetailedScreenLike | null,
 ): ScreenInfo {
-  const dpr = window.devicePixelRatio || 1;
   const vw = window.innerWidth;
   const vh = window.innerHeight;
-
-  // Physical screen resolution
-  // All modern browsers report CSS pixels for screen.width/height,
-  // regardless of platform. Multiply by DPR to get physical pixels.
-  const sw = Math.round(window.screen.width * dpr);
-  const sh = Math.round(window.screen.height * dpr);
-  const rw = Math.round(vw * dpr);
-  const rh = Math.round(vh * dpr);
+  const metrics = resolveScreenMetrics(
+    currentScreen,
+    window.screen,
+    { width: vw, height: vh },
+    window.devicePixelRatio,
+  );
+  const { dpr, screenWidth: sw, screenHeight: sh, renderWidth: rw, renderHeight: rh } = metrics;
 
   const isMobile = detectMobile();
   const orientation = detectOrientation(sw, sh);
@@ -580,8 +707,12 @@ export class ScreenDetector {
   private _hdrCapable = false;
   private _colorGamut: "srgb" | "p3" | "rec2020" = "srgb";
   private _peakNits: number | null = null;
+  private _screenDetails: ScreenDetailsLike | null = null;
+  private _currentScreen: DetailedScreenLike | null = null;
   private _initialized = false;
   private _remeasureTimer: ReturnType<typeof setTimeout> | null = null;
+  private _screenDetailsHandler = () => this._onDisplayChange();
+  private _currentScreenHandler = () => this._onDisplayChange();
 
   /**
    * One-time async initialization.
@@ -589,14 +720,17 @@ export class ScreenDetector {
    * probes HDR / gamut / brightness in parallel.
    */
   async init(): Promise<ScreenInfo> {
+    this._screenDetails = await getScreenDetails();
+    this._currentScreen = this._screenDetails?.currentScreen ?? null;
+
     // Run refresh measurement and static detection concurrently
     const [refresh] = await Promise.all([
-      measureRefreshRate(),
+      measureRefreshRate(this._currentScreen),
       this._detectDisplayCapabilities(),
     ]);
 
     this._refresh = refresh;
-    this._info = buildInfo(refresh, this._hdrCapable, this._colorGamut, this._peakNits);
+    this._info = buildInfo(refresh, this._hdrCapable, this._colorGamut, this._peakNits, this._currentScreen);
     this._initialized = true;
 
     // Listen for resize / orientation changes
@@ -605,6 +739,14 @@ export class ScreenDetector {
 
     // DPR changes (e.g. dragging to a different monitor)
     this._watchDpr();
+
+    // Screen object changes are the most direct signal that the window moved
+    // to a different monitor, even when the viewport size does not change.
+    (window.screen as Screen & {
+      addEventListener?: (type: string, listener: EventListenerOrEventListenerObject) => void;
+    }).addEventListener?.("change", this._screenDetailsHandler);
+
+    this._watchScreenDetails();
 
     // HDR media query changes (e.g. user toggles HDR in display settings)
     const mqHdr = window.matchMedia("(dynamic-range: high)");
@@ -633,7 +775,8 @@ export class ScreenDetector {
 
   /** Force a re-measurement of refresh rate. */
   async remeasureRefreshRate(): Promise<void> {
-    const refresh = await measureRefreshRate();
+    this._currentScreen = this._screenDetails?.currentScreen ?? this._currentScreen;
+    const refresh = await measureRefreshRate(this._currentScreen);
     const changed = refresh.hz !== this._refresh.hz ||
                     refresh.vrrDetected !== this._refresh.vrrDetected;
     if (changed) {
@@ -652,6 +795,10 @@ export class ScreenDetector {
   private async _detectDisplayCapabilities(): Promise<void> {
     this._hdrCapable = detectHDR();
     this._colorGamut = detectColorGamut();
+    if (this._screenDetails === null) {
+      this._screenDetails = await getScreenDetails();
+    }
+    this._currentScreen = this._screenDetails?.currentScreen ?? this._currentScreen;
     this._peakNits = await detectPeakBrightness(this._hdrCapable);
 
     if (this._hdrCapable) {
@@ -677,6 +824,15 @@ export class ScreenDetector {
     this._dprMq.addEventListener("change", this._dprHandler);
   }
 
+  private _watchScreenDetails(): void {
+    this._screenDetails?.removeEventListener?.("currentscreenchange", this._screenDetailsHandler);
+    this._screenDetails?.addEventListener?.("currentscreenchange", this._screenDetailsHandler);
+
+    this._currentScreen?.removeEventListener?.("change", this._currentScreenHandler);
+    this._currentScreen = this._screenDetails?.currentScreen ?? this._currentScreen;
+    this._currentScreen?.addEventListener?.("change", this._currentScreenHandler);
+  }
+
   // ── Event handlers ────────────────────────────────────────────────
 
   private _onResize(): void {
@@ -687,11 +843,13 @@ export class ScreenDetector {
   }
 
   private _onDisplayChange(): void {
-    console.log(`[screen] DPR change detected → ${window.devicePixelRatio}`);
+    console.log(`[screen] Display change detected → DPR ${window.devicePixelRatio}`);
     this._watchDpr(); // re-register for the new DPR value
     this._update();
     // Re-measure refresh rate + re-detect HDR (new monitor may differ)
     setTimeout(async () => {
+      this._screenDetails = await getScreenDetails();
+      this._watchScreenDetails();
       await this._detectDisplayCapabilities();
       await this.remeasureRefreshRate();
       this._update();
@@ -713,7 +871,8 @@ export class ScreenDetector {
   }
 
   private _update(): void {
-    this._info = buildInfo(this._refresh, this._hdrCapable, this._colorGamut, this._peakNits);
+    this._currentScreen = this._screenDetails?.currentScreen ?? this._currentScreen;
+    this._info = buildInfo(this._refresh, this._hdrCapable, this._colorGamut, this._peakNits, this._currentScreen);
     for (const cb of this._callbacks) {
       try { cb(this._info); } catch (e) { console.warn("[screen] callback error:", e); }
     }

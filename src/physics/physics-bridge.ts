@@ -62,8 +62,47 @@ export interface PhysicsBridgeConfig {
   ppScatterRange?: number;
 }
 
+type TickParams = {
+  beta: number;
+  kCurvature: number;
+  perturbAmplitude: number;
+  lMax: number;
+  nS: number;
+  arrivalSpread: number;
+  fieldEvolution: number;
+  doubleBounce: boolean;
+  betaPP: number;
+  silkDamping?: number;
+  hueMin?: number;
+  hueRange?: number;
+  brightnessFloor?: number;
+  brightnessCeil?: number;
+  dbSecondHueShift?: number;
+  dbSecondBriScale?: number;
+  ppHueShift?: number;
+  ppBriBoost?: number;
+  ppSizeScale?: number;
+  ppBaseDelay?: number;
+  ppScatterRange?: number;
+};
+
+type TickMessage = {
+  type: "tick";
+  dt: number;
+  simTime: number;
+  particleRate: number;
+  generation: number;
+  coeffs: Float64Array;
+} & TickParams;
+
+interface WorkerTickState {
+  busy: boolean;
+  pendingTick: TickMessage | null;
+}
+
 export class PhysicsBridge {
   private workers: Worker[] = [];
+  private workerStates: WorkerTickState[] = [];
   private batches: RawParticleBatch[] = [];
   private generation = 0;
   readonly workerCount: number;
@@ -87,6 +126,76 @@ export class PhysicsBridge {
   private _lastNS: number;
   private _lastSilkDamping: number;
 
+  private _postTick(index: number, msg: TickMessage): void {
+    const state = this.workerStates[index];
+    if (!state) return;
+    if (state.busy) {
+      state.pendingTick = msg;
+      return;
+    }
+    state.busy = true;
+    state.pendingTick = null;
+    this.workers[index].postMessage(msg);
+  }
+
+  private _clearWorkerTickState(): void {
+    for (let i = 0; i < this.workerStates.length; i++) {
+      this.workerStates[i].busy = false;
+      this.workerStates[i].pendingTick = null;
+    }
+  }
+
+  private _createWorker(index: number, config: PhysicsBridgeConfig): Worker {
+    const workerSeed = (config.seed ^ (index * 0x9e3779b9)) >>> 0;
+    const worker = new Worker(
+      new URL("./physics-worker.ts", import.meta.url),
+      { type: "module" },
+    );
+
+    worker.onmessage = (e: MessageEvent) => {
+      const msg = e.data;
+      if (msg.type === "particles" && msg.count > 0 && msg.data) {
+        if (msg.generation !== undefined && msg.generation < this.generation) return;
+        this.batches.push({ data: msg.data as Float32Array, count: msg.count as number });
+      }
+      if (typeof msg.tickMs === 'number') {
+        this._workerTickMsAccum += msg.tickMs;
+        this._workerTickCount++;
+      }
+
+      const state = this.workerStates[index];
+      if (!state) return;
+      state.busy = false;
+
+      const pending = state.pendingTick;
+      if (pending && pending.generation === this.generation) {
+        state.pendingTick = null;
+        this._postTick(index, pending);
+      } else {
+        state.pendingTick = null;
+      }
+    };
+
+    worker.onerror = (err: ErrorEvent) => {
+      console.error(`[bridge] Worker ${index} error:`, err.message);
+      const state = this.workerStates[index];
+      if (state) {
+        state.busy = false;
+        state.pendingTick = null;
+      }
+    };
+
+    worker.postMessage({
+      type: "init",
+      ...config,
+      seed: workerSeed,
+      generation: this.generation,
+      coeffs: this._packCoeffs(),
+    });
+
+    return worker;
+  }
+
   constructor(config: PhysicsBridgeConfig, workerCount = 1) {
     this.workerCount = Math.max(1, workerCount);
 
@@ -107,40 +216,8 @@ export class PhysicsBridge {
 
     // Create N workers, each with a unique seed derived from the session seed
     for (let i = 0; i < this.workerCount; i++) {
-      const workerSeed = (config.seed ^ (i * 0x9e3779b9)) >>> 0;
-      const worker = new Worker(
-        new URL("./physics-worker.ts", import.meta.url),
-        { type: "module" },
-      );
-
-      worker.onmessage = (e: MessageEvent) => {
-        const msg = e.data;
-        if (msg.type === "particles" && msg.count > 0 && msg.data) {
-          // Discard batches from a stale generation (pre-reset/pre-updateBeta)
-          if (msg.generation !== undefined && msg.generation < this.generation) return;
-          // Store raw Float32Array — no per-particle object creation
-          this.batches.push({ data: msg.data as Float32Array, count: msg.count as number });
-        }
-        // Accumulate worker CPU timing (reported on every tick response)
-        if (typeof msg.tickMs === 'number') {
-          this._workerTickMsAccum += msg.tickMs;
-          this._workerTickCount++;
-        }
-      };
-
-      worker.onerror = (err: ErrorEvent) => {
-        console.error(`[bridge] Worker ${i} error:`, err.message);
-      };
-
-      worker.postMessage({
-        type: "init",
-        ...config,
-        seed: workerSeed,
-        generation: this.generation,
-        coeffs: this._packCoeffs(),
-      });
-
-      this.workers.push(worker);
+      this.workerStates.push({ busy: false, pendingTick: null });
+      this.workers.push(this._createWorker(i, config));
     }
 
     if (this.workerCount > 1) {
@@ -209,29 +286,7 @@ export class PhysicsBridge {
     dt: number,
     simTime: number,
     particleRate: number,
-    params: {
-      beta: number;
-      kCurvature: number;
-      perturbAmplitude: number;
-      lMax: number;
-      nS: number;
-      arrivalSpread: number;
-      fieldEvolution: number;
-      doubleBounce: boolean;
-      betaPP: number;
-      silkDamping?: number;
-      hueMin?: number;
-      hueRange?: number;
-      brightnessFloor?: number;
-      brightnessCeil?: number;
-      dbSecondHueShift?: number;
-      dbSecondBriScale?: number;
-      ppHueShift?: number;
-      ppBriBoost?: number;
-      ppSizeScale?: number;
-      ppBaseDelay?: number;
-      ppScatterRange?: number;
-    },
+    params: TickParams,
   ): void {
     // Update centralised perturbation coefficients
     this._syncCoeffs(params);
@@ -245,7 +300,7 @@ export class PhysicsBridge {
     // Partition rate across workers (each gets an equal share)
     const ratePerWorker = particleRate / this.workerCount;
 
-    const msg = {
+    const msg: TickMessage = {
       type: "tick" as const,
       dt,
       simTime,
@@ -255,14 +310,15 @@ export class PhysicsBridge {
       ...params,
     };
 
-    for (const worker of this.workers) {
-      worker.postMessage(msg);
+    for (let i = 0; i < this.workers.length; i++) {
+      this._postTick(i, msg);
     }
   }
 
   /** Notify all workers that β or k has changed (recreates physics engine). */
   updatePhysics(beta: number, kCurvature: number): void {
     this.generation++;
+    this._clearWorkerTickState();
     for (const worker of this.workers) {
       worker.postMessage({ type: "updateBeta", beta, kCurvature, generation: this.generation });
     }
@@ -277,12 +333,14 @@ export class PhysicsBridge {
    */
   flushPipeline(): void {
     this.generation++;
+    this._clearWorkerTickState();
     this.batches.length = 0;
   }
 
   /** Reset all workers' emitters (e.g., on user "Clear"). */
   reset(config: PhysicsBridgeConfig): void {
     this.generation++;
+    this._clearWorkerTickState();
 
     // Re-initialise central perturbation field
     const silkDamping = config.silkDamping ?? DEFAULT_SILK_DAMPING;
@@ -336,6 +394,7 @@ export class PhysicsBridge {
       worker.terminate();
     }
     this.workers = [];
+    this.workerStates = [];
     this.batches = [];
     this.generation++;
 
@@ -356,37 +415,8 @@ export class PhysicsBridge {
 
     // Create fresh workers
     for (let i = 0; i < this.workerCount; i++) {
-      const workerSeed = (config.seed ^ (i * 0x9e3779b9)) >>> 0;
-      const worker = new Worker(
-        new URL("./physics-worker.ts", import.meta.url),
-        { type: "module" },
-      );
-
-      worker.onmessage = (e: MessageEvent) => {
-        const msg = e.data;
-        if (msg.type === "particles" && msg.count > 0 && msg.data) {
-          if (msg.generation !== undefined && msg.generation < this.generation) return;
-          this.batches.push({ data: msg.data as Float32Array, count: msg.count as number });
-        }
-        if (typeof msg.tickMs === 'number') {
-          this._workerTickMsAccum += msg.tickMs;
-          this._workerTickCount++;
-        }
-      };
-
-      worker.onerror = (err: ErrorEvent) => {
-        console.error(`[bridge] Worker ${i} error:`, err.message);
-      };
-
-      worker.postMessage({
-        type: "init",
-        ...config,
-        seed: workerSeed,
-        generation: this.generation,
-        coeffs: this._packCoeffs(),
-      });
-
-      this.workers.push(worker);
+      this.workerStates.push({ busy: false, pendingTick: null });
+      this.workers.push(this._createWorker(i, config));
     }
 
     console.log(`[bridge] Restarted ${this.workerCount} physics workers`);

@@ -58,6 +58,8 @@ const FPS_SAMPLE_INTERVAL = 0.8;
 const RATE_SMOOTH_DECAY = 0.6;
 /** EMA gain factor for arrival-rate smoothing (= 1 − decay). */
 const RATE_SMOOTH_GAIN = 0.4;
+/** Cap how much extra per-frame leeway a low FPS cap can unlock. */
+const MAX_FRAME_LEEWAY_SCALE = 3.0;
 
 // Hard ceiling: a true emergency stop to prevent
 // multi-GB RAM/VRAM consumption if persistence and rate are
@@ -141,6 +143,7 @@ async function main() {
   let hits: Hit[] = [];
   let visibleCount = 0;  // count of visible hits in hits[0..visibleCount); future hits follow
   const _futureHits: Hit[] = [];  // reusable buffer for partitioning (never reallocated)
+  const pendingBatches: RawParticleBatch[] = [];
   // simTime is initialised to wall-clock on the first frame so particle
   // born-times and displayTime (wall-clock) share the same time basis.
   // This eliminates the startup-offset bug where particles were born
@@ -148,6 +151,10 @@ async function main() {
   let simTime = -1;  // sentinel: first frame will set from wall-clock
   let arrivalCounter = 0;
   let arrivalRateSmooth = 0;
+  /** Watchdog throttle: multiplied into effectiveRate when frames lag.
+   *  Decays back toward 1.0 over ~2 s.  Replaces the hard buffer trim
+   *  that caused the cull→refill oscillation. */
+  let throttleMultiplier = 1.0;
   let lastBeta = physics.beta;
   let lastK = 1;  // track spatial curvature changes
   let frozenDisplayTime = 0;  // snapshot of "now" when freeze was engaged
@@ -178,12 +185,13 @@ async function main() {
 
   // ── 4. Controls (auto-configured from hardware budget) ────────────
   const tCtrl = performance.now();
-  const { params, hud, updateHUD, setHDRMode, setForceHDRCallback } = createSensorControls(() => {
+  const { params, hud, updateHUD, setHDRMode, setForceHDRCallback, updateTargetFpsLabel } = createSensorControls(() => {
     // Full reset: terminate and recreate all workers (recovers from
     // crashes), wipe all particle state, and re-sync timing.
     // Equivalent to browser reload but keeps current settings.
     hits = [];
     visibleCount = 0;
+    pendingBatches.length = 0;
     arrivalCounter = 0;
     arrivalRateSmooth = 0;
     frozenDisplayTime = 0;
@@ -193,12 +201,14 @@ async function main() {
     rateTime = performance.now() / 1000;
     // Reset simTime so particle born-times re-sync with wall clock.
     simTime = -1;
+    simTimePauseAccum = 0;  // clear pause offset on full reset
     // Unfreeze if frozen so the simulation resumes immediately
     params.frozen = false;
     // Clear dirty/debounce state to prevent stale culling after reset
     physicsDirty = false;
     flowDirty = false;
     settingsChangeTimer = 0;
+    throttleMultiplier = 1.0;
     // Recreate physics engine from current settings
     const currentK = Number(params.kCurvature);
     physics = new ECSKPhysics(params.beta, currentK);
@@ -272,6 +282,27 @@ async function main() {
     }
     setHDRMode(renderer.hdrMode);
   });
+
+  function effectiveDisplaySyncHz(): number {
+    const overrideHz = Number(params.displaySyncHz);
+    return overrideHz > 0 ? overrideHz : (screenDetector.info.refreshRate || 60);
+  }
+
+  function effectivePresentationHz(): number {
+    const syncHz = Math.max(1, effectiveDisplaySyncHz());
+    const targetHz = Number(params.targetFps);
+    return targetHz > 0 ? Math.max(1, Math.min(targetHz, syncHz)) : syncHz;
+  }
+
+  function frameLeewayScale(): number {
+    const syncHz = Math.max(1, effectiveDisplaySyncHz());
+    return Math.min(MAX_FRAME_LEEWAY_SCALE, Math.max(1, syncHz / effectivePresentationHz()));
+  }
+
+  screenDetector.onChange((info) => {
+    updateTargetFpsLabel(effectiveDisplaySyncHz());
+  });
+
   console.log(`[main] Controls creation: ${(performance.now() - tCtrl).toFixed(0)} ms`);
 
   // ── 5. Physics worker (off-thread emission) ────────────────────
@@ -313,31 +344,88 @@ async function main() {
   // worker's transferred Float32Array to avoid per-particle object
   // creation in the bridge (saves ~50K object allocations per tick).
 
-  function ingestBatches(batches: RawParticleBatch[]): void {
-    for (let b = 0; b < batches.length; b++) {
-      const { data, count } = batches[b];
-      for (let i = 0; i < count; i++) {
-        const off = i * PARTICLE_STRIDE;
-        hits.push({
-          x: data[off],          // lx
-          y: data[off + 1],      // ly
-          hue: data[off + 3],
-          brightness: data[off + 4],
-          eps: data[off + 5],
-          size: data[off + 6],   // hitSize
-          tailAngle: data[off + 7],
-          // Use arrivalTime directly — do NOT clamp to now.
-          // Particles with arrivalTime > now (not-yet-bounced regions) are
-          // held at full brightness until their time comes, then fade normally.
-          // (Cubero & Popławski 2019 §26; Unger & Popławski 2019 eq. 3)
-          born: data[off + 2],   // arrivalTime
-        });
+  function ingestBatchPrefix(batch: RawParticleBatch, takeCount: number): void {
+    const { data } = batch;
+    for (let i = 0; i < takeCount; i++) {
+      const off = i * PARTICLE_STRIDE;
+      hits.push({
+        x: data[off],
+        y: data[off + 1],
+        hue: data[off + 3],
+        brightness: data[off + 4],
+        eps: data[off + 5],
+        size: data[off + 6],
+        tailAngle: data[off + 7],
+        born: data[off + 2],
+      });
+    }
+    arrivalCounter += takeCount;
+  }
+
+  function drainPendingBatches(maxParticles: number): void {
+    let remaining = maxParticles;
+    while (remaining > 0 && pendingBatches.length > 0) {
+      const batch = pendingBatches[0];
+      const takeCount = Math.min(batch.count, remaining);
+      ingestBatchPrefix(batch, takeCount);
+      remaining -= takeCount;
+
+      if (takeCount === batch.count) {
+        pendingBatches.shift();
+        continue;
       }
-      arrivalCounter += count;
+
+      pendingBatches[0] = {
+        data: batch.data.subarray(takeCount * PARTICLE_STRIDE),
+        count: batch.count - takeCount,
+      };
     }
   }
 
-  // ── 7. Animation loop ─────────────────────────────────────────────
+  // ── 7. Visibility / focus management ─────────────────────────────
+  // Two hard states plus an optional mobile-only soft throttle:
+  //   1. Tab visible → full speed on desktop
+  //   2. Tab hidden (switched tabs / minimized) → fully frozen, zero CPU cost;
+  //      resumes exactly where user left off
+  //   3. Mobile only: visible + window blurred → throttled (~10fps) so the
+  //      simulation keeps evolving but uses minimal resources while backgrounded
+  let tabHidden = document.hidden;
+  const throttleWhenWindowBlurred = screenInfo.isMobile;
+  let windowBlurred = !document.hasFocus();
+  /** Wall-clock time (seconds) when the tab was hidden.  0 = not hidden. */
+  let hiddenAtTime = 0;
+  /** Accumulated simTime pause offset — added to `now` so simTime doesn't jump. */
+  let simTimePauseAccum = 0;
+  /** Background throttle interval (ms). ~10 fps when window blurred. */
+  const BG_THROTTLE_INTERVAL = 100;
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) {
+      tabHidden = true;
+      // Snapshot the current wall-clock time so we can compute pause duration
+      hiddenAtTime = performance.now() / 1000;
+      // Flush any in-flight worker batches — they'd arrive with stale timestamps
+      bridge.flushPipeline();
+      pendingBatches.length = 0;
+    } else {
+      if (tabHidden && hiddenAtTime > 0) {
+        // Accumulate the pause duration so simTime doesn't jump forward
+        const pauseDuration = performance.now() / 1000 - hiddenAtTime;
+        simTimePauseAccum += pauseDuration;
+        // Reset lastTimestamp so dt doesn't spike on the first visible frame
+        lastTimestamp = 0;
+      }
+      tabHidden = false;
+      hiddenAtTime = 0;
+    }
+  });
+
+  if (throttleWhenWindowBlurred) {
+    window.addEventListener("blur", () => { windowBlurred = true; });
+    window.addEventListener("focus", () => { windowBlurred = false; });
+  }
+
+  // ── Animation loop ────────────────────────────────────────────────
   let lastTimestamp = 0;
   let frameCount = 0;
   let fpsTime = 0;
@@ -354,14 +442,26 @@ async function main() {
   function animate(timestamp: number) {
     requestAnimationFrame(animate);
 
+    // ── Tab hidden: skip everything (zero CPU cost) ──────────────
+    // Browsers already throttle rAF to ~1fps for hidden tabs, but we
+    // skip all work so workers don't receive ticks either.
+    if (tabHidden) return;
+
+    // ── Background throttle: mobile only, ~10fps when window blurred ──
+    // Desktop windows can remain fully visible on another monitor while
+    // blurred, so focus loss is not a reliable proxy for occlusion there.
+    if (throttleWhenWindowBlurred && windowBlurred && lastTimestamp > 0) {
+      if (timestamp - lastTimestamp < BG_THROTTLE_INTERVAL) return;
+    }
+
     // ── Frame throttling (target FPS) ──────────────────────────
     // When targetFps > 0, skip rAF callbacks that arrive too soon.
     // The 0.92 factor prevents systematic drift at fractional intervals
     // (e.g. 60 fps on 144 Hz — accept frames that land slightly early
     // rather than waiting an extra VSync and producing stuttery judder).
-    const targetFps = Number(params.targetFps);  // lil-gui dropdown returns string
-    if (targetFps > 0 && lastTimestamp > 0) {
-      const minInterval = 1000 / targetFps;
+    const effectiveFrameCapHz = effectivePresentationHz();
+    if (effectiveFrameCapHz > 0 && lastTimestamp > 0) {
+      const minInterval = 1000 / effectiveFrameCapHz;
       if (timestamp - lastTimestamp < minInterval * 0.92) return;
     }
 
@@ -372,21 +472,18 @@ async function main() {
     // Raw inter-frame gap in ms (before capping dt) — used by watchdog below.
     const rawGapMs = lastTimestamp > 0 ? timestamp - lastTimestamp : 16;
     lastTimestamp = timestamp;
-    const now = timestamp / 1000;
+    const now = timestamp / 1000 - simTimePauseAccum;
 
-    // ── Frame-time watchdog: emergency recovery ──────────────────
-    // If the previous frame took too long (lag spike from a massive hit
-    // buffer), aggressively shed hits so the tab becomes responsive
-    // again.  This is the safety net that makes Reset/Reset Settings
-    // work even when the simulation is overloaded.
+    // ── Frame-time watchdog: soft throttle ────────────────────────
+    // When a frame takes too long, reduce emission rate via a multiplier
+    // instead of hard-trimming the buffer.  Existing particles fade out
+    // naturally via Weibull; no pipeline flush so workers don't re-flood.
+    // The multiplier decays back toward 1.0 over ~2 s.
     if (rawGapMs > 150 && hits.length > 10_000) {
-      // Keep only the 2 000 most recent visible hits
-      const keep = Math.min(2_000, hits.length);
-      hits = hits.slice(hits.length - keep);
-      visibleCount = Math.min(visibleCount, keep);
-      // Also flush any queued worker batches that would refill the buffer
-      bridge.flushPipeline();
-      console.warn(`[main] Frame watchdog: ${rawGapMs.toFixed(0)}ms lag — emergency trim to ${keep} hits`);
+      throttleMultiplier = Math.max(0.1, throttleMultiplier * 0.5);
+      console.warn(`[main] Frame watchdog: ${rawGapMs.toFixed(0)}ms lag — throttle to ${(throttleMultiplier * 100).toFixed(0)}%`);
+    } else if (throttleMultiplier < 1.0) {
+      throttleMultiplier = Math.min(1.0, throttleMultiplier + dt * 0.5);
     }
 
     // Initialise simTime from wall-clock on the first frame so particle
@@ -493,50 +590,59 @@ async function main() {
       simTime += dt;
 
       // ── Compound-budget throttling ─────────────────────────────
-      // The four interacting cost axes are:
-      //   (a) Renderer CPU:  visibleHits ≈ rate × persistence
-      //   (b) Physics CPU:   rate × numCoeffs  (per second, across workers)
-      //   (c) Total buffer:  rate × (persistence + futureBuffer) — iterated every frame
-      //   (d) Actual buffer: if hits[] already exceeds ceiling, throttle hard
-      // We throttle the effective particle rate so neither product
-      // exceeds the hardware-derived budget.  This prevents the user
-      // from accidentally hitting multi-second frames by cranking
-      // two sliders simultaneously.
+      // Three proactive caps (renderer, physics, buffer) prevent the
+      // TOTAL emission rate (base + pair production) from exceeding
+      // what the hardware can iterate per frame.  A smooth reactive
+      // back-pressure handles transient overloads.  The watchdog
+      // throttle multiplier (set above) is applied last.
       let effectiveRate = params.particleRate;
 
-      // (a) Renderer cost: cap rate so rate × persistence ≤ maxVisibleHits
-      const maxByRenderer = budget.maxVisibleHits / Math.max(params.persistence, 0.2);
+      // Account for pair-production multiplier: workers emit
+      // (1 + ppFraction) particles per requested base particle.
+      const ppFraction = params.betaPP > 0
+        ? Math.min(3.0, params.betaPP * 929)   // PP_FRACTION_CAP=3, BETA_CR=1/929
+        : 0;
+      const totalMultiplier = 1 + ppFraction;
+
+      // When bloom is active the 4-pass pipeline makes each particle
+      // ~3× more expensive to render.  Scale down the effective ceiling
+      // so the existing CPU-side caps kick in at the right level.
+      const bloomActive = params.bloomEnabled || params.ringBloomEnabled;
+      const frameBudgetScale = frameLeewayScale();
+      const baseVisibleHitBudget = bloomActive
+        ? Math.round(budget.maxVisibleHits * 0.35)
+        : budget.maxVisibleHits;
+      const effectiveMaxHits = Math.max(1, Math.round(baseVisibleHitBudget * frameBudgetScale));
+
+      // (a) Renderer cost: cap total rate so totalRate × persistence ≤ effectiveMaxHits
+      const maxByRenderer = effectiveMaxHits / (Math.max(params.persistence, 0.2) * totalMultiplier);
       if (effectiveRate > maxByRenderer) effectiveRate = maxByRenderer;
 
-      // (b) Physics cost: cap rate so rate × numCoeffs ≤ maxPhysicsCostPerSec
+      // (b) Physics cost: cap total rate so totalRate × numCoeffs ≤ maxPhysicsCostPerSec
       const numCoeffs = params.lMax * params.lMax + 2 * params.lMax; // Σ(2l+1) for l=1..lMax
       if (numCoeffs > 0) {
-        const maxByPhysics = budget.maxPhysicsCostPerSec / numCoeffs;
+        const maxByPhysics = budget.maxPhysicsCostPerSec / (numCoeffs * totalMultiplier);
         if (effectiveRate > maxByPhysics) effectiveRate = maxByPhysics;
       }
 
-      // (c) Total buffer: cap rate so the total hit count (visible + future)
-      //     stays within 2× maxVisibleHits.  The fade-expire loop iterates
-      //     EVERY hit each frame, so this is a CPU cost cap.
+      // (c) Total buffer: cap total rate so the total hit count
+      //     stays within 2× effectiveMaxHits (fade-expire iterates every hit).
       const totalWindow = Math.max(params.persistence, 0.2)
         + params.arrivalSpread * SPREAD_TAIL_MULT + FUTURE_MARGIN;
-      const maxTotalHits = budget.maxVisibleHits * 2;
-      const maxByBuffer = maxTotalHits / totalWindow;
+      const maxTotalHits = effectiveMaxHits * 2;
+      const maxByBuffer = maxTotalHits / (totalWindow * totalMultiplier);
       if (effectiveRate > maxByBuffer) effectiveRate = maxByBuffer;
 
-      // (d) Reactive back-pressure: if the hit buffer is already above
-      //     the steady-state ceiling, sharply reduce emission so it
-      //     drains instead of growing further.  Prevents the "wave +
-      //     blip" oscillation where ingest fights with soft-cap culling.
-      const currentCeiling = Math.min(
-        Math.ceil(effectiveRate * params.persistence * 3),
-        budget.maxVisibleHits,
-      );
-      if (hits.length > currentCeiling * 1.5) {
-        // Halve the rate for every doubling above ceiling (exponential back-off)
-        const overshoot = hits.length / Math.max(currentCeiling, 1);
-        effectiveRate = Math.max(100, effectiveRate / overshoot);
+      // (d) Reactive back-pressure: smooth exponential reduction when
+      //     the buffer exceeds the effective ceiling.  Uses exp(-k)
+      //     instead of step-halving to prevent oscillation.
+      if (hits.length > effectiveMaxHits) {
+        const overshoot = hits.length / effectiveMaxHits;
+        effectiveRate *= Math.exp(-0.5 * (overshoot - 1));
       }
+
+      // Apply watchdog throttle (decays back to 1.0 between lag spikes)
+      effectiveRate *= throttleMultiplier;
 
       // Floor: never drop below 100/s (keep something visible)
       effectiveRate = Math.max(100, effectiveRate);
@@ -566,9 +672,16 @@ async function main() {
         ppScatterRange: params.ppScatterRange,
       });
 
-      // Ingest particles from previous worker tick(s) directly into hits
+      // Ingest particles from previous worker tick(s) incrementally.
+      // This prevents a temporary stall from turning into an unlimited
+      // burst of heap allocations on the next frame.
       const batches = bridge.drain();
-      if (batches.length > 0) ingestBatches(batches);
+      if (batches.length > 0) pendingBatches.push(...batches);
+      const maxIngestPerFrame = Math.max(
+        1,
+        Math.round(Math.min(budget.maxArrivalsPerFrame, budget.maxHeapInsertsPerFrame) * frameLeewayScale()),
+      );
+      drainPendingBatches(maxIngestPerFrame);
     }
 
     // ── Fade-expire & partition hits (zero allocation) ————————————
@@ -608,25 +721,23 @@ async function main() {
     }
     hits.length = visibleCount + futureIdx;
 
-    // ── Soft cap: visible-only gradual drain ──────────────────────
-    // Only cull visible particles when VISIBLE count alone exceeds
-    // the expected steady state.  Future-born particles (buffered
-    // for later display) do NOT count toward the threshold.
-    //
-    // The cap is the MINIMUM of:
-    //   - 3 × steadyTarget (original heuristic)
-    //   - budget.maxVisibleHits (compound CPU budget from hardware detection)
-    // Drain rate scales with excess: 15% for mild, up to 80% for severe.
-    const steadyTarget = Math.ceil(params.particleRate * params.persistence);
-    const visibleCeiling = Math.min(steadyTarget * 3, budget.maxVisibleHits);
-    if (visibleCount > visibleCeiling) {
-      const safeTarget = Math.min(steadyTarget, budget.maxVisibleHits);
-      const excess = visibleCount - safeTarget;
-      // Scale drain rate: 15% for mild excess → 80% for ≥4× excess
-      const excessRatio = Math.min(excess / Math.max(safeTarget, 1), 4);
-      const drainFraction = 0.15 + 0.65 * Math.min(excessRatio / 4, 1);
+    // ── Soft cap: hardware-budget drain ────────────────────────────
+    // Cull visible particles only when they exceed what the hardware
+    // can actually iterate per frame.  When bloom is active the GPU
+    // cost per particle is ~3× higher, so we use a reduced ceiling.
+    // Drain rate: 5% for mild excess → 30% for severe (≥2× ceiling).
+    const bloomOn = params.bloomEnabled || params.ringBloomEnabled;
+    const capHits = Math.max(
+      1,
+      Math.round(
+        (bloomOn ? budget.maxVisibleHits * 0.35 : budget.maxVisibleHits) * frameLeewayScale(),
+      ),
+    );
+    if (visibleCount > capHits) {
+      const excess = visibleCount - capHits;
+      const overRatio = Math.min(excess / Math.max(capHits, 1), 2);
+      const drainFraction = 0.05 + 0.25 * Math.min(overRatio, 1);
       const dropCount = Math.max(1, Math.ceil(excess * drainFraction));
-      // Shift visible+future left by dropCount (avoids O(N) splice overhead)
       const newLen = hits.length - dropCount;
       for (let i = dropCount; i < hits.length; i++) {
         hits[i - dropCount] = hits[i];
@@ -641,7 +752,7 @@ async function main() {
     const futureCount = hits.length - visibleCount;
     const futureWindow = params.arrivalSpread * SPREAD_TAIL_MULT + FUTURE_MARGIN;
     const maxFuture = Math.min(
-      budget.maxVisibleHits,
+      Math.max(1, Math.round(budget.maxVisibleHits * frameLeewayScale())),
       Math.max(10_000, Math.ceil(params.particleRate * futureWindow * 2)),
     );
     if (futureCount > maxFuture) {
@@ -662,7 +773,8 @@ async function main() {
     renderer.hitBaseSize = params.hitSize;
     renderer.brightnessMultiplier = params.brightness;
     renderer.roundParticles = params.roundParticles;
-    renderer.useBloom = params.bloomEnabled;   // toggle
+    renderer.useBloom = params.bloomEnabled || params.ringBloomEnabled;  // either bloom activates pipeline
+    renderer.particleBloomEnabled = params.bloomEnabled;
     renderer.bloomStrength = params.bloomStrength;
     renderer.bloomRadius = params.bloomRadius;
     renderer.bloomThreshold = params.bloomThreshold;
@@ -675,6 +787,7 @@ async function main() {
     renderer.ringOpacity = params.ringOpacity;
     renderer.ringColor = parseInt(params.ringColor.replace('#', ''), 16);
     renderer.ringWidthPx = params.ringWidthPx;
+    renderer.ringBloomEnabled = params.ringBloomEnabled;
     renderer.ringBloomStrength = params.ringBloomStrength;
     renderer.ringBloomRadius = params.ringBloomRadius;
     renderer.ringAutoColor = params.ringAutoColor;
@@ -733,8 +846,9 @@ async function main() {
       hud.fps = String(fps);
       // Update screen info in HUD (may change if moved between monitors)
       const si = screenDetector.info;
+      const effectiveSyncHz = effectiveDisplaySyncHz();
       hud.screen = `${si.screenWidth}×${si.screenHeight}`;
-      hud.hz = `${si.refreshRate}${si.vrrDetected ? " VRR" : ""}`;
+      hud.hz = `${effectiveSyncHz}${Number(params.displaySyncHz) > 0 ? " override" : ""}${si.vrrDetected ? " VRR" : ""}`;
       hud.hdr = renderer.hdrMode === 'full'
         ? `FULL (~${si.peakBrightnessNits ?? '?'} nits)`
         : renderer.hdrMode === 'soft'
@@ -756,8 +870,7 @@ async function main() {
       // GPU load: measured render time as fraction of frame budget
       if (renderFrameCount > 0) {
         const avgRenderMs = renderMsAccum / renderFrameCount;
-        const targetFpsVal = targetFps > 0 ? targetFps : (screenDetector.info.refreshRate || 60);
-        const frameBudgetMs = 1000 / targetFpsVal;
+        const frameBudgetMs = 1000 / effectivePresentationHz();
         const rawGpuLoad = avgRenderMs / frameBudgetMs;
         gpuLoadSmooth = gpuLoadSmooth * 0.6 + rawGpuLoad * 0.4;
       }
