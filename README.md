@@ -1,20 +1,31 @@
 # Birth of a Universe
 
-Real-time visualization of the **torsion-bounce** inside a black hole, based on
-Nikodem Poplawski's Einstein-Cartan-Sciama-Kibble (ECSK) cosmology.
+Real-time visualization of the bounce hypersurface inside a black hole, based on
+Nikodem Poplawski's Einstein-Cartan-Sciama-Kibble (ECSK) torsion cosmology.
 
-The screen shows a 2D "bounce sensor" — a Lambert equal-area projection of the
-S² hypersurface at the moment spin-torsion halts gravitational collapse and
-reverses it into expansion. Each glowing point is a comoving fluid element
-reaching its local bounce. Perturbations in the spin parameter β create
-structured patterns that encode the physics of the inhomogeneous bounce.
+The app renders a 2D bounce sensor: a Lambert equal-area projection of the S²
+hypersurface at the instant spin-torsion halts collapse and reverses it into
+expansion. Each glowing point represents a comoving fluid element reaching its
+local bounce. Structured perturbations in the spin parameter $\beta$ turn that
+hypersurface into an evolving pattern of color, brightness, and timing.
+
+## What the app does
+
+- Simulates ECSK bounce physics with perturbations on the sphere.
+- Renders the sensor in real time with Three.js on the WebGPU backend.
+- Uses worker-based physics generation so emission and rendering stay decoupled.
+- Adapts slider limits and visual defaults to detected hardware capability.
+- Includes a mobile layout, HUD readouts, bloom controls, and an optional 3D bounce explainer.
 
 ## Requirements
 
-- A browser with **WebGPU** support (Chrome 121+, Edge 121+, or Firefox Nightly with `dom.webgpu.enabled`)
-- Node.js 18+ (for the dev server)
+- Node.js 18+
+- A WebGPU-capable browser such as recent Chrome or Edge
+- A GPU/driver stack with WebGPU enabled
 
-## Quick Start
+There is no non-WebGPU fallback path. If renderer initialization fails, the app will stop at startup.
+
+## Quick start
 
 ```bash
 git clone https://github.com/8Rotation/Birth-of-a-Universe.git
@@ -23,55 +34,115 @@ npm install
 npm run dev
 ```
 
-Open the URL shown by Vite (typically `http://localhost:5173/`).
+Open the local Vite URL, usually `http://localhost:5173/`.
 
-## Build
+On Windows, you can also use `double click to start.bat` for a local launch flow.
+
+## Scripts
 
 ```bash
-npm run build     # TypeScript check + Vite production build → dist/
-npm run preview   # Serve the built output locally
+npm run dev        # start Vite dev server
+npm run build      # run TypeScript compilation and production build
+npm run preview    # serve the production build locally
+npm run test       # run the Vitest suite once
+npm run test:watch # run tests in watch mode
 ```
 
-## Controls
+## Controls and readouts
 
-| Group | Parameter | What it does |
-|-------|-----------|--------------|
-| **Collapse Physics** | β | Spin parameter — torsion-to-radiation energy ratio |
-| | Inhomogeneity | Perturbation amplitude across the S² sphere |
-| | Turbulence | Maximum spherical harmonic multipole (l_max) |
-| **Flow** | Shell rate | How many shells spawn per second |
-| | Particles/shell | Points sampled on S² per shell |
-| | Time dilation | Stretches arrival time spread for visual clarity |
-| **Sensor Display** | Hit size / Brightness / Persistence / Bloom | Visual tuning |
-| **Readout** | β, a_min, w_eff, S, flux, visible, FPS | Live physics state |
+The UI is split into two panels:
 
-## Project Structure
+- Left: read-only HUD for physics state, performance, and hardware detection
+- Right: interactive controls for simulation, display, and tuning
 
-```
+Current control groups:
+
+- Collapse Physics: $\beta$, perturbation strength, $\ell_{\max}$, spectral tilt, Silk damping, spatial curvature, double-bounce, pair production
+- Double-Bounce Tuning: secondary hue and brightness shaping when closed-universe double bounce is enabled
+- Production Tuning: visual timing and appearance of pair-produced particles
+- Flow: freeze, reset, reset settings, display sync override, target frame rate, birth rate, drift, arrival spread
+- Hue Ramp: hue start/range and brightness floor/ceiling
+- Particles: size, brightness, persistence, fade sharpness, edge softness, round particles, auto-brightness
+- Ring: ring color, opacity, width, auto-color, ring bloom
+- Particle Bloom: bloom enable, quality, strength, radius, threshold, soft-HDR exposure
+- Camera: background color and zoom
+- Color Tuning: lightness and saturation floor/range
+
+The bottom bar also provides fullscreen, UI hide/show, and randomize actions. On mobile, it also exposes a force-HDR toggle.
+
+## Physics model
+
+The implementation centers on the dimensionless ECSK Friedmann equation:
+
+$$
+\left(\frac{d\bar{a}}{d\bar{\tau}}\right)^2 = \frac{1}{\bar{a}^2} - \frac{\beta}{\bar{a}^4} - 1
+$$
+
+with bounce condition:
+
+$$
+\bar{a}_{\min}^2 = \frac{1 - \sqrt{1 - 4\beta}}{2}
+$$
+
+The visualization maps local perturbations on S² into changes in bounce timing and appearance. The project also includes extensions for closed-universe double-bounce behavior and particle-production-inspired visual modes.
+
+Primary references include:
+
+- Poplawski 2010b, 2012, 2014, 2020, 2020b, 2021, 2025
+- Unger and Poplawski 2019
+- Cubero and Poplawski 2019
+- Hehl and Datta 1971
+- Hehl et al. 1976
+
+For the fuller derivation and audit trail, see [PROJECT_SCOPE.md](PROJECT_SCOPE.md) and [EQUATION_CATALOG.md](EQUATION_CATALOG.md).
+
+## Project structure
+
+```text
 src/
+  main.ts                  app startup, orchestration, animation loop
   physics/
-    ecsk-physics.ts     — Bounce physics (Friedmann + torsion)
-    perturbation.ts     — Spherical harmonic perturbation field
-    shell.ts            — S² sampling, Lambert projection, arrival sorting
+    ecsk-physics.ts        ECSK bounce equations and derived quantities
+    perturbation.ts        spherical-harmonic perturbation field
+    shell.ts               shell sampling and Lambert projection
+    physics-bridge.ts      worker bridge and batch scheduling
+    physics-worker.ts      worker-side particle generation
   rendering/
-    renderer.ts         — 2D sensor: orthographic camera, additive blend, bloom
+    renderer.ts            WebGPU renderer, particles, ring, bloom
   ui/
-    controls.ts         — lil-gui panels
-  main.ts               — Orchestration
-sources_extracted/      — Extracted text from source papers (committed)
-sources/                — Original PDFs (gitignored)
+    controls.ts            GUI panels and HUD
+    hardware-info.ts       hardware capability detection and budgets
+    screen-info.ts         display and refresh-rate detection
+    tooltips.ts            tooltip content
+  types/
+    three-webgpu.d.ts      local typing support for Three/WebGPU APIs
+
+simplified-3d-illustration/
+  index.html               standalone bounce explainer
+
+source-processing/
+  extract_*.py             research-source extraction utilities
+
+sources_extracted/
+  *.txt                    extracted paper text corpus
+
+sources_marker/
+  *.md                     extracted/converted research notes
 ```
 
-## Physics
+## Tests
 
-All equations are verified against the source papers:
+The repository includes targeted unit tests for physics, perturbation, shell sampling, and screen detection via Vitest.
 
-- **Poplawski 2010b** — Friedmann equation with torsion
-- **Poplawski 2014** — Bounce condition, time evolution
-- **Poplawski 2020, 2020b** — Kantowski-Sachs extension, collapse dynamics
-- **Hehl & Datta 1971, Hehl et al. 1976** — ECSK theory foundations
+## Research assets
 
-See [PROJECT_SCOPE.md](PROJECT_SCOPE.md) for full equation list and audit details.
+This repository carries both the visualization code and a working research corpus:
+
+- [PROJECT_SCOPE.md](PROJECT_SCOPE.md): project framing, theory notes, and architecture summary
+- [EQUATION_CATALOG.md](EQUATION_CATALOG.md): curated equation index across the source set
+- `sources_extracted/`: extracted plain text from papers
+- `sources_marker/`: markdown conversions where available
+- `source-processing/`: scripts used to build those derived artifacts
 
 ## License
 

@@ -190,11 +190,13 @@ const OLED_CSS = `
   font-variant-numeric: tabular-nums;
   border: 1px solid #1a1a1a !important;
 }
+.lil-gui .lil-title,
 .lil-gui .title {
   font-size: 11px;
   line-height: 20px;
   padding: 2px 8px;
 }
+.lil-gui .lil-controller,
 .lil-gui .controller {
   min-height: 20px;
   padding: 1px 0;
@@ -207,16 +209,18 @@ const OLED_CSS = `
 .ecsk-panel {
   transition: opacity 0.3s ease;
 }
+.ecsk-panel.lil-gui.lil-closed,
 .ecsk-panel.lil-gui.closed {
   opacity: 0.05;
 }
+.ecsk-panel.lil-gui.lil-closed:hover,
 .ecsk-panel.lil-gui.closed:hover {
   opacity: 0.85;
 }
-.ecsk-panel.lil-gui:not(.closed) {
+.ecsk-panel.lil-gui:not(.lil-closed):not(.closed) {
   opacity: 0.88;
 }
-.ecsk-panel.lil-gui:not(.closed):hover {
+.ecsk-panel.lil-gui:not(.lil-closed):not(.closed):hover {
   opacity: 1;
 }
 
@@ -236,13 +240,24 @@ const OLED_CSS = `
   right: auto !important;
   width: 245px !important;
 }
+.ecsk-readout > .lil-title,
+.ecsk-readout > .title {
+  font-size: 13px;
+  line-height: 24px;
+  font-weight: 700;
+  letter-spacing: 0.015em;
+  color: #dedede;
+}
+.ecsk-readout .lil-controller,
 .ecsk-readout .controller {
   min-height: 18px;
   padding: 0;
 }
+.ecsk-readout .lil-controller .lil-name,
 .ecsk-readout .controller .name {
   font-size: 10px;
 }
+.ecsk-readout .lil-controller .lil-widget,
 .ecsk-readout .controller .widget {
   font-size: 10px;
 }
@@ -255,6 +270,20 @@ const OLED_CSS = `
   width: 295px !important;
   max-height: 100vh !important;
   overflow-y: auto !important;
+}
+.ecsk-controls > .lil-title,
+.ecsk-controls > .title {
+  font-size: 13px;
+  line-height: 24px;
+  padding: 3px 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: #e7e7e7;
+  background-image: linear-gradient(90deg, rgba(255, 96, 96, 0.96), rgba(120, 220, 120, 0.94), rgba(110, 180, 255, 0.96));
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  text-shadow: 0 0 10px rgba(120, 180, 255, 0.08);
 }
 /* Thin scrollbar for the controls panel */
 .ecsk-controls::-webkit-scrollbar { width: 4px; }
@@ -328,18 +357,19 @@ const OLED_CSS = `
 /* ── Mobile adaptations ────────────────────────────────────────── */
 .ecsk-mobile .ecsk-readout {
   position: fixed !important;
-  top: auto !important;
-  bottom: 0 !important;
+  top: 0 !important;
+  bottom: auto !important;
   left: 0 !important;
   right: 0 !important;
   width: 100% !important;
   max-height: 40vh !important;
-  overflow-y: auto !important;
+  overflow: hidden !important;
   z-index: 1001 !important;
 }
 .ecsk-mobile .ecsk-controls {
   position: fixed !important;
-  top: 0 !important;
+  top: auto !important;
+  bottom: 0 !important;
   left: 0 !important;
   right: 0 !important;
   width: 100% !important;
@@ -347,19 +377,22 @@ const OLED_CSS = `
   overflow-y: auto !important;
 }
 /* On mobile: collapsed panels are semi-visible (no hover needed) */
+.ecsk-mobile .ecsk-panel.lil-gui.lil-closed,
 .ecsk-mobile .ecsk-panel.lil-gui.closed {
   opacity: 0.25;
 }
 /* Tap opens — keep translucent so simulation stays visible */
-.ecsk-mobile .ecsk-panel.lil-gui:not(.closed) {
+.ecsk-mobile .ecsk-panel.lil-gui:not(.lil-closed):not(.closed) {
   opacity: 0.72;
 }
 /* Larger touch targets */
+.ecsk-mobile .lil-gui .lil-title,
 .ecsk-mobile .lil-gui .title {
   font-size: 14px;
   line-height: 38px;
   padding: 6px 14px;
 }
+.ecsk-mobile .lil-gui .lil-controller,
 .ecsk-mobile .lil-gui .controller {
   min-height: 32px;
   padding: 3px 0;
@@ -378,6 +411,35 @@ const OLED_CSS = `
   backdrop-filter: blur(4px);
   -webkit-backdrop-filter: blur(4px);
 }
+.ecsk-mobile .ecsk-readout > .lil-title,
+.ecsk-mobile .ecsk-readout > .title {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  top: auto;
+  z-index: 2;
+  font-size: 16px;
+  line-height: 42px;
+  padding: 7px 14px;
+}
+.ecsk-mobile .ecsk-readout > .lil-children,
+.ecsk-mobile .ecsk-readout > .children {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 48px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+.ecsk-mobile .ecsk-controls > .lil-title,
+.ecsk-mobile .ecsk-controls > .title {
+  font-size: 16px;
+  line-height: 42px;
+  padding: 7px 14px;
+}
 
 @media (orientation: landscape) {
   .ecsk-mobile .ecsk-panel.lil-gui {
@@ -387,7 +449,8 @@ const OLED_CSS = `
     height: 100vh !important;
     max-height: 100vh !important;
     overflow: hidden !important;
-    transition: opacity 0.3s ease, transform 0.3s ease;
+    clip-path: inset(0 0 0 0);
+    transition: opacity 0.3s ease, clip-path 0.3s ease;
   }
 
   .ecsk-mobile .ecsk-readout {
@@ -396,6 +459,7 @@ const OLED_CSS = `
     bottom: 0 !important;
     width: min(42vw, 320px) !important;
     max-height: 100vh !important;
+    overflow: hidden !important;
   }
 
   .ecsk-mobile .ecsk-controls {
@@ -406,7 +470,7 @@ const OLED_CSS = `
     max-height: 100vh !important;
   }
 
-  .ecsk-mobile .ecsk-panel.lil-gui > .title {
+  .ecsk-mobile .ecsk-panel.lil-gui > .lil-title {
     position: absolute;
     top: 0;
     bottom: 0;
@@ -424,19 +488,19 @@ const OLED_CSS = `
     z-index: 2;
   }
 
-  .ecsk-mobile .ecsk-readout > .title {
+  .ecsk-mobile .ecsk-readout > .lil-title {
     left: 0;
     border-right: 1px solid #222;
   }
 
-  .ecsk-mobile .ecsk-controls > .title {
+  .ecsk-mobile .ecsk-controls > .lil-title {
     right: 0;
     border-left: 1px solid #222;
     writing-mode: vertical-lr;
   }
 
-  .ecsk-mobile .ecsk-readout > .children,
-  .ecsk-mobile .ecsk-controls > .children {
+  .ecsk-mobile .ecsk-readout > .lil-children,
+  .ecsk-mobile .ecsk-controls > .lil-children {
     position: absolute;
     top: 0;
     bottom: 0;
@@ -445,12 +509,13 @@ const OLED_CSS = `
     -webkit-overflow-scrolling: touch;
   }
 
-  .ecsk-mobile .ecsk-readout > .children {
+  .ecsk-mobile .ecsk-readout > .lil-children {
     left: 38px;
     right: 0;
+    bottom: 0;
   }
 
-  .ecsk-mobile .ecsk-controls > .children {
+  .ecsk-mobile .ecsk-controls > .lil-children {
     top: 34px;
     left: 0;
     right: 38px;
@@ -467,60 +532,85 @@ const OLED_CSS = `
     background: rgba(0, 0, 0, 0.28);
   }
 
+  .ecsk-mobile .ecsk-panel.lil-gui.lil-closed,
   .ecsk-mobile .ecsk-panel.lil-gui.closed {
     opacity: 0.34;
   }
 
+  .ecsk-mobile .ecsk-readout.lil-gui.lil-closed,
   .ecsk-mobile .ecsk-readout.lil-gui.closed {
-    transform: translateX(calc(-100% + 38px));
+    clip-path: inset(0 calc(100% - 38px) 0 0);
   }
 
+  .ecsk-mobile .ecsk-controls.lil-gui.lil-closed,
   .ecsk-mobile .ecsk-controls.lil-gui.closed {
-    transform: translateX(calc(100% - 38px));
+    clip-path: inset(0 0 0 calc(100% - 38px));
   }
 
-  .ecsk-mobile .ecsk-panel.lil-gui:not(.closed) {
+  .ecsk-mobile .ecsk-panel.lil-gui:not(.lil-closed):not(.closed) {
     opacity: 0.82;
-    transform: translateX(0);
+    clip-path: inset(0 0 0 0);
+  }
+
+  .ecsk-mobile .ecsk-panel.lil-gui.lil-closed > .lil-children,
+  .ecsk-mobile .ecsk-panel.lil-gui.closed > .children,
+  .ecsk-mobile .ecsk-panel.lil-gui.lil-closed > .ecsk-bounce-link,
+  .ecsk-mobile .ecsk-panel.lil-gui.closed > .ecsk-bounce-link {
+    pointer-events: none;
   }
 }
 
 /* ── Mobile tooltip info icons ─────────────────────────────────── */
-.ecsk-mobile .lil-gui .controller .name {
+.ecsk-mobile .lil-gui .lil-controller .lil-name,
+.ecsk-mobile .lil-gui .controller .name,
+.ecsk-mobile .lil-gui .controller .lil-name {
   display: flex;
   align-items: center;
   gap: 8px;
+  overflow: visible;
+}
+.ecsk-mobile .lil-gui .lil-controller .lil-name.ecsk-name-with-info,
+.ecsk-mobile .lil-gui .controller .name.ecsk-name-with-info,
+.ecsk-mobile .lil-gui .controller .lil-name.ecsk-name-with-info {
+  min-width: var(--name-width);
+}
+.ecsk-label-text {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .ecsk-info-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 17px;
-  height: 17px;
-  min-width: 17px;
+  width: 19px;
+  height: 19px;
+  min-width: 19px;
   border-radius: 50%;
-  border: 1px solid #555;
-  color: #777;
-  font-size: 10px;
+  border: 1px solid #888;
+  color: #ddd;
+  font-size: 11px;
   font-style: italic;
   font-family: Georgia, 'Times New Roman', serif;
   line-height: 1;
   flex-shrink: 0;
   cursor: pointer;
   -webkit-tap-highlight-color: transparent;
-  background: transparent;
+  background: rgba(255, 255, 255, 0.08);
   padding: 0;
   box-sizing: border-box;
 }
 .ecsk-info-btn.active {
-  color: #ddd;
-  border-color: #999;
-  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+  border-color: #b8d8ff;
+  background: rgba(108, 204, 255, 0.18);
 }
 .ecsk-info-btn:active {
   background: #333;
-  color: #ccc;
-  border-color: #777;
+  color: #fff;
+  border-color: #aaa;
 }
 
 /* ── Mobile tooltip overlay (blocks interaction while tooltip is open) ── */
@@ -714,7 +804,7 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
   };
 
   // ── Right panel: Controls ─────────────────────────────────────────
-  const gui = new GUI({ title: "ECSK Bounce Sensor" });
+  const gui = new GUI({ title: "Birth of a Universe" });
   gui.domElement.classList.add("ecsk-panel", "ecsk-controls");
   gui.domElement.style.zIndex = "1000";
   if (isMobile) gui.close();  // start collapsed on mobile — maximise canvas
@@ -723,7 +813,7 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
   {
     const link = document.createElement("a");
     link.className = "ecsk-bounce-link";
-    link.textContent = "What is a bounce?  ↗";
+    link.textContent = "Open 3D Bounce Explainer  ↗";
     link.href = "simplified-3d-illustration/index.html";
     link.target = "_blank";
     link.rel = "noopener";
@@ -742,21 +832,18 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
       Object.assign(link.style, { padding: "8px 12px 10px", fontSize: "13px" });
     }
     // Insert right after the title bar
-    const titleBar = gui.domElement.querySelector(".title");
-    if (titleBar && titleBar.nextSibling) {
-      titleBar.parentNode!.insertBefore(link, titleBar.nextSibling);
+    const titleBar = gui.domElement.querySelector(".lil-title, .title");
+    const children = gui.domElement.querySelector(".lil-children, .children");
+    if (titleBar?.parentNode && children) {
+      titleBar.parentNode.insertBefore(link, children);
     } else {
-      gui.domElement.querySelector(".children")?.prepend(link);
+      children?.prepend(link);
     }
   }
 
   // ── Override Mode toggle ──────────────────────────────────────────
   const overrideState = { overrideMode: false };
-  const overrideCtrl = gui.add(overrideState, "overrideMode").name("⚙ Override Mode").onChange((v: boolean) => {
-    rebuildNumericControllers(v);
-    gui.domElement.classList.toggle("ecsk-override", v);
-    (overrideCtrl.domElement as HTMLElement).style.color = v ? "red" : "";
-  });
+  let overrideCtrl: Controller;
 
   // ── Collapse Physics ──────────────────────────────────────────────
   const physics = gui.addFolder("Collapse Physics");
@@ -872,6 +959,12 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
   // ── Color Tuning (top-level folder) ───────────────────────────────
   const colorTuning = gui.addFolder("Color Tuning");
   colorTuning.close();  // collapsed by default
+
+  overrideCtrl = gui.add(overrideState, "overrideMode").name("⚙ Override Mode").onChange((v: boolean) => {
+    rebuildNumericControllers(v);
+    gui.domElement.classList.toggle("ecsk-override", v);
+    (overrideCtrl.domElement as HTMLElement).style.color = v ? "red" : "";
+  });
 
   // ── Numeric controller descriptors ────────────────────────────────
   // Normal-mode max values adapt to hardware tier via `sl`.
@@ -1128,16 +1221,40 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
 
   let panelOverlayEl: HTMLDivElement | null = null;
 
+  function isGuiClosed(guiInstance: GUI): boolean {
+    return guiInstance.domElement.classList.contains("lil-closed") || guiInstance.domElement.classList.contains("closed");
+  }
+
+  function syncMobilePanelState(): void {
+    if (!isMobile) return;
+
+    const controlsOpen = !isGuiClosed(gui);
+    const readoutOpen = !isGuiClosed(readoutGui);
+    const body = document.body;
+
+    body.classList.toggle("ecsk-mobile-controls-open", controlsOpen);
+    body.classList.toggle("ecsk-mobile-readout-open", readoutOpen);
+    body.classList.toggle("ecsk-mobile-both-open", controlsOpen && readoutOpen);
+
+    if (controlsOpen) {
+      const controlsHeight = Math.ceil(gui.domElement.getBoundingClientRect().height);
+      body.style.setProperty("--ecsk-mobile-controls-height", `${controlsHeight}px`);
+    } else {
+      body.style.removeProperty("--ecsk-mobile-controls-height");
+    }
+
+    if (panelOverlayEl) {
+      panelOverlayEl.classList.toggle("visible", controlsOpen || readoutOpen);
+    }
+  }
+
   function syncMobilePanelOverlay(): void {
-    if (!panelOverlayEl || !isMobile) return;
-    const controlsOpen = !gui.domElement.classList.contains("closed");
-    const readoutOpen = !readoutGui.domElement.classList.contains("closed");
-    panelOverlayEl.classList.toggle("visible", controlsOpen || readoutOpen);
+    syncMobilePanelState();
   }
 
   function attachMobilePanelDismiss(guiInstance: GUI): void {
     if (!isMobile) return;
-    const titleEl = guiInstance.domElement.querySelector(".title") as HTMLElement | null;
+    const titleEl = guiInstance.domElement.querySelector(".lil-title, .title") as HTMLElement | null;
     if (!titleEl) return;
     titleEl.addEventListener("click", () => {
       requestAnimationFrame(syncMobilePanelOverlay);
@@ -1159,7 +1276,8 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
     document.body.appendChild(panelOverlayEl);
     attachMobilePanelDismiss(gui);
     attachMobilePanelDismiss(readoutGui);
-    syncMobilePanelOverlay();
+    window.addEventListener("resize", syncMobilePanelState);
+    syncMobilePanelState();
   }
 
   const physicsReadout = readoutGui.addFolder("Physics");
@@ -1320,10 +1438,18 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
 
     if (isMobile) {
       // Mobile: add a leading (i) icon that toggles the tooltip via a blocking overlay.
-      const nameEl = domElement.querySelector(".name") as HTMLElement | null;
+      const nameEl = domElement.querySelector(".name, .lil-name") as HTMLElement | null;
       if (!nameEl) return;
       // Don't add duplicate icons (e.g. after rebuild)
       if (nameEl.querySelector(".ecsk-info-btn")) return;
+
+      nameEl.classList.add("ecsk-name-with-info");
+
+      const labelText = document.createElement("span");
+      labelText.className = "ecsk-label-text";
+      while (nameEl.firstChild) {
+        labelText.appendChild(nameEl.firstChild);
+      }
 
       const infoBtn = document.createElement("button");
       infoBtn.className = "ecsk-info-btn";
@@ -1344,7 +1470,7 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
         e.stopPropagation();
       }, { passive: false });
       infoBtn.addEventListener("click", toggleMobileTooltip);
-      nameEl.prepend(infoBtn);
+      nameEl.append(infoBtn, labelText);
       return;
     }
 

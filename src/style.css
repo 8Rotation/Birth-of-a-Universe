@@ -70,6 +70,7 @@ body.ui-hidden.ui-peek #bottom-bar {
   left: 50%;
   transform: translateX(-50%);
   bottom: 20px;
+  transition: bottom 0.25s ease, opacity 0.25s ease, transform 0.25s ease;
 }
 .ecsk-mobile #bottom-bar .bar-btn {
   width: 48px;
@@ -77,4 +78,16 @@ body.ui-hidden.ui-peek #bottom-bar {
   font-size: 22px;
   line-height: 48px;
   opacity: 0.6;
+}
+
+@media (orientation: portrait) {
+  .ecsk-mobile.ecsk-mobile-controls-open:not(.ecsk-mobile-both-open) #bottom-bar {
+    bottom: calc(var(--ecsk-mobile-controls-height, 0px) + 12px);
+  }
+
+  .ecsk-mobile.ecsk-mobile-both-open #bottom-bar {
+    opacity: 0;
+    pointer-events: none;
+    transform: translateX(-50%) translateY(8px);
+  }
 }
