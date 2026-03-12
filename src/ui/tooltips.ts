@@ -381,8 +381,8 @@ export const TOOLTIPS: Record<string, Tooltip> = {
   randomSettings: {
     simple: "Randomise all settings within safe ranges — explore unexpected combinations.",
     visual:
-      "Every numeric parameter gets a random value. Boolean toggles are randomised. " +
-      "Curvature k is uniformly random among {−1, 0, +1}. Colours are randomised.",
+      "Every numeric parameter gets a random value. Most boolean toggles are randomised. " +
+      "Curvature k is uniformly random among {−1, 0, +1}. Ring auto-colour is forced on.",
     performance:
       "A compound-cost safety clamp ensures the randomised combination stays within " +
       "your hardware budget. particle_rate is scaled down if the combination of " +

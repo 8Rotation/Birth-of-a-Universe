@@ -532,8 +532,7 @@ const OLED_CSS = `
     height: 100vh !important;
     max-height: 100vh !important;
     overflow: hidden !important;
-    clip-path: inset(0 0 0 0);
-    transition: opacity 0.3s ease, clip-path 0.3s ease;
+    transition: opacity 0.3s ease;
   }
 
   .ecsk-mobile .ecsk-readout {
@@ -569,6 +568,12 @@ const OLED_CSS = `
     z-index: 2;
   }
 
+  /* Hide ▾/▸ arrow on root panel titles only (keep for sub-folders) */
+  .ecsk-mobile .ecsk-panel.lil-gui.lil-root > .lil-title:before,
+  .ecsk-mobile .ecsk-panel.lil-gui.lil-root > .title:before {
+    display: none;
+  }
+
   .ecsk-mobile .ecsk-panel.lil-gui > .lil-title .ecsk-panel-title-label,
   .ecsk-mobile .ecsk-panel.lil-gui > .title .ecsk-panel-title-label {
     display: inline-block;
@@ -591,9 +596,11 @@ const OLED_CSS = `
     -webkit-overflow-scrolling: touch;
   }
 
+  /* Collapsed: fully transparent so background doesn't linger */
   .ecsk-mobile .ecsk-panel.lil-gui.lil-closed,
   .ecsk-mobile .ecsk-panel.lil-gui.closed {
-    opacity: 0.34;
+    opacity: 0 !important;
+    pointer-events: none;
   }
 
   .ecsk-mobile .ecsk-panel.lil-gui:not(.lil-closed):not(.closed) {
@@ -1086,7 +1093,7 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
     params.roundParticles = rand() > 0.3;    // bias toward round
     params.bloomEnabled = rand() > 0.5;
     params.ringBloomEnabled = rand() > 0.5;
-    params.ringAutoColor = rand() > 0.5;
+    params.ringAutoColor = true;
     params.autoBrightness = rand() > 0.6;
     // kCurvature: pick -1, 0, or 1 uniformly
     params.kCurvature = ([-1, 0, 1] as const)[Math.floor(rand() * 3)];
