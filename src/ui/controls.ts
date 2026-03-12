@@ -586,7 +586,7 @@ const OLED_CSS = `
 
   .ecsk-mobile .ecsk-readout > .lil-title .ecsk-panel-title-label,
   .ecsk-mobile .ecsk-readout > .title .ecsk-panel-title-label {
-    transform: rotate(90deg);
+    transform: var(--ecsk-readout-rotate, rotate(90deg));
   }
 
   .ecsk-mobile .ecsk-controls > .lil-title,
@@ -597,7 +597,7 @@ const OLED_CSS = `
 
   .ecsk-mobile .ecsk-controls > .lil-title .ecsk-panel-title-label,
   .ecsk-mobile .ecsk-controls > .title .ecsk-panel-title-label {
-    transform: rotate(-90deg);
+    transform: var(--ecsk-controls-rotate, rotate(-90deg));
   }
 
   .ecsk-mobile .ecsk-controls > .lil-title,
@@ -660,57 +660,41 @@ const OLED_CSS = `
 }
 
 /* ── Mobile tooltip info icons ─────────────────────────────────── */
-.ecsk-mobile .lil-gui .lil-controller .lil-name,
-.ecsk-mobile .lil-gui .controller .name,
-.ecsk-mobile .lil-gui .controller .lil-name {
+.ecsk-info-btn {
   display: flex;
   align-items: center;
-  gap: 5px;
-  overflow: hidden;
-}
-.ecsk-mobile .lil-gui .lil-controller .lil-name.ecsk-name-with-info,
-.ecsk-mobile .lil-gui .controller .name.ecsk-name-with-info,
-.ecsk-mobile .lil-gui .controller .lil-name.ecsk-name-with-info {
-  min-width: var(--name-width);
-}
-.ecsk-info-btn {
-  display: inline-flex;
-  align-items: center;
   justify-content: center;
-  width: 11px;
-  height: 11px;
-  min-width: 11px;
-  border-radius: 50%;
-  border: 1px solid #888;
-  color: #ddd;
-  font-size: 7px;
-  font-style: italic;
-  font-family: Georgia, 'Times New Roman', serif;
-  line-height: 1;
+  width: 16px;
+  min-width: 16px;
+  height: 100%;
   flex-shrink: 0;
+  padding: 0 2px 0 0;
+  box-sizing: border-box;
   cursor: pointer;
   -webkit-tap-highlight-color: transparent;
   touch-action: manipulation;
-  background: rgba(255, 255, 255, 0.08);
-  padding: 0;
-  box-sizing: border-box;
+  background: none;
+  border: none;
+  color: rgba(255, 255, 255, 0.35);
+  /* Override lil-gui disabled pointer-events so readout info icons work */
+  pointer-events: auto !important;
+}
+.ecsk-info-btn svg {
+  display: block;
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+  pointer-events: none;
 }
 .ecsk-info-btn.active {
-  color: #fff;
-  border-color: #b8d8ff;
-  background: rgba(108, 204, 255, 0.18);
-}
-.ecsk-name-text {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  min-width: 0;
-  flex: 1 1 0;
+  color: rgba(120, 180, 255, 0.8);
 }
 .ecsk-info-btn:active {
-  background: #333;
-  color: #fff;
-  border-color: #aaa;
+  color: rgba(255, 255, 255, 0.6);
+}
+/* Shrink name column to make room for the icon column */
+.ecsk-mobile .lil-gui .lil-controller.ecsk-has-info > .lil-name {
+  min-width: calc(var(--name-width) - 16px);
 }
 
 /* ── Mobile tooltip overlay (blocks interaction while tooltip is open) ── */
@@ -1394,6 +1378,34 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
     attachMobilePanelDismiss(readoutGui);
     window.addEventListener("resize", syncMobilePanelState);
     syncMobilePanelState();
+
+    // ── Dynamic landscape title rotation based on device orientation ──
+    // Uses screen.orientation.angle to determine which way the phone was
+    // rotated, then sets CSS custom properties for the panel label transforms.
+    function updateLandscapeRotation(): void {
+      const angle = screen?.orientation?.angle ?? 0;
+      // angle 90  = phone rotated counter-clockwise (natural top → left)
+      // angle 270 = phone rotated clockwise (natural top → right)
+      // Default (0/180) or missing: use standard convention
+      let readoutRot: string;
+      let controlsRot: string;
+      if (angle === 270 || angle === -90) {
+        // Clockwise rotation: flip text directions
+        readoutRot = "rotate(-90deg)";
+        controlsRot = "rotate(90deg)";
+      } else {
+        // Counter-clockwise (angle=90) or default
+        readoutRot = "rotate(90deg)";
+        controlsRot = "rotate(-90deg)";
+      }
+      document.body.style.setProperty("--ecsk-readout-rotate", readoutRot);
+      document.body.style.setProperty("--ecsk-controls-rotate", controlsRot);
+    }
+    updateLandscapeRotation();
+    if (screen?.orientation) {
+      screen.orientation.addEventListener("change", updateLandscapeRotation);
+    }
+    window.addEventListener("orientationchange", updateLandscapeRotation);
   }
 
   const physicsReadout = readoutGui.addFolder("Physics");
@@ -1557,22 +1569,15 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
       const nameEl = domElement.querySelector(".name, .lil-name") as HTMLElement | null;
       if (!nameEl) return;
       // Don't add duplicate icons (e.g. after rebuild)
-      if (nameEl.querySelector(".ecsk-info-btn")) return;
+      if (domElement.querySelector(".ecsk-info-btn")) return;
 
-      nameEl.classList.add("ecsk-name-with-info");
-
-      // Wrap existing text in a span so it's a proper flex item (not anonymous text node)
-      const labelText = nameEl.textContent || '';
-      nameEl.textContent = '';
-      const textSpan = document.createElement('span');
-      textSpan.className = 'ecsk-name-text';
-      textSpan.textContent = labelText;
-
-      const infoBtn = document.createElement("button");
+      // Insert icon as a sibling BEFORE .lil-name inside .lil-controller
+      // This leaves lil-gui's name element completely untouched (labels stay visible)
+      const infoBtn = document.createElement("span");
       infoBtn.className = "ecsk-info-btn";
-      infoBtn.textContent = "i";
-      infoBtn.type = "button";
-      infoBtn.setAttribute("aria-label", `Show info for ${key}`);
+      infoBtn.setAttribute("role", "button");
+      infoBtn.setAttribute("aria-label", `Info: ${key}`);
+      infoBtn.innerHTML = '<svg viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="7" stroke="currentColor" stroke-width="1.5"/><circle cx="8" cy="5" r="1" fill="currentColor"/><rect x="7" y="7.5" width="2" height="4.5" rx="0.5" fill="currentColor"/></svg>';
       const toggleMobileTooltip = (e: Event) => {
         e.stopPropagation();
         e.preventDefault();
@@ -1583,8 +1588,10 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
         showMobileTooltip(key, tip, infoBtn);
       };
       infoBtn.addEventListener("click", toggleMobileTooltip);
-      nameEl.appendChild(infoBtn);
-      nameEl.appendChild(textSpan);
+      infoBtn.addEventListener("touchend", toggleMobileTooltip);
+      // Insert as flex sibling before the name element in .lil-controller
+      domElement.insertBefore(infoBtn, nameEl);
+      domElement.classList.add("ecsk-has-info");
       return;
     }
 
