@@ -559,6 +559,7 @@ const OLED_CSS = `
     top: 0;
     bottom: 0;
     width: 44px;
+    height: 100%;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -569,6 +570,11 @@ const OLED_CSS = `
     white-space: nowrap;
     overflow: visible;
     z-index: 2;
+  }
+
+  .ecsk-mobile .ecsk-panel.lil-gui > .lil-title:before,
+  .ecsk-mobile .ecsk-panel.lil-gui > .title:before {
+    display: none;
   }
 
   .ecsk-mobile .ecsk-panel.lil-gui > .lil-title .ecsk-panel-title-label,
@@ -1568,6 +1574,9 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
       // Mobile: add a leading (i) icon that toggles the tooltip via a blocking overlay.
       const nameEl = domElement.querySelector(".name, .lil-name") as HTMLElement | null;
       if (!nameEl) return;
+      // FunctionController moves .lil-name inside a <button> — skip info icon
+      // (insertBefore requires nameEl to be a direct child of domElement)
+      if (nameEl.parentNode !== domElement) return;
       // Don't add duplicate icons (e.g. after rebuild)
       if (domElement.querySelector(".ecsk-info-btn")) return;
 
