@@ -617,11 +617,12 @@ export function recommendedPixelRatioCap(info: ScreenInfo): number {
  */
 export function hitSizeScale(info: ScreenInfo): number {
   const baseline = 1440;
-  const ratio = info.renderHeight / baseline;
+  const limitingRenderAxis = Math.min(info.renderWidth, info.renderHeight);
+  const ratio = limitingRenderAxis / baseline;
 
-  // Uniform square-root scaling for all devices — doubling pixels → ~1.4× size.
-  // Mobile no longer gets an extra boost: the mobile default hitSize=2
-  // (set in controls.ts) already compensates for small viewports.
+  // Scale against the limiting axis because the simulation disk is fitted to
+  // the shorter viewport side. This keeps particle footprints stable when the
+  // device rotates between portrait and landscape.
   return Math.max(0.5, Math.sqrt(ratio));
 }
 

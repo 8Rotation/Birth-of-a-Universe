@@ -142,6 +142,31 @@ interface NumCtrl {
   overrideStep?: number;
 }
 
+function getStepPrecision(step: number): number {
+  const stepText = step.toString().toLowerCase();
+  const exponentMatch = stepText.match(/e-(\d+)$/);
+  if (exponentMatch) {
+    return Number(exponentMatch[1]);
+  }
+
+  const decimalPart = stepText.split(".")[1];
+  return decimalPart ? decimalPart.length : 0;
+}
+
+function snapValueToStep(value: number, step: number, origin = 0): number {
+  if (!Number.isFinite(step) || step <= 0) {
+    return value;
+  }
+
+  const precision = getStepPrecision(step);
+  const snapped = origin + Math.round((value - origin) / step) * step;
+  return Number(snapped.toFixed(precision));
+}
+
+function clampNumber(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max);
+}
+
 // ── OLED-friendly dark-theme CSS ─────────────────────────────────────────
 
 const OLED_CSS = `
@@ -331,9 +356,9 @@ const OLED_CSS = `
 }
 /* Larger touch targets */
 .ecsk-mobile .lil-gui .title {
-  font-size: 13px;
-  line-height: 32px;
-  padding: 4px 12px;
+  font-size: 14px;
+  line-height: 38px;
+  padding: 6px 14px;
 }
 .ecsk-mobile .lil-gui .controller {
   min-height: 32px;
@@ -354,18 +379,125 @@ const OLED_CSS = `
   -webkit-backdrop-filter: blur(4px);
 }
 
+@media (orientation: landscape) {
+  .ecsk-mobile .ecsk-panel.lil-gui {
+    top: 0 !important;
+    bottom: 0 !important;
+    width: min(46vw, 340px) !important;
+    height: 100vh !important;
+    max-height: 100vh !important;
+    overflow: hidden !important;
+    transition: opacity 0.3s ease, transform 0.3s ease;
+  }
+
+  .ecsk-mobile .ecsk-readout {
+    left: 0 !important;
+    right: auto !important;
+    bottom: 0 !important;
+    width: min(42vw, 320px) !important;
+    max-height: 100vh !important;
+  }
+
+  .ecsk-mobile .ecsk-controls {
+    left: auto !important;
+    right: 0 !important;
+    bottom: 0 !important;
+    width: min(48vw, 360px) !important;
+    max-height: 100vh !important;
+  }
+
+  .ecsk-mobile .ecsk-panel.lil-gui > .title {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 38px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 12px 4px;
+    font-size: 12px;
+    line-height: 1.1;
+    text-align: center;
+    white-space: normal;
+    writing-mode: vertical-rl;
+    text-orientation: mixed;
+    z-index: 2;
+  }
+
+  .ecsk-mobile .ecsk-readout > .title {
+    left: 0;
+    border-right: 1px solid #222;
+  }
+
+  .ecsk-mobile .ecsk-controls > .title {
+    right: 0;
+    border-left: 1px solid #222;
+    writing-mode: vertical-lr;
+  }
+
+  .ecsk-mobile .ecsk-readout > .children,
+  .ecsk-mobile .ecsk-controls > .children {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .ecsk-mobile .ecsk-readout > .children {
+    left: 38px;
+    right: 0;
+  }
+
+  .ecsk-mobile .ecsk-controls > .children {
+    top: 34px;
+    left: 0;
+    right: 38px;
+  }
+
+  .ecsk-mobile .ecsk-controls > .ecsk-bounce-link {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 38px;
+    z-index: 2;
+    padding: 8px 10px;
+    border-bottom: 1px solid #333;
+    background: rgba(0, 0, 0, 0.28);
+  }
+
+  .ecsk-mobile .ecsk-panel.lil-gui.closed {
+    opacity: 0.34;
+  }
+
+  .ecsk-mobile .ecsk-readout.lil-gui.closed {
+    transform: translateX(calc(-100% + 38px));
+  }
+
+  .ecsk-mobile .ecsk-controls.lil-gui.closed {
+    transform: translateX(calc(100% - 38px));
+  }
+
+  .ecsk-mobile .ecsk-panel.lil-gui:not(.closed) {
+    opacity: 0.82;
+    transform: translateX(0);
+  }
+}
+
 /* ── Mobile tooltip info icons ─────────────────────────────────── */
 .ecsk-mobile .lil-gui .controller .name {
   display: flex;
   align-items: center;
+  gap: 8px;
 }
 .ecsk-info-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 18px;
-  height: 18px;
-  min-width: 18px;
+  width: 17px;
+  height: 17px;
+  min-width: 17px;
   border-radius: 50%;
   border: 1px solid #555;
   color: #777;
@@ -373,13 +505,17 @@ const OLED_CSS = `
   font-style: italic;
   font-family: Georgia, 'Times New Roman', serif;
   line-height: 1;
-  margin-left: auto;
   flex-shrink: 0;
   cursor: pointer;
   -webkit-tap-highlight-color: transparent;
   background: transparent;
   padding: 0;
   box-sizing: border-box;
+}
+.ecsk-info-btn.active {
+  color: #ddd;
+  border-color: #999;
+  background: rgba(255, 255, 255, 0.08);
 }
 .ecsk-info-btn:active {
   background: #333;
@@ -396,24 +532,48 @@ const OLED_CSS = `
   right: 0;
   bottom: 0;
   z-index: 9999;
-  background: rgba(0,0,0,0.15);
+  background: transparent;
   -webkit-tap-highlight-color: transparent;
+  touch-action: none;
 }
 .ecsk-tooltip-overlay.visible {
   display: block;
 }
 
+/* ── Mobile panel overlay (dismisses open control/readout panels) ── */
+.ecsk-panel-overlay {
+  display: none;
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 998;
+  background: transparent;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: none;
+}
+.ecsk-panel-overlay.visible {
+  display: block;
+}
+
 /* ── Mobile tooltip positioning ────────────────────────────────── */
 .ecsk-mobile .ecsk-tooltip {
-  left: 5vw !important;
-  right: 5vw !important;
+  left: 6vw !important;
+  right: 6vw !important;
   top: auto !important;
-  bottom: 5vh !important;
-  max-width: 90vw !important;
+  bottom: 4vh !important;
+  max-width: min(88vw, 420px) !important;
   min-width: auto !important;
-  width: auto !important;
-  max-height: 60vh;
+  width: min(88vw, 420px) !important;
+  max-height: 52vh;
+  padding: 12px 14px 14px;
+  background: rgba(8, 8, 8, 0.96);
+  border-color: #343434;
+  box-shadow: 0 10px 36px rgba(0,0,0,0.82);
   pointer-events: none;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
 }
 .ecsk-mobile .ecsk-tooltip.visible {
   pointer-events: auto;
@@ -562,6 +722,7 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
   // ── "What is a bounce?" link ──────────────────────────────────────
   {
     const link = document.createElement("a");
+    link.className = "ecsk-bounce-link";
     link.textContent = "What is a bounce?  ↗";
     link.href = "simplified-3d-illustration/index.html";
     link.target = "_blank";
@@ -794,9 +955,9 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
       const v = def.min + rand() * (effectiveMax - def.min);
       // Snap to step grid
       const stepped = def.step
-        ? Math.round(v / def.step) * def.step
+        ? snapValueToStep(v, def.step, def.min)
         : v;
-      (params as unknown as Record<string, unknown>)[def.prop] = Math.min(Math.max(stepped, def.min), effectiveMax);
+      (params as unknown as Record<string, unknown>)[def.prop] = clampNumber(stepped, def.min, effectiveMax);
     }
     // Randomise boolean toggles (frozen excluded)
     params.roundParticles = rand() > 0.3;    // bias toward round
@@ -831,7 +992,7 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
       const maxByBuffer = maxTotalBuffer / Math.max(totalWindow, 0.5);
 
       const safeRate = Math.max(100, Math.min(params.particleRate, maxByRenderer, maxByPhysics, maxByBuffer));
-      params.particleRate = Math.round(safeRate / 100) * 100;  // snap to step=100
+      params.particleRate = snapValueToStep(safeRate, 100);  // snap to step=100
     }
 
     // Update all UI
@@ -965,6 +1126,42 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
   readoutGui.domElement.style.zIndex = "999";
   readoutGui.close();  // start collapsed (nearly invisible)
 
+  let panelOverlayEl: HTMLDivElement | null = null;
+
+  function syncMobilePanelOverlay(): void {
+    if (!panelOverlayEl || !isMobile) return;
+    const controlsOpen = !gui.domElement.classList.contains("closed");
+    const readoutOpen = !readoutGui.domElement.classList.contains("closed");
+    panelOverlayEl.classList.toggle("visible", controlsOpen || readoutOpen);
+  }
+
+  function attachMobilePanelDismiss(guiInstance: GUI): void {
+    if (!isMobile) return;
+    const titleEl = guiInstance.domElement.querySelector(".title") as HTMLElement | null;
+    if (!titleEl) return;
+    titleEl.addEventListener("click", () => {
+      requestAnimationFrame(syncMobilePanelOverlay);
+    });
+  }
+
+  if (isMobile) {
+    panelOverlayEl = document.createElement("div");
+    panelOverlayEl.className = "ecsk-panel-overlay";
+    const dismissPanels = (e: Event) => {
+      e.preventDefault();
+      e.stopPropagation();
+      gui.close();
+      readoutGui.close();
+      syncMobilePanelOverlay();
+    };
+    panelOverlayEl.addEventListener("touchstart", dismissPanels, { capture: true, passive: false });
+    panelOverlayEl.addEventListener("click", dismissPanels, { capture: true });
+    document.body.appendChild(panelOverlayEl);
+    attachMobilePanelDismiss(gui);
+    attachMobilePanelDismiss(readoutGui);
+    syncMobilePanelOverlay();
+  }
+
   const physicsReadout = readoutGui.addFolder("Physics");
   const controllers = [
     physicsReadout.add(hud, "beta").name("Spin coupling (β)").listen().disable(),
@@ -1010,6 +1207,8 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
 
   // Mobile: overlay blocks all interaction behind the tooltip
   let overlayEl: HTMLDivElement | null = null;
+  let activeMobileTooltipKey: string | null = null;
+  let activeMobileTooltipButton: HTMLElement | null = null;
   if (isMobile) {
     overlayEl = document.createElement("div");
     overlayEl.className = "ecsk-tooltip-overlay";
@@ -1087,15 +1286,22 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
   }
 
   // Mobile tooltip: show with overlay, positioned via CSS
-  function showMobileTooltip(tip: Tooltip): void {
+  function showMobileTooltip(key: string, tip: Tooltip, triggerEl: HTMLElement): void {
+    if (activeMobileTooltipButton) activeMobileTooltipButton.classList.remove("active");
     tooltipEl.innerHTML = buildTooltipHTML(tip);
     tooltipEl.classList.add("visible");
     overlayEl?.classList.add("visible");
+    activeMobileTooltipKey = key;
+    activeMobileTooltipButton = triggerEl;
+    activeMobileTooltipButton.classList.add("active");
   }
 
   function hideMobileTooltip(): void {
     tooltipEl.classList.remove("visible");
     overlayEl?.classList.remove("visible");
+    if (activeMobileTooltipButton) activeMobileTooltipButton.classList.remove("active");
+    activeMobileTooltipButton = null;
+    activeMobileTooltipKey = null;
   }
 
   /**
@@ -1113,24 +1319,32 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
     if (!tip) return;
 
     if (isMobile) {
-      // Mobile: add (i) info icon that opens tooltip with overlay
+      // Mobile: add a leading (i) icon that toggles the tooltip via a blocking overlay.
       const nameEl = domElement.querySelector(".name") as HTMLElement | null;
       if (!nameEl) return;
       // Don't add duplicate icons (e.g. after rebuild)
       if (nameEl.querySelector(".ecsk-info-btn")) return;
 
-      const infoBtn = document.createElement("span");
+      const infoBtn = document.createElement("button");
       infoBtn.className = "ecsk-info-btn";
       infoBtn.textContent = "i";
-      infoBtn.addEventListener("touchstart", (e) => {
-        e.stopPropagation();
-      }, { passive: true });
-      infoBtn.addEventListener("click", (e) => {
+      infoBtn.type = "button";
+      infoBtn.setAttribute("aria-label", `Show info for ${key}`);
+      const toggleMobileTooltip = (e: Event) => {
         e.stopPropagation();
         e.preventDefault();
-        showMobileTooltip(tip);
-      });
-      nameEl.appendChild(infoBtn);
+        if (activeMobileTooltipKey === key) {
+          hideMobileTooltip();
+          return;
+        }
+        showMobileTooltip(key, tip, infoBtn);
+      };
+      infoBtn.addEventListener("touchstart", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+      }, { passive: false });
+      infoBtn.addEventListener("click", toggleMobileTooltip);
+      nameEl.prepend(infoBtn);
       return;
     }
 
