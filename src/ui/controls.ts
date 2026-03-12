@@ -76,13 +76,13 @@ export interface SensorParams {
   saturationRange: number;  // saturation span above floor (0–1)
 
   // Ring / projection
+  ringEnabled: boolean;     // show the projection boundary ring
   ringOpacity: number;      // Lambert disk boundary ring opacity
   ringColor: string;        // ring colour (hex string for color picker)
   ringWidthPx: number;       // ring thickness in CSS pixels
   ringBloomEnabled: boolean;  // ring bloom on/off (independent of particle bloom)
   ringBloomStrength: number;  // ring-only bloom intensity
   ringBloomRadius: number;    // ring-only bloom spread
-  ringAutoColor: boolean;   // auto-match ring colour to dominant particle hue
   softHdrExposure: number;  // tone-mapping exposure for soft-HDR path
   particleSoftEdge: number; // particle edge softness (0=hard, 0.5=very soft)
   autoBrightness: boolean;  // auto-exposure: brightest particle → peak luminance
@@ -480,6 +480,12 @@ const OLED_CSS = `
   display: none;
 }
 
+/* Hide ▾/▸ arrow on root panel titles (keep for sub-folders) */
+.ecsk-mobile .ecsk-panel.lil-gui.lil-root > .lil-title:before,
+.ecsk-mobile .ecsk-panel.lil-gui.lil-root > .title:before {
+  display: none;
+}
+
 @media (orientation: portrait) {
   .ecsk-mobile.ecsk-mobile-readout-open .ecsk-readout {
     overflow: hidden !important;
@@ -568,12 +574,6 @@ const OLED_CSS = `
     z-index: 2;
   }
 
-  /* Hide ▾/▸ arrow on root panel titles only (keep for sub-folders) */
-  .ecsk-mobile .ecsk-panel.lil-gui.lil-root > .lil-title:before,
-  .ecsk-mobile .ecsk-panel.lil-gui.lil-root > .title:before {
-    display: none;
-  }
-
   .ecsk-mobile .ecsk-panel.lil-gui > .lil-title .ecsk-panel-title-label,
   .ecsk-mobile .ecsk-panel.lil-gui > .title .ecsk-panel-title-label {
     display: inline-block;
@@ -596,20 +596,23 @@ const OLED_CSS = `
     -webkit-overflow-scrolling: touch;
   }
 
-  /* Collapsed: fully transparent so background doesn't linger */
+  /* Collapsed: hide content but keep title bar visible and tappable */
   .ecsk-mobile .ecsk-panel.lil-gui.lil-closed,
   .ecsk-mobile .ecsk-panel.lil-gui.closed {
-    opacity: 0 !important;
-    pointer-events: none;
-  }
-
-  .ecsk-mobile .ecsk-panel.lil-gui:not(.lil-closed):not(.closed) {
-    opacity: 0.82;
+    height: auto !important;
+    min-height: 0 !important;
+    overflow: hidden !important;
+    opacity: 0.35;
+    background: transparent !important;
   }
 
   .ecsk-mobile .ecsk-panel.lil-gui.lil-closed > .lil-children,
   .ecsk-mobile .ecsk-panel.lil-gui.closed > .children {
-    pointer-events: none;
+    display: none;
+  }
+
+  .ecsk-mobile .ecsk-panel.lil-gui:not(.lil-closed):not(.closed) {
+    opacity: 0.82;
   }
 }
 
@@ -793,13 +796,13 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
     lightnessRange: 0.65,
     saturationFloor: 0.70,
     saturationRange: 0.25,
+    ringEnabled: true,
     ringOpacity: 0.50,
     ringColor: '#' + Math.floor(Math.random() * 0xFFFFFF).toString(16).padStart(6, '0'),
     ringWidthPx: 2,
     ringBloomEnabled: true,
     ringBloomStrength: 0.8,
     ringBloomRadius: 0.4,
-    ringAutoColor: true,
     forceHDR: false,
     softHdrExposure: 1.6,
     particleSoftEdge: 0.05,
@@ -975,9 +978,10 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
   });
 
   const ring = gui.addFolder("Ring");
-  ring.addColor(params, "ringColor").name("Ring colour").listen();
-  ring.add(params, "ringAutoColor").name("Auto-colour");
-  ring.add(params, "ringBloomEnabled").name("Ring bloom").onChange(() => {
+  ring.add(params, "ringEnabled").name("Ring").onChange(() => {
+    updateConditionalFolders();
+  });
+  const ringBloomCtrl = ring.add(params, "ringBloomEnabled").name("Ring bloom").onChange(() => {
     updateConditionalFolders();
   });
 
@@ -1092,8 +1096,8 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
     // Randomise boolean toggles (frozen excluded)
     params.roundParticles = rand() > 0.3;    // bias toward round
     params.bloomEnabled = rand() > 0.5;
-    params.ringBloomEnabled = rand() > 0.5;
-    params.ringAutoColor = true;
+    params.ringEnabled = rand() > 0.5;
+    params.ringBloomEnabled = params.ringEnabled && rand() > 0.5;
     params.autoBrightness = rand() > 0.6;
     // kCurvature: pick -1, 0, or 1 uniformly
     params.kCurvature = ([-1, 0, 1] as const)[Math.floor(rand() * 3)];
@@ -1175,8 +1179,10 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
     bloomStrength:    () => params.bloomEnabled,
     bloomRadius:      () => params.bloomEnabled,
     bloomThreshold:   () => params.bloomEnabled,
-    ringBloomStrength: () => params.ringBloomEnabled,
-    ringBloomRadius:   () => params.ringBloomEnabled,
+    ringOpacity:      () => params.ringEnabled,
+    ringWidthPx:      () => params.ringEnabled,
+    ringBloomStrength: () => params.ringEnabled && params.ringBloomEnabled,
+    ringBloomRadius:   () => params.ringEnabled && params.ringBloomEnabled,
     softHdrExposure:  () => currentHDRMode === 'soft' || params.forceHDR,
     particleSoftEdge: () => params.roundParticles,
     brightness:       () => !params.autoBrightness,
@@ -1203,6 +1209,7 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
 
     // Show/hide bloom quality dropdown (non-numeric, separate from numericDefs)
     bloomQualityCtrl.domElement.style.display = params.bloomEnabled ? "" : "none";
+    ringBloomCtrl.domElement.style.display = params.ringEnabled ? "" : "none";
 
     // Show/hide Force HDR button in bottom bar (mobile only)
     if (forceHDRBtn) {
@@ -1549,7 +1556,7 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
     if (prop === "resetSettings") attachTooltip(ctrl.domElement, "resetSettings");
     // targetFps tooltip is attached inline when the dropdown is created
   }
-  // Round particles, bloom, ring colour, auto-colour, background
+  // Round particles, bloom, ring, background
   for (const ctrl of particles.controllersRecursive()) {
     const prop = (ctrl as unknown as { property: string }).property;
     if (prop === "roundParticles") attachTooltip(ctrl.domElement, "roundParticles");
@@ -1557,8 +1564,8 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
   }
   for (const ctrl of ring.controllersRecursive()) {
     const prop = (ctrl as unknown as { property: string }).property;
-    if (prop === "ringColor") attachTooltip(ctrl.domElement, "ringColor");
-    if (prop === "ringAutoColor") attachTooltip(ctrl.domElement, "ringAutoColor");
+    if (prop === "ringEnabled") attachTooltip(ctrl.domElement, "ringEnabled");
+    if (prop === "ringBloomEnabled") attachTooltip(ctrl.domElement, "ringBloomEnabled");
   }
   for (const ctrl of bloomFolder.controllersRecursive()) {
     const prop = (ctrl as unknown as { property: string }).property;

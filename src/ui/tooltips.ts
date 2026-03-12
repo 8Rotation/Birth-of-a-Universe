@@ -382,7 +382,8 @@ export const TOOLTIPS: Record<string, Tooltip> = {
     simple: "Randomise all settings within safe ranges — explore unexpected combinations.",
     visual:
       "Every numeric parameter gets a random value. Most boolean toggles are randomised. " +
-      "Curvature k is uniformly random among {−1, 0, +1}. Ring auto-colour is forced on.",
+      "Curvature k is uniformly random among {−1, 0, +1}. The ring is randomised on/off, " +
+      "and when on it always auto-matches the dominant particle hue.",
     performance:
       "A compound-cost safety clamp ensures the randomised combination stays within " +
       "your hardware budget. particle_rate is scaled down if the combination of " +
@@ -685,6 +686,16 @@ export const TOOLTIPS: Record<string, Tooltip> = {
   // ═══════════════════════════════════════════════════════════════════
   //  Ring
   // ═══════════════════════════════════════════════════════════════════
+  ringEnabled: {
+    simple: "Turn the projection boundary ring on or off.",
+    visual:
+      "When enabled, the ring is shown around the bounce projection and its colour " +
+      "automatically tracks the dominant visible particle hue. When disabled, the ring " +
+      "and its bloom are fully hidden.",
+    performance: "Low. Disabling it skips ring rendering and any ring-only bloom work.",
+    notes: "This toggle is included in Random settings.",
+  },
+
   ringOpacity: {
     simple: "Visibility of the circular boundary ring around the projection disk.",
     visual:
