@@ -291,7 +291,7 @@ const OLED_CSS = `
   color: #e7e7e7;
   text-shadow: 0 0 10px rgba(120, 180, 255, 0.08);
 }
-.ecsk-controls .ecsk-brand-title {
+.ecsk-controls .ecsk-panel-title-label {
   display: inline-block;
   font-weight: 700;
   letter-spacing: 0.03em;
@@ -322,8 +322,8 @@ const OLED_CSS = `
   color: #8d8d8d;
 }
 @supports ((-webkit-background-clip: text) or (background-clip: text)) {
-  .ecsk-controls .ecsk-brand-title {
-    background-image: linear-gradient(100deg, rgba(255, 241, 214, 0.98) 0%, rgba(212, 191, 142, 0.96) 32%, rgba(154, 181, 212, 0.96) 68%, rgba(205, 226, 255, 0.98) 100%);
+  .ecsk-controls .ecsk-panel-title-label {
+    background-image: linear-gradient(90deg, rgba(255, 108, 108, 0.98) 0%, rgba(140, 220, 120, 0.96) 45%, rgba(110, 180, 255, 0.98) 100%);
     -webkit-background-clip: text;
     background-clip: text;
     color: transparent;
@@ -557,7 +557,7 @@ const OLED_CSS = `
     position: absolute;
     top: 0;
     bottom: 0;
-    width: 38px;
+    width: 44px;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -566,6 +566,7 @@ const OLED_CSS = `
     line-height: 1.1;
     text-align: center;
     white-space: nowrap;
+    overflow: visible;
     z-index: 2;
   }
 
@@ -600,9 +601,9 @@ const OLED_CSS = `
 
   .ecsk-mobile .ecsk-controls > .lil-title,
   .ecsk-mobile .ecsk-controls > .title {
-    font-size: 11px;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
+    font-size: 10px;
+    letter-spacing: 0.03em;
+    text-transform: none;
   }
 
   .ecsk-mobile .ecsk-readout > .lil-children,
@@ -663,7 +664,7 @@ const OLED_CSS = `
 .ecsk-mobile .lil-gui .controller .lil-name {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
   overflow: hidden;
 }
 .ecsk-mobile .lil-gui .lil-controller .lil-name.ecsk-name-with-info,
@@ -671,24 +672,17 @@ const OLED_CSS = `
 .ecsk-mobile .lil-gui .controller .lil-name.ecsk-name-with-info {
   min-width: var(--name-width);
 }
-.ecsk-label-text {
-  min-width: 0;
-  flex: 1 1 auto;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 .ecsk-info-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 13px;
-  height: 13px;
-  min-width: 13px;
+  width: 11px;
+  height: 11px;
+  min-width: 11px;
   border-radius: 50%;
   border: 1px solid #888;
   color: #ddd;
-  font-size: 8px;
+  font-size: 7px;
   font-style: italic;
   font-family: Georgia, 'Times New Roman', serif;
   line-height: 1;
@@ -1559,12 +1553,6 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
 
       nameEl.classList.add("ecsk-name-with-info");
 
-      const labelText = document.createElement("span");
-      labelText.className = "ecsk-label-text";
-      while (nameEl.firstChild) {
-        labelText.appendChild(nameEl.firstChild);
-      }
-
       const infoBtn = document.createElement("button");
       infoBtn.className = "ecsk-info-btn";
       infoBtn.textContent = "i";
@@ -1580,7 +1568,7 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
         showMobileTooltip(key, tip, infoBtn);
       };
       infoBtn.addEventListener("click", toggleMobileTooltip);
-      nameEl.append(infoBtn, labelText);
+      nameEl.prepend(infoBtn);
       return;
     }
 
