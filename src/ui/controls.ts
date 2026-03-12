@@ -553,90 +553,42 @@ const OLED_CSS = `
     max-height: 100vh !important;
   }
 
+  /* Horizontal title bar at the top of each panel */
   .ecsk-mobile .ecsk-panel.lil-gui > .lil-title,
   .ecsk-mobile .ecsk-panel.lil-gui > .title {
-    position: absolute;
-    top: 0;
-    bottom: 0;
-    width: 44px;
-    height: 100%;
+    position: relative;
+    width: 100%;
+    height: auto;
     display: flex;
     align-items: center;
-    justify-content: center;
-    padding: 12px 4px;
-    font-size: 12px;
-    line-height: 1.1;
-    text-align: center;
+    padding: 6px 12px;
+    font-size: 13px;
+    line-height: 28px;
+    text-align: left;
     white-space: nowrap;
-    overflow: visible;
     z-index: 2;
-  }
-
-  .ecsk-mobile .ecsk-panel.lil-gui > .lil-title:before,
-  .ecsk-mobile .ecsk-panel.lil-gui > .title:before {
-    display: none;
   }
 
   .ecsk-mobile .ecsk-panel.lil-gui > .lil-title .ecsk-panel-title-label,
   .ecsk-mobile .ecsk-panel.lil-gui > .title .ecsk-panel-title-label {
     display: inline-block;
     white-space: nowrap;
-    transform-origin: center center;
-  }
-
-  .ecsk-mobile .ecsk-readout > .lil-title,
-  .ecsk-mobile .ecsk-readout > .title {
-    left: 0;
-    border-right: 1px solid #222;
-  }
-
-  .ecsk-mobile .ecsk-readout > .lil-title .ecsk-panel-title-label,
-  .ecsk-mobile .ecsk-readout > .title .ecsk-panel-title-label {
-    transform: var(--ecsk-readout-rotate, rotate(90deg));
+    transform: none;
   }
 
   .ecsk-mobile .ecsk-controls > .lil-title,
   .ecsk-mobile .ecsk-controls > .title {
-    right: 0;
-    border-left: 1px solid #222;
-  }
-
-  .ecsk-mobile .ecsk-controls > .lil-title .ecsk-panel-title-label,
-  .ecsk-mobile .ecsk-controls > .title .ecsk-panel-title-label {
-    transform: var(--ecsk-controls-rotate, rotate(-90deg));
-  }
-
-  .ecsk-mobile .ecsk-controls > .lil-title,
-  .ecsk-mobile .ecsk-controls > .title {
-    font-size: 10px;
+    font-size: 12px;
     letter-spacing: 0.03em;
-    text-transform: none;
   }
 
   .ecsk-mobile .ecsk-readout > .lil-children,
   .ecsk-mobile .ecsk-readout > .children,
   .ecsk-mobile .ecsk-controls > .lil-children,
   .ecsk-mobile .ecsk-controls > .children {
-    position: absolute;
-    top: 0;
-    bottom: 0;
     overflow-y: auto;
     overscroll-behavior: contain;
     -webkit-overflow-scrolling: touch;
-  }
-
-  .ecsk-mobile .ecsk-readout > .lil-children,
-  .ecsk-mobile .ecsk-readout > .children {
-    left: 38px;
-    right: 0;
-    bottom: 0;
-  }
-
-  .ecsk-mobile .ecsk-controls > .lil-children,
-  .ecsk-mobile .ecsk-controls > .children {
-    top: 34px;
-    left: 0;
-    right: 38px;
   }
 
   .ecsk-mobile .ecsk-panel.lil-gui.lil-closed,
@@ -644,19 +596,8 @@ const OLED_CSS = `
     opacity: 0.34;
   }
 
-  .ecsk-mobile .ecsk-readout.lil-gui.lil-closed,
-  .ecsk-mobile .ecsk-readout.lil-gui.closed {
-    clip-path: inset(0 calc(100% - 38px) 0 0);
-  }
-
-  .ecsk-mobile .ecsk-controls.lil-gui.lil-closed,
-  .ecsk-mobile .ecsk-controls.lil-gui.closed {
-    clip-path: inset(0 0 0 calc(100% - 38px));
-  }
-
   .ecsk-mobile .ecsk-panel.lil-gui:not(.lil-closed):not(.closed) {
     opacity: 0.82;
-    clip-path: inset(0 0 0 0);
   }
 
   .ecsk-mobile .ecsk-panel.lil-gui.lil-closed > .lil-children,
@@ -1384,34 +1325,6 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
     attachMobilePanelDismiss(readoutGui);
     window.addEventListener("resize", syncMobilePanelState);
     syncMobilePanelState();
-
-    // ── Dynamic landscape title rotation based on device orientation ──
-    // Uses screen.orientation.angle to determine which way the phone was
-    // rotated, then sets CSS custom properties for the panel label transforms.
-    function updateLandscapeRotation(): void {
-      const angle = screen?.orientation?.angle ?? 0;
-      // angle 90  = phone rotated counter-clockwise (natural top → left)
-      // angle 270 = phone rotated clockwise (natural top → right)
-      // Default (0/180) or missing: use standard convention
-      let readoutRot: string;
-      let controlsRot: string;
-      if (angle === 270 || angle === -90) {
-        // Clockwise rotation: flip text directions
-        readoutRot = "rotate(-90deg)";
-        controlsRot = "rotate(90deg)";
-      } else {
-        // Counter-clockwise (angle=90) or default
-        readoutRot = "rotate(90deg)";
-        controlsRot = "rotate(-90deg)";
-      }
-      document.body.style.setProperty("--ecsk-readout-rotate", readoutRot);
-      document.body.style.setProperty("--ecsk-controls-rotate", controlsRot);
-    }
-    updateLandscapeRotation();
-    if (screen?.orientation) {
-      screen.orientation.addEventListener("change", updateLandscapeRotation);
-    }
-    window.addEventListener("orientationchange", updateLandscapeRotation);
   }
 
   const physicsReadout = readoutGui.addFolder("Physics");
