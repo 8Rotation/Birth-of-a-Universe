@@ -16,6 +16,8 @@ the physics of the inhomogeneous bounce.
 
 **Tech stack:** TypeScript, Three.js r183 (WebGPU backend), lil-gui, Vite.
 
+The mobile UI now treats iPhone browser fullscreen as unsupported and instead exposes an iOS-specific Add to Home Screen helper for launching the app in standalone mode.
+
 ---
 
 ## The Physical Story
@@ -293,19 +295,19 @@ package.json            — three r183, lil-gui, vite 7.3.1
 
 ### P0 — Physics accuracy & hardware utilization
 - [ ] Review individual feature implementations against physical expectations
-- [ ] Unit tests for physics modules (ecsk-physics, perturbation, shell — pure math, very testable)
+- [x] Unit tests for physics modules (ecsk-physics, perturbation, shell — pure math, very testable)
 - [ ] Performance review and profiling (identify CPU/GPU bottlenecks)
 - [ ] WebGPU compute shader for shell initialization (currently CPU — underutilizes GPU)
-- [ ] Automatic screen size and refresh rate detection
+- [x] Automatic screen size and refresh rate detection
 - [ ] Smooth mode — auto-maximize resolution and refresh rate based on hardware
   (caps particle count, persistence, and bloom to sustain native refresh)
-- [ ] Frame budget system — auto-throttle shell rate to maintain target FPS
-- [ ] **Spectral index n_s slider** — expose the currently hardcoded n_s = 0.965 in
+- [x] Frame budget system — auto-throttle shell rate to maintain target FPS
+- [x] **Spectral index n_s slider** — expose the currently hardcoded n_s = 0.965 in
   perturbation.ts as a UI slider. Controls power-spectrum tilt: lower n_s gives more
   large-scale structure (big blobs), higher gives scale-invariant texture. Connected
   to torsion-fermion coupling ξ via |ν|² = 1 − 8ξ (Sadatian & Hosseini 2025 eq. 37).
   Trivial to implement — pure constant extraction.
-- [ ] **Curvature k selector** — add k ∈ {−1, 0, +1} dropdown. Currently hardcoded
+- [x] **Curvature k selector** — add k ∈ {−1, 0, +1} dropdown. Currently hardcoded
   to k=+1 (closed universe). Changes the "−1" in D1 to "−k". For k=0 and k=−1
   the bounce still occurs but the turnaround/recollapse behavior differs.
   (Cubero & Popławski 2019; Unger & Popławski 2019 eq. 7)
@@ -320,7 +322,7 @@ package.json            — three r183, lil-gui, vite 7.3.1
   would deform the S² projection into an ellipse with axis ratio encoding X/Y. The
   core drama of the bounce is this torsion-vs-shear competition. Requires replacing
   single-a evolution with (X, Y) pair + modified Lambert projection.
-- [ ] **Particle production** — post-bounce fermion creation at rate ṅ_f + 3Hn_f = β_pp H⁴
+- [x] **Particle production** — post-bounce fermion creation at rate ṅ_f + 3Hn_f = β_pp H⁴
   (Popławski 2014 eq. 40–46; 2020 eq. 33; 2021 eq. 8). Critical rate β_cr ≈ 1/929.
   Drives the transition from bounce to inflation. Visually: a second surge of
   particles with different colors (higher T/energy) after the initial bounce wave.
@@ -331,7 +333,7 @@ package.json            — three r183, lil-gui, vite 7.3.1
   investigate perceptual color spaces (Oklch), wider hue sweep, or direct blackbody ramp
 - [ ] Review all default slider values for best out-of-the-box visual impact
 - [ ] Review and rework bloom pipeline (tune thresholds for HDR/SDR)
-- [ ] Scale Hypersurface to screen
+- [x] Scale Hypersurface to screen
 - [ ] Flow tails — short streaks showing arrival direction, with:
   - Length modifier (slider)
   - Toggle on/off
@@ -345,7 +347,7 @@ package.json            — three r183, lil-gui, vite 7.3.1
 - [ ] Keyboard shortcuts (space = pause, R = reset, H = hide UI, number keys for presets)
 
 ### P3 — Polish (display quality & platform support)
-- [ ] HDR implementation with automatic HDR display detection
+- [x] HDR implementation with automatic HDR display detection
 - [ ] Parameter presets — save/load named configs ("gentle bounce", "critical β", "high turbulence")
 - [ ] Screenshot / high-res image export
 - [ ] Share state via URL query parameters

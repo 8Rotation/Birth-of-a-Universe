@@ -130,3 +130,69 @@ body.ecsk-ios-browser canvas {
 body.ecsk-standalone #bottom-bar {
   bottom: calc(12px + var(--ecsk-safe-bottom));
 }
+
+.ecsk-add-to-home-sheet {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  display: none;
+  align-items: flex-end;
+  justify-content: center;
+  padding: 16px;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+
+.ecsk-add-to-home-sheet.visible {
+  display: flex;
+}
+
+.ecsk-add-to-home-card {
+  width: min(100%, 420px);
+  padding: 16px 16px 18px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 18px;
+  background: rgba(8, 8, 8, 0.94);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.45);
+  color: #d8d8d8;
+  font: 13px/1.5 "Segoe UI", system-ui, sans-serif;
+}
+
+.ecsk-add-to-home-close {
+  margin-left: auto;
+  display: block;
+  border: 0;
+  background: transparent;
+  color: #8fb7ff;
+  font: inherit;
+  cursor: pointer;
+}
+
+.ecsk-add-to-home-title {
+  margin-top: 4px;
+  font-size: 18px;
+  font-weight: 700;
+  color: #f3f3f3;
+}
+
+.ecsk-add-to-home-body {
+  margin-top: 8px;
+  color: #b6b6b6;
+}
+
+.ecsk-add-to-home-steps {
+  margin-top: 12px;
+  display: grid;
+  gap: 8px;
+  color: #d8d8d8;
+}
+
+.ecsk-mobile .ecsk-add-to-home-sheet {
+  padding: 12px;
+}
+
+.ecsk-mobile .ecsk-add-to-home-card {
+  width: min(100%, 520px);
+  padding-bottom: calc(18px + var(--ecsk-safe-bottom));
+}

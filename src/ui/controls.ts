@@ -817,10 +817,13 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
   }
 
   const fullscreenSupport = detectFullscreenSupport();
+  const standaloneMode = isStandaloneMode();
+  const showAddToHomeScreen = fullscreenSupport.iosBrowser && !standaloneMode;
+  const showFullscreenButton = !fullscreenSupport.iosBrowser;
   if (fullscreenSupport.iosBrowser) {
     document.body.classList.add("ecsk-ios-browser");
   }
-  if (isStandaloneMode()) {
+  if (standaloneMode) {
     document.body.classList.add("ecsk-standalone");
   }
 
@@ -1695,6 +1698,16 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
     const bar = document.createElement("div");
     bar.id = "bottom-bar";
 
+    let addToHomeSheetEl: HTMLDivElement | null = null;
+
+    function closeAddToHomeSheet(): void {
+      addToHomeSheetEl?.classList.remove("visible");
+    }
+
+    function openAddToHomeSheet(): void {
+      addToHomeSheetEl?.classList.add("visible");
+    }
+
     // — Fullscreen button —
     const fsBtn = document.createElement("button");
     fsBtn.className = "bar-btn";
@@ -1795,19 +1808,21 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
       updateFsIcon();
     }
 
-    fsBtn.addEventListener("click", () => {
-      void toggleFullscreenMode();
-    });
-    document.addEventListener("fullscreenchange", updateFsIcon);
-    document.addEventListener("webkitfullscreenchange", updateFsIcon);
-    document.addEventListener("fullscreenerror", () => {
-      if (isMobile || fullscreenSupport.iosBrowser) {
-        enterImmersiveMode();
-        updateFsIcon();
-      }
-    });
-    fsBtn.innerHTML = expandSVG;
-    updateFsIcon();
+    if (showFullscreenButton) {
+      fsBtn.addEventListener("click", () => {
+        void toggleFullscreenMode();
+      });
+      document.addEventListener("fullscreenchange", updateFsIcon);
+      document.addEventListener("webkitfullscreenchange", updateFsIcon);
+      document.addEventListener("fullscreenerror", () => {
+        if (isMobile || fullscreenSupport.iosBrowser) {
+          enterImmersiveMode();
+          updateFsIcon();
+        }
+      });
+      fsBtn.innerHTML = expandSVG;
+      updateFsIcon();
+    }
 
     // — Toggle UI button —
     const uiBtn = document.createElement("button");
@@ -1852,6 +1867,37 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
     diceBtn.innerHTML = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8.5" cy="8.5" r="1.2" fill="currentColor" stroke="none"/><circle cx="15.5" cy="8.5" r="1.2" fill="currentColor" stroke="none"/><circle cx="8.5" cy="15.5" r="1.2" fill="currentColor" stroke="none"/><circle cx="15.5" cy="15.5" r="1.2" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.2" fill="currentColor" stroke="none"/></svg>`;
     diceBtn.addEventListener("click", () => { params.randomSettings(); });
 
+    if (showAddToHomeScreen) {
+      const addBtn = document.createElement("button");
+      addBtn.className = "bar-btn";
+      addBtn.title = "Add to Home Screen";
+      addBtn.innerHTML = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4"/><path d="M8 8l4-4 4 4"/><path d="M5 14v5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-5"/></svg>`;
+      addBtn.addEventListener("click", openAddToHomeSheet);
+      bar.appendChild(addBtn);
+
+      addToHomeSheetEl = document.createElement("div");
+      addToHomeSheetEl.className = "ecsk-add-to-home-sheet";
+      addToHomeSheetEl.innerHTML = `
+        <div class="ecsk-add-to-home-card" role="dialog" aria-modal="true" aria-label="Add to Home Screen instructions">
+          <button type="button" class="ecsk-add-to-home-close" aria-label="Close Add to Home Screen instructions">Close</button>
+          <div class="ecsk-add-to-home-title">Add to Home Screen</div>
+          <div class="ecsk-add-to-home-body">On iPhone, Safari and Chrome cannot put this app into real fullscreen from a tab.</div>
+          <div class="ecsk-add-to-home-steps">
+            <div>1. Tap the Share button in the browser toolbar.</div>
+            <div>2. Choose Add to Home Screen.</div>
+            <div>3. Launch the app from your home screen for the cleanest iPhone experience.</div>
+          </div>
+        </div>`;
+      addToHomeSheetEl.addEventListener("click", (event) => {
+        if (event.target === addToHomeSheetEl) {
+          closeAddToHomeSheet();
+        }
+      });
+      const closeBtn = addToHomeSheetEl.querySelector(".ecsk-add-to-home-close") as HTMLButtonElement | null;
+      closeBtn?.addEventListener("click", closeAddToHomeSheet);
+      document.body.appendChild(addToHomeSheetEl);
+    }
+
     // — Force HDR button (mobile only) —
     if (isMobile) {
       forceHDRBtn = document.createElement("button");
@@ -1870,7 +1916,9 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
     }
 
     bar.appendChild(diceBtn);
-    bar.appendChild(fsBtn);
+    if (showFullscreenButton) {
+      bar.appendChild(fsBtn);
+    }
     bar.appendChild(uiBtn);
     document.body.appendChild(bar);
   }
