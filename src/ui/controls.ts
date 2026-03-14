@@ -142,6 +142,26 @@ interface NumCtrl {
   overrideStep?: number;
 }
 
+interface FullscreenDocument extends Document {
+  webkitExitFullscreen?: () => Promise<void> | void;
+  webkitFullscreenElement?: Element | null;
+  webkitFullscreenEnabled?: boolean;
+}
+
+interface FullscreenElement extends HTMLElement {
+  webkitRequestFullscreen?: () => Promise<void> | void;
+}
+
+interface StandaloneNavigator extends Navigator {
+  standalone?: boolean;
+}
+
+interface FullscreenSupport {
+  available: boolean;
+  preferImmersive: boolean;
+  iosBrowser: boolean;
+}
+
 function getStepPrecision(step: number): number {
   const stepText = step.toString().toLowerCase();
   const exponentMatch = stepText.match(/e-(\d+)$/);
@@ -165,6 +185,62 @@ function snapValueToStep(value: number, step: number, origin = 0): number {
 
 function clampNumber(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
+}
+
+function isIOSBrowser(): boolean {
+  const ua = navigator.userAgent;
+  return /iPad|iPhone|iPod/.test(ua) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+}
+
+function isStandaloneMode(): boolean {
+  const nav = navigator as StandaloneNavigator;
+  return window.matchMedia("(display-mode: standalone)").matches || nav.standalone === true;
+}
+
+function getFullscreenElement(): Element | null {
+  const doc = document as FullscreenDocument;
+  return document.fullscreenElement ?? doc.webkitFullscreenElement ?? null;
+}
+
+function detectFullscreenSupport(): FullscreenSupport {
+  const doc = document as FullscreenDocument;
+  const root = document.documentElement as FullscreenElement;
+  const iosBrowser = isIOSBrowser();
+  const hasRequest = typeof root.requestFullscreen === "function" || typeof root.webkitRequestFullscreen === "function";
+  const enabled = doc.fullscreenEnabled ?? doc.webkitFullscreenEnabled;
+  const available = hasRequest && enabled !== false;
+
+  return {
+    available,
+    preferImmersive: iosBrowser,
+    iosBrowser,
+  };
+}
+
+async function requestDocumentFullscreen(): Promise<boolean> {
+  const root = document.documentElement as FullscreenElement;
+  if (typeof root.requestFullscreen === "function") {
+    await root.requestFullscreen();
+    return true;
+  }
+  if (typeof root.webkitRequestFullscreen === "function") {
+    await Promise.resolve(root.webkitRequestFullscreen());
+    return true;
+  }
+  return false;
+}
+
+async function exitDocumentFullscreen(): Promise<boolean> {
+  const doc = document as FullscreenDocument;
+  if (typeof document.exitFullscreen === "function") {
+    await document.exitFullscreen();
+    return true;
+  }
+  if (typeof doc.webkitExitFullscreen === "function") {
+    await Promise.resolve(doc.webkitExitFullscreen());
+    return true;
+  }
+  return false;
 }
 
 // ── OLED-friendly dark-theme CSS ─────────────────────────────────────────
@@ -738,6 +814,14 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
   if (isMobile) {
     document.body.classList.add("ecsk-mobile");
     console.log("[controls] Mobile layout active");
+  }
+
+  const fullscreenSupport = detectFullscreenSupport();
+  if (fullscreenSupport.iosBrowser) {
+    document.body.classList.add("ecsk-ios-browser");
+  }
+  if (isStandaloneMode()) {
+    document.body.classList.add("ecsk-standalone");
   }
 
   // ── Slider limits from hardware detection (or sensible mid-tier fallback)
@@ -1614,36 +1698,13 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
     // — Fullscreen button —
     const fsBtn = document.createElement("button");
     fsBtn.className = "bar-btn";
-    fsBtn.title = "Toggle fullscreen";
     const expandSVG = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>`;
     const collapseSVG = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 14h6v6m10-10h-6V4m0 16h6v-6M4 4h6v6"/></svg>`;
-    fsBtn.innerHTML = expandSVG;
-
-    function updateFsIcon() {
-      const isFS = !!document.fullscreenElement;
-      fsBtn.innerHTML = isFS ? collapseSVG : expandSVG;
-      fsBtn.title = isFS ? "Exit fullscreen" : "Enter fullscreen";
-    }
-    fsBtn.addEventListener("click", () => {
-      if (!document.fullscreenElement) {
-        document.documentElement.requestFullscreen().catch(() => {});
-      } else {
-        document.exitFullscreen().catch(() => {});
-      }
-    });
-    document.addEventListener("fullscreenchange", updateFsIcon);
-    document.addEventListener("webkitfullscreenchange", updateFsIcon);
-
-    // — Toggle UI button —
-    const uiBtn = document.createElement("button");
-    uiBtn.className = "bar-btn";
-    uiBtn.title = "Hide UI";
-    const eyeOpenSVG = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>`;
-    const eyeClosedSVG = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>`;
-    uiBtn.innerHTML = eyeOpenSVG;
-
+    const immersiveLabel = fullscreenSupport.iosBrowser ? "immersive mode" : "immersive fallback";
     let uiHidden = false;
     let peekTimeout: ReturnType<typeof setTimeout> | null = null;
+    let immersiveActive = false;
+    let immersiveForcedHiddenUi = false;
 
     function hideUI() {
       uiHidden = true;
@@ -1659,6 +1720,102 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
       uiBtn.title = "Hide UI";
       if (peekTimeout) { clearTimeout(peekTimeout); peekTimeout = null; }
     }
+
+    function enterImmersiveMode() {
+      immersiveActive = true;
+      document.body.classList.add("ecsk-immersive");
+      if (!uiHidden) {
+        immersiveForcedHiddenUi = true;
+        hideUI();
+      }
+      window.dispatchEvent(new Event("resize"));
+    }
+
+    function exitImmersiveMode() {
+      immersiveActive = false;
+      document.body.classList.remove("ecsk-immersive");
+      if (immersiveForcedHiddenUi) {
+        immersiveForcedHiddenUi = false;
+        showUI();
+      }
+      window.dispatchEvent(new Event("resize"));
+    }
+
+    function updateFsIcon() {
+      const isFS = !!getFullscreenElement();
+      const active = isFS || immersiveActive;
+      fsBtn.innerHTML = active ? collapseSVG : expandSVG;
+      if (immersiveActive && !isFS) {
+        fsBtn.title = `Exit ${immersiveLabel}`;
+        return;
+      }
+      if (fullscreenSupport.preferImmersive || !fullscreenSupport.available) {
+        fsBtn.title = active ? `Exit ${immersiveLabel}` : `Enter ${immersiveLabel}`;
+        return;
+      }
+      fsBtn.title = active ? "Exit fullscreen" : "Enter fullscreen";
+    }
+
+    async function toggleFullscreenMode() {
+      const isFS = !!getFullscreenElement();
+
+      if (isFS) {
+        try {
+          await exitDocumentFullscreen();
+        } catch (error) {
+          console.warn("[controls] Failed to exit fullscreen", error);
+        }
+        updateFsIcon();
+        return;
+      }
+
+      if (immersiveActive) {
+        exitImmersiveMode();
+        updateFsIcon();
+        return;
+      }
+
+      if (fullscreenSupport.preferImmersive || !fullscreenSupport.available) {
+        enterImmersiveMode();
+        updateFsIcon();
+        return;
+      }
+
+      try {
+        const entered = await requestDocumentFullscreen();
+        if (!entered) {
+          enterImmersiveMode();
+        }
+      } catch (error) {
+        console.warn("[controls] Failed to enter fullscreen", error);
+        if (isMobile || fullscreenSupport.iosBrowser) {
+          enterImmersiveMode();
+        }
+      }
+      updateFsIcon();
+    }
+
+    fsBtn.addEventListener("click", () => {
+      void toggleFullscreenMode();
+    });
+    document.addEventListener("fullscreenchange", updateFsIcon);
+    document.addEventListener("webkitfullscreenchange", updateFsIcon);
+    document.addEventListener("fullscreenerror", () => {
+      if (isMobile || fullscreenSupport.iosBrowser) {
+        enterImmersiveMode();
+        updateFsIcon();
+      }
+    });
+    fsBtn.innerHTML = expandSVG;
+    updateFsIcon();
+
+    // — Toggle UI button —
+    const uiBtn = document.createElement("button");
+    uiBtn.className = "bar-btn";
+    uiBtn.title = "Hide UI";
+    const eyeOpenSVG = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>`;
+    const eyeClosedSVG = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>`;
+    uiBtn.innerHTML = eyeOpenSVG;
 
     function peekBar() {
       if (!uiHidden) return;
