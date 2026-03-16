@@ -563,6 +563,10 @@ const OLED_CSS = `
 }
 
 @media (orientation: portrait) {
+  body.ecsk-mobile.ecsk-ios-browser.ecsk-standalone .ecsk-readout {
+    top: calc(var(--ecsk-safe-top) + 8px) !important;
+  }
+
   .ecsk-mobile.ecsk-mobile-readout-open .ecsk-readout {
     overflow: hidden !important;
     height: 40vh !important;
@@ -607,37 +611,37 @@ const OLED_CSS = `
   }
 }
 @media (orientation: landscape) {
+  /* Panel base: flexbox sidebar so children fill & scroll */
   .ecsk-mobile .ecsk-panel.lil-gui {
     top: 0 !important;
     bottom: 0 !important;
-    width: min(46vw, 340px) !important;
-    height: 100vh !important;
-    max-height: 100vh !important;
+    display: flex !important;
+    flex-direction: column !important;
+    height: 100dvh !important;
+    max-height: 100dvh !important;
     overflow: hidden !important;
     transition: opacity 0.3s ease;
   }
 
-  .ecsk-mobile .ecsk-readout {
+  /* Readout: left sidebar (4-class selector beats 3-class generic width) */
+  .ecsk-mobile .ecsk-panel.lil-gui.ecsk-readout {
     left: 0 !important;
     right: auto !important;
-    bottom: 0 !important;
-    width: min(42vw, 320px) !important;
-    max-height: 100vh !important;
-    overflow: hidden !important;
+    width: min(36vw, 260px) !important;
   }
 
-  .ecsk-mobile .ecsk-controls {
+  /* Controls: right sidebar */
+  .ecsk-mobile .ecsk-panel.lil-gui.ecsk-controls {
     left: auto !important;
     right: 0 !important;
-    bottom: 0 !important;
-    width: min(48vw, 360px) !important;
-    max-height: 100vh !important;
+    width: min(40vw, 280px) !important;
   }
 
-  /* Horizontal title bar at the top of each panel */
+  /* Title bar: fixed size at top of flex column */
   .ecsk-mobile .ecsk-panel.lil-gui > .lil-title,
   .ecsk-mobile .ecsk-panel.lil-gui > .title {
     position: relative;
+    flex-shrink: 0;
     width: 100%;
     height: auto;
     display: flex;
@@ -663,18 +667,22 @@ const OLED_CSS = `
     letter-spacing: 0.03em;
   }
 
-  .ecsk-mobile .ecsk-readout > .lil-children,
-  .ecsk-mobile .ecsk-readout > .children,
-  .ecsk-mobile .ecsk-controls > .lil-children,
-  .ecsk-mobile .ecsk-controls > .children {
-    overflow-y: auto;
+  /* Children: fill remaining flex space and scroll */
+  .ecsk-mobile .ecsk-panel.lil-gui > .lil-children,
+  .ecsk-mobile .ecsk-panel.lil-gui > .children {
+    flex: 1 1 0 !important;
+    min-height: 0 !important;
+    height: auto !important;
+    max-height: none !important;
+    overflow-y: auto !important;
     overscroll-behavior: contain;
     -webkit-overflow-scrolling: touch;
   }
 
-  /* Collapsed: hide content but keep title bar visible and tappable */
+  /* Collapsed: just title bar, no content, transparent bg */
   .ecsk-mobile .ecsk-panel.lil-gui.lil-closed,
   .ecsk-mobile .ecsk-panel.lil-gui.closed {
+    display: block !important;
     height: auto !important;
     min-height: 0 !important;
     overflow: hidden !important;
@@ -684,9 +692,10 @@ const OLED_CSS = `
 
   .ecsk-mobile .ecsk-panel.lil-gui.lil-closed > .lil-children,
   .ecsk-mobile .ecsk-panel.lil-gui.closed > .children {
-    display: none;
+    display: none !important;
   }
 
+  /* Expanded state */
   .ecsk-mobile .ecsk-panel.lil-gui:not(.lil-closed):not(.closed) {
     opacity: 0.82;
   }
@@ -1400,11 +1409,33 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
     syncMobilePanelState();
   }
 
-  function attachMobilePanelDismiss(guiInstance: GUI): void {
+  const landscapeMQ = window.matchMedia("(orientation: landscape)");
+
+  // lil-gui's openAnimated() sets inline style.height and adds lil-transition
+  // class on $children, relying on transitionend to clean up.  In landscape our
+  // CSS forces height:auto!important which prevents the transition from firing,
+  // leaving stale state.  This helper scrubs it after each toggle.
+  function cleanupLilGuiTransition(guiInstance: GUI): void {
+    const el = guiInstance.domElement;
+    el.classList.remove("lil-transition");
+    const ch = el.querySelector(":scope > .lil-children") as HTMLElement | null;
+    if (ch) ch.style.height = "";
+  }
+
+  function attachMobilePanelDismiss(guiInstance: GUI, otherInstance: GUI): void {
     if (!isMobile) return;
     const titleEl = guiInstance.domElement.querySelector(".lil-title, .title") as HTMLElement | null;
     if (!titleEl) return;
     titleEl.addEventListener("click", () => {
+      // In landscape, only one panel at a time
+      if (landscapeMQ.matches) {
+        if (!isGuiClosed(guiInstance)) {
+          otherInstance.close();
+        }
+        // Scrub lil-gui animation artefacts that break landscape layout
+        cleanupLilGuiTransition(guiInstance);
+        cleanupLilGuiTransition(otherInstance);
+      }
       requestAnimationFrame(syncMobilePanelOverlay);
     });
   }
@@ -1417,14 +1448,25 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
       e.stopPropagation();
       gui.close();
       readoutGui.close();
+      if (landscapeMQ.matches) {
+        cleanupLilGuiTransition(gui);
+        cleanupLilGuiTransition(readoutGui);
+      }
       syncMobilePanelOverlay();
     };
     panelOverlayEl.addEventListener("touchstart", dismissPanels, { capture: true, passive: false });
     panelOverlayEl.addEventListener("click", dismissPanels, { capture: true });
     document.body.appendChild(panelOverlayEl);
-    attachMobilePanelDismiss(gui);
-    attachMobilePanelDismiss(readoutGui);
-    window.addEventListener("resize", syncMobilePanelState);
+    attachMobilePanelDismiss(gui, readoutGui);
+    attachMobilePanelDismiss(readoutGui, gui);
+    // On orientation change, scrub any stuck animation state and sync layout
+    function onOrientationChange(): void {
+      cleanupLilGuiTransition(gui);
+      cleanupLilGuiTransition(readoutGui);
+      syncMobilePanelState();
+    }
+    window.addEventListener("resize", onOrientationChange);
+    landscapeMQ.addEventListener("change", onOrientationChange);
     syncMobilePanelState();
   }
 
