@@ -548,8 +548,9 @@ async function main() {
       }
 
       // (c) Reactive back-pressure: reduce rate when ring buffer is near full
-      if (renderer.ringBuffer.totalWritten > renderer.ringBuffer.capacity * 0.8) {
-        const fillRatio = renderer.ringBuffer.totalWritten / renderer.ringBuffer.capacity;
+      const aliveEstimate = Math.min(arrivalRateSmooth * params.persistence * CUTOFF_MARGIN, renderer.ringBuffer.activeCount);
+      const fillRatio = aliveEstimate / renderer.ringBuffer.capacity;
+      if (fillRatio > 0.8) {
         effectiveRate *= Math.exp(-0.5 * (fillRatio - 0.8));
       }
 
@@ -671,7 +672,11 @@ async function main() {
         ? (params.betaPP / ECSKPhysics.BETA_CR).toFixed(2)
         : "off";
       hud.flux = arrivalRateSmooth.toFixed(0);
-      hud.visible = String(renderer.ringBuffer.totalWritten);
+      const estAlive = Math.min(
+        Math.round(arrivalRateSmooth * params.persistence),
+        renderer.ringBuffer.activeCount
+      );
+      hud.visible = String(estAlive);
       hud.fps = String(fps);
       // Update screen info in HUD (may change if moved between monitors)
       const si = screenDetector.info;
@@ -708,7 +713,7 @@ async function main() {
       const gpuPct = Math.round(gpuLoadSmooth * 100);
       const gpuColor = gpuLoadSmooth > 0.9 ? ' ⚠️ HIGH' : gpuLoadSmooth > 0.7 ? ' • BUSY' : '';
       hud.gpuLoad = `${gpuPct}%${gpuColor}`;
-      hud.bufferFill = `${(renderer.ringBuffer.totalWritten / 1000).toFixed(0)}K / ${(renderer.ringBuffer.capacity / 1000).toFixed(0)}K`;
+      hud.bufferFill = `${(renderer.ringBuffer.activeCount / 1000).toFixed(0)}K / ${(renderer.ringBuffer.capacity / 1000).toFixed(0)}K`;
       updateHUD();
     }
   }

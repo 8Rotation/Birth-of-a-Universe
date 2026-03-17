@@ -753,16 +753,21 @@ export class SensorRenderer {
     this._uMinEps = uniform(10.0);
     this._uMaxEps = uniform(10000.0);
 
-    // ── Read ring buffer attributes ─────────────────────────────────
-    const aPosition = instancedDynamicBufferAttribute(this._ringBuf.positionAttribute, "vec2");
-    const aBornTime = instancedDynamicBufferAttribute(this._ringBuf.bornTimeAttribute, "float");
-    const aHue = instancedDynamicBufferAttribute(this._ringBuf.hueAttribute, "float");
-    const aBrightness = instancedDynamicBufferAttribute(this._ringBuf.brightnessAttribute, "float");
-    const aEps = instancedDynamicBufferAttribute(this._ringBuf.epsAttribute, "float");
-    const aSize = instancedDynamicBufferAttribute(this._ringBuf.sizeAttribute, "float");
+    // ── Read packed ring buffer attributes (2 vec4s instead of 6 attrs) ──
+    const packedA = instancedDynamicBufferAttribute(this._ringBuf.packedAttrA, "vec4");
+    const packedB = instancedDynamicBufferAttribute(this._ringBuf.packedAttrB, "vec4");
+
+    // Unpack components
+    const aLx       = packedA.x;
+    const aLy       = packedA.y;
+    const aBornTime = packedA.z;
+    const aHue      = packedA.w;
+    const aBrightness = packedB.x;
+    const aEps      = packedB.y;
+    const aSize     = packedB.z;
 
     // ── Position: lx,ly → vec3(lx, ly, 0) ──────────────────────────
-    const posNode = vec3(aPosition.x, aPosition.y, float(0.0));
+    const posNode = vec3(aLx, aLy, float(0.0));
 
     // ── Size: Weibull fade + dead-particle culling ──────────────────
     const uTime = this._uTime;
@@ -770,14 +775,13 @@ export class SensorRenderer {
     const uFadeSharpness = this._uFadeSharpness;
     const uHitBaseSize = this._uHitBaseSize;
 
-    const sizeNode = Fn(() => {
-      const rawAge = uTime.sub(aBornTime);
-      const age = max(float(0.0), rawAge);
-      const fade = exp(pow(age.div(uTau), uFadeSharpness).negate());
-      // alive = 1.0 if rawAge >= 0 AND fade >= FADE_THRESHOLD, else 0.0
-      const alive = step(float(0.0), rawAge).mul(step(float(FADE_THRESHOLD), fade));
-      return aSize.mul(uHitBaseSize).mul(alive);
-    })();
+    // ── Shared per-vertex fade (computed once, used by size + color) ──
+    const rawAge = uTime.sub(aBornTime);
+    const age = max(float(0.0), rawAge);
+    const fade = exp(pow(age.div(uTau), uFadeSharpness).negate());
+    const alive = step(float(0.0), rawAge).mul(step(float(FADE_THRESHOLD), fade));
+
+    const sizeNode = aSize.mul(uHitBaseSize).mul(alive);
 
     // ── Color: HSL→RGB + SDR/HDR brightness scaling ─────────────────
     const uBri = this._uBrightnessMultiplier;
@@ -795,11 +799,6 @@ export class SensorRenderer {
     const SDR_BRI_REF = float(SensorRenderer.SDR_BRIGHTNESS_REF);
 
     const colorNode = Fn(() => {
-      // Recompute fade for color scaling
-      const rawAge = uTime.sub(aBornTime);
-      const age = max(float(0.0), rawAge);
-      const fade = exp(pow(age.div(uTau), uFadeSharpness).negate());
-
       // ── SDR path ──────────────────────────────────────────────────
       const sdrLightness = uLFloor.add(aBrightness.mul(uLRange));
       const sdrSaturation = uSFloor.add(aBrightness.oneMinus().mul(uSRange));
@@ -816,14 +815,14 @@ export class SensorRenderer {
       const linearRelSDR = nits.div(SDR_WHITE_F);
       const hdrScale = fade.mul(linearRelSDR).mul(uBri.div(SDR_BRI_REF));
 
-      // Select path based on uHdrMode (0=SDR, >0=HDR)
-      const isHdr = step(float(0.5), uHdrMode);
-      const rgb = mix(sdrRgb, hdrRgb, isHdr);
-      const scale = mix(sdrScale, hdrScale, isHdr);
+      // select() with uniform condition — GPU compiler can constant-fold unused branch
+      const isHdr = uHdrMode.greaterThan(float(0.5));
+      const rgb = select(isHdr, hdrRgb, sdrRgb);
+      const scale = select(isHdr, hdrScale, sdrScale);
 
-      // Apply auto-gain and peak clamp
+      // Apply auto-gain and peak clamp, gate by alive (dead → vec3(0))
       const finalScale = min(scale.mul(uAutoGain), uPeakScale);
-      return rgb.mul(finalScale);
+      return rgb.mul(finalScale).mul(alive);
     })();
 
     // ── Circular clipping (same as old material) ────────────────────
@@ -929,12 +928,10 @@ export class SensorRenderer {
     const activeN = this._ringBuf.activeCount;
     if (this.ringAutoColor && activeN > 0) {
       let cosSum = 0, sinSum = 0, totalW = 0;
-      const hueArr = this._ringBuf.hueAttribute.array as Float32Array;
-      const briArr = this._ringBuf.brightnessAttribute.array as Float32Array;
       const sampleStep = Math.max(1, Math.floor(activeN / 5000));
       for (let i = 0; i < activeN; i += sampleStep) {
-        const w = briArr[i];
-        const hRad = hueArr[i] * (Math.PI / 180);
+        const w = this._ringBuf.getBrightness(i);
+        const hRad = this._ringBuf.getHue(i) * (Math.PI / 180);
         cosSum += Math.cos(hRad) * w;
         sinSum += Math.sin(hRad) * w;
         totalW += w;

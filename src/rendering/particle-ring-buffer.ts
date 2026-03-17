@@ -1,13 +1,12 @@
 /**
  * particle-ring-buffer.ts — GPU ring buffer for immutable per-particle birth data.
  *
- * Stores 7 floats per particle as separate InstancedBufferAttributes:
- *   posAttr  (2 floats: lx, ly)
- *   bornAttr (1 float: wall-clock birth time)
- *   hueAttr  (1 float: hue degrees [0, 360])
- *   briAttr  (1 float: brightness [0, 1])
- *   epsAttr  (1 float: raw energy density)
- *   sizeAttr (1 float: hit size [0, 1])
+ * Stores 7 floats per particle packed into two vec4 InstancedBufferAttributes:
+ *   attrA (vec4): [lx, ly, arrivalTime, hue]
+ *   attrB (vec4): [brightness, eps, hitSize, 0.0]
+ *
+ * This layout produces only 2 GPU upload commands per frame (vs 6 previously),
+ * eliminating 4× per-frame GPU sync overhead.
  *
  * Write-once semantics: particles are written at birth and never touched
  * from JS again. The GPU shader reads birth data + a single time uniform
@@ -19,31 +18,30 @@ import * as THREE from "three";
 /** Sentinel value for unborn/dead slots — yields huge rawAge so fade → 0. */
 const BORN_SENTINEL = -1e9;
 
+/** Bytes per particle: 2 vec4s × 4 floats × 4 bytes = 32 bytes. */
+const BYTES_PER_PARTICLE = 32;
+
 export class ParticleRingBuffer {
   private _capacity: number;
   private _writeHead = 0;
   private _totalWritten = 0;
 
-  // Per-particle InstancedBufferAttributes (all DynamicDrawUsage)
-  private _posAttr: THREE.InstancedBufferAttribute;
-  private _bornAttr: THREE.InstancedBufferAttribute;
-  private _hueAttr: THREE.InstancedBufferAttribute;
-  private _briAttr: THREE.InstancedBufferAttribute;
-  private _epsAttr: THREE.InstancedBufferAttribute;
-  private _sizeAttr: THREE.InstancedBufferAttribute;
+  // Packed: [lx, ly, bornTime, hue] per particle
+  private _attrA: THREE.InstancedBufferAttribute;
+  // Packed: [brightness, eps, hitSize, 0] per particle
+  private _attrB: THREE.InstancedBufferAttribute;
 
   constructor(initialCapacity: number) {
     this._capacity = initialCapacity;
 
-    this._posAttr = this._makeAttr(new Float32Array(initialCapacity * 2), 2);
-    this._bornAttr = this._makeAttr(new Float32Array(initialCapacity), 1);
-    this._hueAttr = this._makeAttr(new Float32Array(initialCapacity), 1);
-    this._briAttr = this._makeAttr(new Float32Array(initialCapacity), 1);
-    this._epsAttr = this._makeAttr(new Float32Array(initialCapacity), 1);
-    this._sizeAttr = this._makeAttr(new Float32Array(initialCapacity), 1);
+    this._attrA = this._makeAttr(new Float32Array(initialCapacity * 4), 4);
+    this._attrB = this._makeAttr(new Float32Array(initialCapacity * 4), 4);
 
-    // Fill bornAttr with sentinel so unwritten slots are always dead
-    (this._bornAttr.array as Float32Array).fill(BORN_SENTINEL);
+    // Fill bornTime slot (attrA[i*4+2]) with sentinel so unwritten slots are always dead
+    const a = this._attrA.array as Float32Array;
+    for (let i = 0; i < initialCapacity; i++) {
+      a[i * 4 + 2] = BORN_SENTINEL;
+    }
   }
 
   // ── Public getters ──────────────────────────────────────────────────
@@ -52,12 +50,43 @@ export class ParticleRingBuffer {
   get totalWritten(): number { return this._totalWritten; }
   get activeCount(): number { return Math.min(this._totalWritten, this._capacity); }
 
-  get positionAttribute(): THREE.InstancedBufferAttribute { return this._posAttr; }
-  get bornTimeAttribute(): THREE.InstancedBufferAttribute { return this._bornAttr; }
-  get hueAttribute(): THREE.InstancedBufferAttribute { return this._hueAttr; }
-  get brightnessAttribute(): THREE.InstancedBufferAttribute { return this._briAttr; }
-  get epsAttribute(): THREE.InstancedBufferAttribute { return this._epsAttr; }
-  get sizeAttribute(): THREE.InstancedBufferAttribute { return this._sizeAttr; }
+  get packedAttrA(): THREE.InstancedBufferAttribute { return this._attrA; }
+  get packedAttrB(): THREE.InstancedBufferAttribute { return this._attrB; }
+
+  /** Read hue (degrees) for a given slot — stride-aware into packed attrA.w. */
+  getHue(index: number): number {
+    return (this._attrA.array as Float32Array)[index * 4 + 3];
+  }
+
+  /** Read brightness [0,1] for a given slot — stride-aware into packed attrB.x. */
+  getBrightness(index: number): number {
+    return (this._attrB.array as Float32Array)[index * 4];
+  }
+
+  /** Read bornTime for a given slot — stride-aware into packed attrA.z. */
+  getBornTime(index: number): number {
+    return (this._attrA.array as Float32Array)[index * 4 + 2];
+  }
+
+  /** Read position (lx) for a given slot — packed attrA.x. */
+  getLx(index: number): number {
+    return (this._attrA.array as Float32Array)[index * 4];
+  }
+
+  /** Read position (ly) for a given slot — packed attrA.y. */
+  getLy(index: number): number {
+    return (this._attrA.array as Float32Array)[index * 4 + 1];
+  }
+
+  /** Read eps for a given slot — packed attrB.y. */
+  getEps(index: number): number {
+    return (this._attrB.array as Float32Array)[index * 4 + 1];
+  }
+
+  /** Read hitSize for a given slot — packed attrB.z. */
+  getHitSize(index: number): number {
+    return (this._attrB.array as Float32Array)[index * 4 + 2];
+  }
 
   // ── Write batch ─────────────────────────────────────────────────────
 
@@ -81,60 +110,51 @@ export class ParticleRingBuffer {
     const needed = count;
     // Check if wrapping would overwrite still-alive slots
     if (this._totalWritten >= this._capacity) {
-      // Check the next slot(s) we'd overwrite
       const nextHead = this._writeHead;
-      const bornArr = this._bornAttr.array as Float32Array;
-      const oldest = bornArr[nextHead];
+      const a = this._attrA.array as Float32Array;
+      const oldest = a[nextHead * 4 + 2]; // bornTime
       if (oldest > now - cutoffDuration) {
-        // Still alive — grow to accommodate
         this.grow(this._capacity + needed);
       }
     }
 
-    const posArr = this._posAttr.array as Float32Array;
-    const bornArr = this._bornAttr.array as Float32Array;
-    const hueArr = this._hueAttr.array as Float32Array;
-    const briArr = this._briAttr.array as Float32Array;
-    const epsArr = this._epsAttr.array as Float32Array;
-    const sizeArr = this._sizeAttr.array as Float32Array;
+    const a = this._attrA.array as Float32Array;
+    const b = this._attrB.array as Float32Array;
 
     for (let i = 0; i < count; i++) {
       const src = i * stride;
-      const slot = this._writeHead;
+      const dst = this._writeHead * 4;
 
-      posArr[slot * 2] = data[src];         // lx
-      posArr[slot * 2 + 1] = data[src + 1]; // ly
-      bornArr[slot] = data[src + 2];        // arrivalTime
-      hueArr[slot] = data[src + 3];         // hue
-      briArr[slot] = data[src + 4];         // brightness
-      epsArr[slot] = data[src + 5];         // eps
-      sizeArr[slot] = data[src + 6];        // hitSize
+      a[dst]     = data[src];      // lx
+      a[dst + 1] = data[src + 1];  // ly
+      a[dst + 2] = data[src + 2];  // bornTime
+      a[dst + 3] = data[src + 3];  // hue
+
+      b[dst]     = data[src + 4];  // brightness
+      b[dst + 1] = data[src + 5];  // eps
+      b[dst + 2] = data[src + 6];  // hitSize
+      b[dst + 3] = 0.0;            // padding
 
       this._writeHead = (this._writeHead + 1) % this._capacity;
       this._totalWritten++;
     }
 
-    this._posAttr.needsUpdate = true;
-    this._bornAttr.needsUpdate = true;
-    this._hueAttr.needsUpdate = true;
-    this._briAttr.needsUpdate = true;
-    this._epsAttr.needsUpdate = true;
-    this._sizeAttr.needsUpdate = true;
+    this._attrA.needsUpdate = true;
+    this._attrB.needsUpdate = true;
   }
 
   // ── Clear ───────────────────────────────────────────────────────────
 
-  /** Reset the ring buffer — fills bornAttr with sentinel, resets writeHead. */
+  /** Reset the ring buffer — fills bornTime with sentinel, resets writeHead. */
   clear(): void {
     this._writeHead = 0;
     this._totalWritten = 0;
-    (this._bornAttr.array as Float32Array).fill(BORN_SENTINEL);
-    this._bornAttr.needsUpdate = true;
-    this._posAttr.needsUpdate = true;
-    this._hueAttr.needsUpdate = true;
-    this._briAttr.needsUpdate = true;
-    this._epsAttr.needsUpdate = true;
-    this._sizeAttr.needsUpdate = true;
+    const a = this._attrA.array as Float32Array;
+    for (let i = 0; i < this._capacity; i++) {
+      a[i * 4 + 2] = BORN_SENTINEL;
+    }
+    this._attrA.needsUpdate = true;
+    this._attrB.needsUpdate = true;
   }
 
   // ── Invalidate future ───────────────────────────────────────────────
@@ -144,14 +164,15 @@ export class ParticleRingBuffer {
    * Sets their bornTime to sentinel so the shader treats them as dead.
    */
   invalidateFuture(cutoffTime: number): void {
-    const bornArr = this._bornAttr.array as Float32Array;
+    const a = this._attrA.array as Float32Array;
     const len = this._capacity;
     for (let i = 0; i < len; i++) {
-      if (bornArr[i] > cutoffTime) {
-        bornArr[i] = BORN_SENTINEL;
+      const bornIdx = i * 4 + 2;
+      if (a[bornIdx] > cutoffTime) {
+        a[bornIdx] = BORN_SENTINEL;
       }
     }
-    this._bornAttr.needsUpdate = true;
+    this._attrA.needsUpdate = true;
   }
 
   // ── Grow ────────────────────────────────────────────────────────────
@@ -169,17 +190,13 @@ export class ParticleRingBuffer {
     const oldCap = this._capacity;
     this._capacity = newCap;
 
-    this._growAttr(this._posAttr, 2, oldCap);
-    this._growAttr(this._bornAttr, 1, oldCap);
-    this._growAttr(this._hueAttr, 1, oldCap);
-    this._growAttr(this._briAttr, 1, oldCap);
-    this._growAttr(this._epsAttr, 1, oldCap);
-    this._growAttr(this._sizeAttr, 1, oldCap);
+    this._growAttr(this._attrA, oldCap);
+    this._growAttr(this._attrB, oldCap);
 
-    // Fill new bornAttr slots with sentinel
-    const bornArr = this._bornAttr.array as Float32Array;
+    // Fill new bornTime slots with sentinel
+    const a = this._attrA.array as Float32Array;
     for (let i = oldCap; i < newCap; i++) {
-      bornArr[i] = BORN_SENTINEL;
+      a[i * 4 + 2] = BORN_SENTINEL;
     }
 
     // After grow, writeHead stays where it is (pointing at first empty slot
@@ -192,7 +209,7 @@ export class ParticleRingBuffer {
 
     console.log(
       `[ring-buffer] Grown → ${newCap} particles ` +
-      `(${(newCap * 28 / 1024 / 1024).toFixed(1)} MB)`
+      `(${(newCap * BYTES_PER_PARTICLE / 1024 / 1024).toFixed(1)} MB)`
     );
   }
 
@@ -209,12 +226,11 @@ export class ParticleRingBuffer {
 
   private _growAttr(
     attr: THREE.InstancedBufferAttribute,
-    itemSize: number,
     oldCap: number,
   ): void {
     const oldArr = attr.array as Float32Array;
-    const newArr = new Float32Array(this._capacity * itemSize);
-    newArr.set(oldArr.subarray(0, oldCap * itemSize));
+    const newArr = new Float32Array(this._capacity * 4);
+    newArr.set(oldArr.subarray(0, oldCap * 4));
     attr.array = newArr;
     attr.needsUpdate = true;
   }

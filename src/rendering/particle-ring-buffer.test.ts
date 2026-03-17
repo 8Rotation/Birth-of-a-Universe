@@ -35,33 +35,24 @@ describe("ParticleRingBuffer", () => {
     expect(buf.activeCount).toBe(0);
   });
 
-  it("fills bornAttr with sentinel on construction", () => {
+  it("fills bornTime with sentinel on construction", () => {
     const buf = new ParticleRingBuffer(16);
-    const born = buf.bornTimeAttribute.array as Float32Array;
     for (let i = 0; i < 16; i++) {
-      expect(born[i]).toBe(BORN_SENTINEL);
+      expect(buf.getBornTime(i)).toBe(BORN_SENTINEL);
     }
   });
 
-  it("all attributes use DynamicDrawUsage", () => {
+  it("both packed attributes use DynamicDrawUsage", () => {
     const buf = new ParticleRingBuffer(8);
     const THREE_DYNAMIC = 35048; // THREE.DynamicDrawUsage
-    expect(buf.positionAttribute.usage).toBe(THREE_DYNAMIC);
-    expect(buf.bornTimeAttribute.usage).toBe(THREE_DYNAMIC);
-    expect(buf.hueAttribute.usage).toBe(THREE_DYNAMIC);
-    expect(buf.brightnessAttribute.usage).toBe(THREE_DYNAMIC);
-    expect(buf.epsAttribute.usage).toBe(THREE_DYNAMIC);
-    expect(buf.sizeAttribute.usage).toBe(THREE_DYNAMIC);
+    expect(buf.packedAttrA.usage).toBe(THREE_DYNAMIC);
+    expect(buf.packedAttrB.usage).toBe(THREE_DYNAMIC);
   });
 
-  it("attributes have correct itemSize", () => {
+  it("packed attributes have itemSize 4", () => {
     const buf = new ParticleRingBuffer(8);
-    expect(buf.positionAttribute.itemSize).toBe(2);
-    expect(buf.bornTimeAttribute.itemSize).toBe(1);
-    expect(buf.hueAttribute.itemSize).toBe(1);
-    expect(buf.brightnessAttribute.itemSize).toBe(1);
-    expect(buf.epsAttribute.itemSize).toBe(1);
-    expect(buf.sizeAttribute.itemSize).toBe(1);
+    expect(buf.packedAttrA.itemSize).toBe(4);
+    expect(buf.packedAttrB.itemSize).toBe(4);
   });
 
   // ── Single particle write ─────────────────────────────────────────
@@ -74,24 +65,13 @@ describe("ParticleRingBuffer", () => {
     expect(buf.totalWritten).toBe(1);
     expect(buf.activeCount).toBe(1);
 
-    const pos = buf.positionAttribute.array as Float32Array;
-    expect(pos[0]).toBeCloseTo(0.5);
-    expect(pos[1]).toBeCloseTo(-1.2);
-
-    const born = buf.bornTimeAttribute.array as Float32Array;
-    expect(born[0]).toBeCloseTo(10.0);
-
-    const hue = buf.hueAttribute.array as Float32Array;
-    expect(hue[0]).toBeCloseTo(120);
-
-    const bri = buf.brightnessAttribute.array as Float32Array;
-    expect(bri[0]).toBeCloseTo(0.7);
-
-    const eps = buf.epsAttribute.array as Float32Array;
-    expect(eps[0]).toBeCloseTo(500);
-
-    const size = buf.sizeAttribute.array as Float32Array;
-    expect(size[0]).toBeCloseTo(0.3);
+    expect(buf.getLx(0)).toBeCloseTo(0.5);
+    expect(buf.getLy(0)).toBeCloseTo(-1.2);
+    expect(buf.getBornTime(0)).toBeCloseTo(10.0);
+    expect(buf.getHue(0)).toBeCloseTo(120);
+    expect(buf.getBrightness(0)).toBeCloseTo(0.7);
+    expect(buf.getEps(0)).toBeCloseTo(500);
+    expect(buf.getHitSize(0)).toBeCloseTo(0.3);
   });
 
   // ── Batch write ───────────────────────────────────────────────────
@@ -108,12 +88,11 @@ describe("ParticleRingBuffer", () => {
     expect(buf.totalWritten).toBe(3);
     expect(buf.activeCount).toBe(3);
 
-    const born = buf.bornTimeAttribute.array as Float32Array;
-    expect(born[0]).toBeCloseTo(1.0);
-    expect(born[1]).toBeCloseTo(2.0);
-    expect(born[2]).toBeCloseTo(3.0);
+    expect(buf.getBornTime(0)).toBeCloseTo(1.0);
+    expect(buf.getBornTime(1)).toBeCloseTo(2.0);
+    expect(buf.getBornTime(2)).toBeCloseTo(3.0);
     // Unwritten slot still has sentinel
-    expect(born[3]).toBe(BORN_SENTINEL);
+    expect(buf.getBornTime(3)).toBe(BORN_SENTINEL);
   });
 
   // ── Wrap-around ───────────────────────────────────────────────────
@@ -143,8 +122,7 @@ describe("ParticleRingBuffer", () => {
     expect(buf.totalWritten).toBe(5);
 
     // Slot 0 should now be overwritten with the new particle
-    const pos = buf.positionAttribute.array as Float32Array;
-    expect(pos[0]).toBeCloseTo(99);
+    expect(buf.getLx(0)).toBeCloseTo(99);
   });
 
   // ── Safe-wrap: grow when overwriting alive slot ───────────────────
@@ -172,15 +150,13 @@ describe("ParticleRingBuffer", () => {
     expect(buf.capacity).toBeGreaterThan(cap);
 
     // Original data should be preserved
-    const pos = buf.positionAttribute.array as Float32Array;
-    expect(pos[0]).toBeCloseTo(1); // slot 0 preserved
-    expect(pos[2]).toBeCloseTo(2); // slot 1 preserved (itemSize=2, so index 2)
-    expect(pos[4]).toBeCloseTo(3); // slot 2
-    expect(pos[6]).toBeCloseTo(4); // slot 3
+    expect(buf.getLx(0)).toBeCloseTo(1); // slot 0 preserved
+    expect(buf.getLx(1)).toBeCloseTo(2); // slot 1 preserved
+    expect(buf.getLx(2)).toBeCloseTo(3); // slot 2
+    expect(buf.getLx(3)).toBeCloseTo(4); // slot 3
 
     // New particle should be in the grown region
-    const born = buf.bornTimeAttribute.array as Float32Array;
-    expect(born[4]).toBeCloseTo(12); // written to slot 4 (old capacity)
+    expect(buf.getBornTime(4)).toBeCloseTo(12); // written to slot 4 (old capacity)
   });
 
   // ── Grow preserves data ───────────────────────────────────────────
@@ -198,18 +174,16 @@ describe("ParticleRingBuffer", () => {
     expect(buf.capacity).toBe(8);
 
     // Original data intact
-    const pos = buf.positionAttribute.array as Float32Array;
-    expect(pos[0]).toBeCloseTo(1.5);
-    expect(pos[1]).toBeCloseTo(-0.5);
-    expect(pos[2]).toBeCloseTo(-1.5);
-    expect(pos[3]).toBeCloseTo(0.5);
+    expect(buf.getLx(0)).toBeCloseTo(1.5);
+    expect(buf.getLy(0)).toBeCloseTo(-0.5);
+    expect(buf.getLx(1)).toBeCloseTo(-1.5);
+    expect(buf.getLy(1)).toBeCloseTo(0.5);
 
-    const born = buf.bornTimeAttribute.array as Float32Array;
-    expect(born[0]).toBeCloseTo(5);
-    expect(born[1]).toBeCloseTo(6);
+    expect(buf.getBornTime(0)).toBeCloseTo(5);
+    expect(buf.getBornTime(1)).toBeCloseTo(6);
     // New slots filled with sentinel
-    expect(born[4]).toBe(BORN_SENTINEL);
-    expect(born[7]).toBe(BORN_SENTINEL);
+    expect(buf.getBornTime(4)).toBe(BORN_SENTINEL);
+    expect(buf.getBornTime(7)).toBe(BORN_SENTINEL);
   });
 
   it("grow() doubles capacity until >= minCapacity", () => {
@@ -220,7 +194,7 @@ describe("ParticleRingBuffer", () => {
 
   // ── Clear ─────────────────────────────────────────────────────────
 
-  it("clear() fills bornAttr with sentinel and resets writeHead", () => {
+  it("clear() fills bornTime with sentinel and resets writeHead", () => {
     const buf = new ParticleRingBuffer(8);
 
     // Write some particles
@@ -235,9 +209,8 @@ describe("ParticleRingBuffer", () => {
     expect(buf.totalWritten).toBe(0);
     expect(buf.activeCount).toBe(0);
 
-    const born = buf.bornTimeAttribute.array as Float32Array;
     for (let i = 0; i < 8; i++) {
-      expect(born[i]).toBe(BORN_SENTINEL);
+      expect(buf.getBornTime(i)).toBe(BORN_SENTINEL);
     }
 
     // After clear, writing starts at slot 0 again
@@ -245,9 +218,8 @@ describe("ParticleRingBuffer", () => {
       { lx: 99, ly: 88, born: 20, hue: 0, bri: 0.5, eps: 10, size: 0.1 },
     ]);
     buf.writeBatch(batch2, 1, STRIDE, 20.0, 30.0);
-    const pos = buf.positionAttribute.array as Float32Array;
-    expect(pos[0]).toBeCloseTo(99);
-    expect(pos[1]).toBeCloseTo(88);
+    expect(buf.getLx(0)).toBeCloseTo(99);
+    expect(buf.getLy(0)).toBeCloseTo(88);
   });
 
   // ── invalidateFuture ──────────────────────────────────────────────
@@ -265,11 +237,10 @@ describe("ParticleRingBuffer", () => {
 
     buf.invalidateFuture(12);
 
-    const born = buf.bornTimeAttribute.array as Float32Array;
-    expect(born[0]).toBeCloseTo(5);  // kept (5 <= 12)
-    expect(born[1]).toBeCloseTo(10); // kept (10 <= 12)
-    expect(born[2]).toBe(BORN_SENTINEL); // killed (15 > 12)
-    expect(born[3]).toBe(BORN_SENTINEL); // killed (20 > 12)
+    expect(buf.getBornTime(0)).toBeCloseTo(5);  // kept (5 <= 12)
+    expect(buf.getBornTime(1)).toBeCloseTo(10); // kept (10 <= 12)
+    expect(buf.getBornTime(2)).toBe(BORN_SENTINEL); // killed (15 > 12)
+    expect(buf.getBornTime(3)).toBe(BORN_SENTINEL); // killed (20 > 12)
   });
 
   // ── activeCount ───────────────────────────────────────────────────
@@ -310,23 +281,15 @@ describe("ParticleRingBuffer", () => {
     const buf = new ParticleRingBuffer(8);
 
     // Record initial versions
-    const v0pos = buf.positionAttribute.version;
-    const v0born = buf.bornTimeAttribute.version;
-    const v0hue = buf.hueAttribute.version;
-    const v0bri = buf.brightnessAttribute.version;
-    const v0eps = buf.epsAttribute.version;
-    const v0size = buf.sizeAttribute.version;
+    const v0A = buf.packedAttrA.version;
+    const v0B = buf.packedAttrB.version;
 
     const batch = makeBatch([
       { lx: 0, ly: 0, born: 1, hue: 0, bri: 0.5, eps: 10, size: 0.1 },
     ]);
     buf.writeBatch(batch, 1, STRIDE, 1.0, 30.0);
 
-    expect(buf.positionAttribute.version).toBeGreaterThan(v0pos);
-    expect(buf.bornTimeAttribute.version).toBeGreaterThan(v0born);
-    expect(buf.hueAttribute.version).toBeGreaterThan(v0hue);
-    expect(buf.brightnessAttribute.version).toBeGreaterThan(v0bri);
-    expect(buf.epsAttribute.version).toBeGreaterThan(v0eps);
-    expect(buf.sizeAttribute.version).toBeGreaterThan(v0size);
+    expect(buf.packedAttrA.version).toBeGreaterThan(v0A);
+    expect(buf.packedAttrB.version).toBeGreaterThan(v0B);
   });
 });
