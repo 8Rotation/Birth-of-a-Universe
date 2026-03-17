@@ -548,9 +548,9 @@ const OLED_CSS = `
 .ecsk-mobile .ecsk-readout > .title,
 .ecsk-mobile .ecsk-controls > .lil-title,
 .ecsk-mobile .ecsk-controls > .title {
-  font-size: 16px;
-  line-height: 42px;
-  padding: 7px 14px;
+  font-size: 18px;
+  line-height: 44px;
+  padding: 6px 14px;
 }
 .ecsk-mobile .ecsk-readout-close {
   display: none;
@@ -569,8 +569,8 @@ const OLED_CSS = `
   justify-content: center;
   align-items: center;
   text-align: center;
-  font-size: 15px;
-  height: 36px;
+  font-size: 13px;
+  height: 34px;
   line-height: 1;
   padding: 0 10px;
   position: relative;
@@ -695,10 +695,13 @@ const OLED_CSS = `
     transform: none;
   }
 
+  /* Controls title: right-align so it stays near the edge */
   .ecsk-mobile .ecsk-controls > .lil-title,
   .ecsk-mobile .ecsk-controls > .title {
     font-size: 12px;
     letter-spacing: 0.03em;
+    text-align: right;
+    justify-content: flex-end;
   }
 
   /* Children: fill remaining flex space and scroll */
