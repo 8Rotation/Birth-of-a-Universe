@@ -815,10 +815,10 @@ export class SensorRenderer {
       const linearRelSDR = nits.div(SDR_WHITE_F);
       const hdrScale = fade.mul(linearRelSDR).mul(uBri.div(SDR_BRI_REF));
 
-      // select() with uniform condition — GPU compiler can constant-fold unused branch
-      const isHdr = uHdrMode.greaterThan(float(0.5));
-      const rgb = select(isHdr, hdrRgb, sdrRgb);
-      const scale = select(isHdr, hdrScale, sdrScale);
+      // select SDR/HDR path (0=SDR, >0=HDR)
+      const isHdr = step(float(0.5), uHdrMode);
+      const rgb = mix(sdrRgb, hdrRgb, isHdr);
+      const scale = mix(sdrScale, hdrScale, isHdr);
 
       // Apply auto-gain and peak clamp, gate by alive (dead → vec3(0))
       const finalScale = min(scale.mul(uAutoGain), uPeakScale);
