@@ -562,6 +562,29 @@ const OLED_CSS = `
   display: none;
 }
 
+/* Center sub-folder group headings vertically on mobile, bigger text & narrower rows */
+.ecsk-mobile .lil-gui .lil-gui > .lil-title,
+.ecsk-mobile .lil-gui .lil-gui > .title {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  text-align: center;
+  font-size: 15px;
+  height: 36px;
+  line-height: 1;
+  padding: 0 10px;
+  position: relative;
+  box-sizing: border-box;
+}
+/* Position collapse arrow absolutely so it doesn't offset centered text */
+.ecsk-mobile .lil-gui .lil-gui > .lil-title::before,
+.ecsk-mobile .lil-gui .lil-gui > .title::before {
+  position: absolute;
+  left: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+}
+
 @media (orientation: portrait) {
   body.ecsk-mobile.ecsk-ios-browser.ecsk-standalone .ecsk-readout {
     top: 0 !important;
@@ -690,19 +713,19 @@ const OLED_CSS = `
     -webkit-overflow-scrolling: touch;
   }
 
-  /* Collapsed: fully transparent so no frame/border is visible */
+  /* Collapsed: no frame/border, but title text stays faintly visible */
   .ecsk-mobile .ecsk-panel.lil-gui.lil-closed,
   .ecsk-mobile .ecsk-panel.lil-gui.closed {
     display: block !important;
     height: auto !important;
     min-height: 0 !important;
     overflow: hidden !important;
-    opacity: 0;
     background: transparent !important;
     border-color: transparent !important;
+    opacity: 0.35;
   }
 
-  /* Title bar inside collapsed panel: hide its background too */
+  /* Title bar inside collapsed panel: transparent bg, keep text visible */
   .ecsk-mobile .ecsk-panel.lil-gui.lil-closed > .lil-title,
   .ecsk-mobile .ecsk-panel.lil-gui.closed > .title {
     background: transparent !important;
