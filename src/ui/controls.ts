@@ -491,7 +491,7 @@ const OLED_CSS = `
   left: 0 !important;
   right: 0 !important;
   width: 100% !important;
-  max-height: 40vh !important;
+  max-height: 40dvh !important;
   overflow-y: auto !important;
   z-index: 1001 !important;
 }
@@ -502,7 +502,7 @@ const OLED_CSS = `
   left: 0 !important;
   right: 0 !important;
   width: 100% !important;
-  max-height: 60vh !important;
+  max-height: 60dvh !important;
   overflow-y: auto !important;
 }
 /* On mobile: collapsed panels are semi-visible (no hover needed) */
@@ -564,12 +564,23 @@ const OLED_CSS = `
 
 @media (orientation: portrait) {
   body.ecsk-mobile.ecsk-ios-browser.ecsk-standalone .ecsk-readout {
-    top: calc(var(--ecsk-safe-top) + 8px) !important;
+    top: 0 !important;
+    padding-top: calc(var(--ecsk-safe-top) + 8px);
   }
 
   .ecsk-mobile.ecsk-mobile-readout-open .ecsk-readout {
     overflow: hidden !important;
-    height: 40vh !important;
+    height: 40dvh !important;
+  }
+
+  /* Both panels open: flush layout using dvh so panels share exactly 100% of visible viewport */
+  .ecsk-mobile.ecsk-mobile-both-open .ecsk-readout {
+    height: 40dvh !important;
+    max-height: 40dvh !important;
+  }
+  .ecsk-mobile.ecsk-mobile-both-open .ecsk-controls {
+    height: 60dvh !important;
+    max-height: 60dvh !important;
   }
 
   .ecsk-mobile.ecsk-mobile-readout-open .ecsk-readout > .lil-title,
@@ -679,14 +690,21 @@ const OLED_CSS = `
     -webkit-overflow-scrolling: touch;
   }
 
-  /* Collapsed: just title bar, no content, transparent bg */
+  /* Collapsed: fully transparent so no frame/border is visible */
   .ecsk-mobile .ecsk-panel.lil-gui.lil-closed,
   .ecsk-mobile .ecsk-panel.lil-gui.closed {
     display: block !important;
     height: auto !important;
     min-height: 0 !important;
     overflow: hidden !important;
-    opacity: 0.35;
+    opacity: 0;
+    background: transparent !important;
+    border-color: transparent !important;
+  }
+
+  /* Title bar inside collapsed panel: hide its background too */
+  .ecsk-mobile .ecsk-panel.lil-gui.lil-closed > .lil-title,
+  .ecsk-mobile .ecsk-panel.lil-gui.closed > .title {
     background: transparent !important;
   }
 
@@ -1422,20 +1440,39 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
     if (ch) ch.style.height = "";
   }
 
-  function attachMobilePanelDismiss(guiInstance: GUI, otherInstance: GUI): void {
+  // In landscape, intercept title clicks in capture phase on the parent
+  // element to bypass lil-gui's openAnimated() entirely.  openAnimated uses
+  // a double-RAF transition scheme that never resolves in landscape (CSS
+  // forces height:auto!important), leaving pointer-events:none stuck on
+  // .lil-children.  Using non-animated open()/close() avoids the issue.
+  function interceptLandscapeTitleClick(guiInstance: GUI): void {
+    if (!isMobile) return;
+    guiInstance.domElement.addEventListener("click", (e) => {
+      if (!landscapeMQ.matches) return;  // portrait: let animated toggle work
+
+      const titleEl = guiInstance.domElement.querySelector(":scope > .lil-title, :scope > .title");
+      if (!titleEl || !titleEl.contains(e.target as Node)) return;
+
+      // Stop the event reaching lil-gui's openAnimated handler on the title
+      e.stopPropagation();
+
+      // Toggle with non-animated open/close
+      if (isGuiClosed(guiInstance)) {
+        guiInstance.open();
+      } else {
+        guiInstance.close();
+      }
+
+      cleanupLilGuiTransition(guiInstance);
+      syncMobilePanelState();
+    }, { capture: true });
+  }
+
+  function attachMobilePanelDismiss(guiInstance: GUI): void {
     if (!isMobile) return;
     const titleEl = guiInstance.domElement.querySelector(".lil-title, .title") as HTMLElement | null;
     if (!titleEl) return;
     titleEl.addEventListener("click", () => {
-      // In landscape, only one panel at a time
-      if (landscapeMQ.matches) {
-        if (!isGuiClosed(guiInstance)) {
-          otherInstance.close();
-        }
-        // Scrub lil-gui animation artefacts that break landscape layout
-        cleanupLilGuiTransition(guiInstance);
-        cleanupLilGuiTransition(otherInstance);
-      }
       requestAnimationFrame(syncMobilePanelOverlay);
     });
   }
@@ -1457,8 +1494,10 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
     panelOverlayEl.addEventListener("touchstart", dismissPanels, { capture: true, passive: false });
     panelOverlayEl.addEventListener("click", dismissPanels, { capture: true });
     document.body.appendChild(panelOverlayEl);
-    attachMobilePanelDismiss(gui, readoutGui);
-    attachMobilePanelDismiss(readoutGui, gui);
+    interceptLandscapeTitleClick(gui);
+    interceptLandscapeTitleClick(readoutGui);
+    attachMobilePanelDismiss(gui);
+    attachMobilePanelDismiss(readoutGui);
     // On orientation change, scrub any stuck animation state and sync layout
     function onOrientationChange(): void {
       cleanupLilGuiTransition(gui);
