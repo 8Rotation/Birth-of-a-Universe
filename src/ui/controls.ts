@@ -1251,8 +1251,8 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
     {
       const numCoeffs = params.lMax * params.lMax + 2 * params.lMax;
 
-      // (a) Renderer: rate × persistence ≤ maxVisibleHits
-      const maxByRenderer = _maxVisibleHits / Math.max(params.persistence, 0.2);
+      // (a) VRAM: rate × persistence ≤ maxVisibleHits (ring buffer capacity budget)
+      const maxByVRAM = _maxVisibleHits / Math.max(params.persistence, 0.2);
 
       // (b) Physics: rate × numCoeffs ≤ maxPhysicsCost
       const maxByPhysics  = numCoeffs > 0
@@ -1260,12 +1260,12 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
         : Infinity;
 
       // (c) Total buffer: rate × (persistence + arrivalSpread × 1.5 + 2) ≤ maxTotalBuffer
-      //     Each hit is iterated every frame for fade-expire — cap total iteration count.
+      //     Cap total ring buffer VRAM growth from combined rate × time window.
       const maxTotalBuffer = _maxVisibleHits * 2;
       const totalWindow = params.persistence + params.arrivalSpread * 1.5 + 2;
       const maxByBuffer = maxTotalBuffer / Math.max(totalWindow, 0.5);
 
-      const safeRate = Math.max(100, Math.min(params.particleRate, maxByRenderer, maxByPhysics, maxByBuffer));
+      const safeRate = Math.max(100, Math.min(params.particleRate, maxByVRAM, maxByPhysics, maxByBuffer));
       params.particleRate = snapValueToStep(safeRate, 100);  // snap to step=100
     }
 

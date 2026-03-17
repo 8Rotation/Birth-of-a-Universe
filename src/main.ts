@@ -21,7 +21,7 @@ import "./style.css";
 import { ECSKPhysics } from "./physics/ecsk-physics.js";
 import { PhysicsBridge, PARTICLE_STRIDE } from "./physics/physics-bridge.js";
 import type { RawParticleBatch } from "./physics/physics-bridge.js";
-import { SensorRenderer, type Hit } from "./rendering/renderer.js";
+import { SensorRenderer } from "./rendering/renderer.js";
 import { createSensorControls } from "./ui/controls.js";
 import { ScreenDetector } from "./ui/screen-info.js";
 import { HardwareDetector } from "./ui/hardware-info.js";
@@ -47,25 +47,16 @@ const CUTOFF_MARGIN = 1.2;
 function fadeDurationToTau(duration: number, sharpness: number): number {
   return duration / (Math.pow(-Math.log(FADE_THRESHOLD) * CUTOFF_MARGIN, 1 / sharpness));
 }
-/** Maximum seconds into the future a particle can be born before discard.
- *  Derived from arrivalSpread × tail multiplier × small margin.
- *  Computed dynamically in the animation loop from params.arrivalSpread. */
-const SPREAD_TAIL_MULT = 1.5;
-const FUTURE_MARGIN = 2;  // extra seconds beyond the spread tail
 /** FPS / HUD update interval in seconds. */
 const FPS_SAMPLE_INTERVAL = 0.8;
 /** EMA decay factor for arrival-rate smoothing. */
 const RATE_SMOOTH_DECAY = 0.6;
 /** EMA gain factor for arrival-rate smoothing (= 1 − decay). */
 const RATE_SMOOTH_GAIN = 0.4;
-/** Cap how much extra per-frame leeway a low FPS cap can unlock. */
-const MAX_FRAME_LEEWAY_SCALE = 3.0;
-
-// Hard ceiling: a true emergency stop to prevent
-// multi-GB RAM/VRAM consumption if persistence and rate are
-// both cranked to extreme values simultaneously.
+// VRAM budget cap: prevents multi-hundred-MB allocations if persistence
+// and rate are both cranked to extreme values simultaneously.
 // (Overridden at runtime by hardware detection.)
-let EMERGENCY_HIT_CAP = 5_000_000;
+let VRAM_BUDGET_PARTICLES = 5_000_000;
 
 // ── Info overlay ──────────────────────────────────────────────────────────
 
@@ -104,7 +95,7 @@ async function main() {
   const budget = hwInfo.budget;
 
   // Apply hardware-derived limits
-  EMERGENCY_HIT_CAP = budget.emergencyHitCap;
+  VRAM_BUDGET_PARTICLES = budget.emergencyHitCap;
 
   // ── 1. Initialize renderer ────────────────────────────────────────
   const t2 = performance.now();
@@ -140,9 +131,6 @@ async function main() {
   let physics = new ECSKPhysics(DEFAULT_BETA, 1);
 
   // ── 3. State ──────────────────────────────────────────────────────
-  let hits: Hit[] = [];
-  let visibleCount = 0;  // count of visible hits in hits[0..visibleCount); future hits follow
-  const _futureHits: Hit[] = [];  // reusable buffer for partitioning (never reallocated)
   const pendingBatches: RawParticleBatch[] = [];
   // simTime is initialised to wall-clock on the first frame so particle
   // born-times and displayTime (wall-clock) share the same time basis.
@@ -189,8 +177,7 @@ async function main() {
     // Full reset: terminate and recreate all workers (recovers from
     // crashes), wipe all particle state, and re-sync timing.
     // Equivalent to browser reload but keeps current settings.
-    hits = [];
-    visibleCount = 0;
+    renderer.ringBuffer.clear();
     pendingBatches.length = 0;
     arrivalCounter = 0;
     arrivalRateSmooth = 0;
@@ -294,11 +281,6 @@ async function main() {
     return targetHz > 0 ? Math.max(1, Math.min(targetHz, syncHz)) : syncHz;
   }
 
-  function frameLeewayScale(): number {
-    const syncHz = Math.max(1, effectiveDisplaySyncHz());
-    return Math.min(MAX_FRAME_LEEWAY_SCALE, Math.max(1, syncHz / effectivePresentationHz()));
-  }
-
   screenDetector.onChange((info) => {
     updateTargetFpsLabel(effectiveDisplaySyncHz());
   });
@@ -336,51 +318,9 @@ async function main() {
     ppScatterRange: params.ppScatterRange,
   }, budget.recommendedWorkers);
 
-  // ── 6. Direct particle routing ───────────────────────────────────
+  // ── 6. GPU pipeline ready ──────────────────────────────────────────
   console.log(`[main] Worker spawn: ${(performance.now() - t3).toFixed(0)} ms`);
   console.log(`[main] Total init: ${(performance.now() - t0).toFixed(0)} ms`);
-  // Particles from the worker go straight into hits[] — no heap, no
-  // arrival-time gating, no per-frame caps.  Reads directly from the
-  // worker's transferred Float32Array to avoid per-particle object
-  // creation in the bridge (saves ~50K object allocations per tick).
-
-  function ingestBatchPrefix(batch: RawParticleBatch, takeCount: number): void {
-    const { data } = batch;
-    for (let i = 0; i < takeCount; i++) {
-      const off = i * PARTICLE_STRIDE;
-      hits.push({
-        x: data[off],
-        y: data[off + 1],
-        hue: data[off + 3],
-        brightness: data[off + 4],
-        eps: data[off + 5],
-        size: data[off + 6],
-        tailAngle: data[off + 7],
-        born: data[off + 2],
-      });
-    }
-    arrivalCounter += takeCount;
-  }
-
-  function drainPendingBatches(maxParticles: number): void {
-    let remaining = maxParticles;
-    while (remaining > 0 && pendingBatches.length > 0) {
-      const batch = pendingBatches[0];
-      const takeCount = Math.min(batch.count, remaining);
-      ingestBatchPrefix(batch, takeCount);
-      remaining -= takeCount;
-
-      if (takeCount === batch.count) {
-        pendingBatches.shift();
-        continue;
-      }
-
-      pendingBatches[0] = {
-        data: batch.data.subarray(takeCount * PARTICLE_STRIDE),
-        count: batch.count - takeCount,
-      };
-    }
-  }
 
   // ── 7. Visibility / focus management ─────────────────────────────
   // Two hard states plus an optional mobile-only soft throttle:
@@ -479,7 +419,7 @@ async function main() {
     // instead of hard-trimming the buffer.  Existing particles fade out
     // naturally via Weibull; no pipeline flush so workers don't re-flood.
     // The multiplier decays back toward 1.0 over ~2 s.
-    if (rawGapMs > 150 && hits.length > 10_000) {
+    if (rawGapMs > 150 && renderer.ringBuffer.totalWritten > 10_000) {
       throttleMultiplier = Math.max(0.1, throttleMultiplier * 0.5);
       console.warn(`[main] Frame watchdog: ${rawGapMs.toFixed(0)}ms lag — throttle to ${(throttleMultiplier * 100).toFixed(0)}%`);
     } else if (throttleMultiplier < 1.0) {
@@ -560,12 +500,7 @@ async function main() {
           // Weibull, avoiding the near-total wipe at high arrivalSpread where
           // many particles are future-born.
           if (physicsDirty) {
-            const horizon = now + 5;
-            let wi = 0;
-            for (let i = 0; i < hits.length; i++) {
-              if (hits[i].born <= horizon) hits[wi++] = hits[i];
-            }
-            hits.length = wi;
+            renderer.ringBuffer.invalidateFuture(now + 5);
             physicsDirty = false;
           }
 
@@ -590,11 +525,8 @@ async function main() {
       simTime += dt;
 
       // ── Compound-budget throttling ─────────────────────────────
-      // Three proactive caps (renderer, physics, buffer) prevent the
-      // TOTAL emission rate (base + pair production) from exceeding
-      // what the hardware can iterate per frame.  A smooth reactive
-      // back-pressure handles transient overloads.  The watchdog
-      // throttle multiplier (set above) is applied last.
+      // Two proactive caps (VRAM, physics) prevent unbounded growth.
+      // GPU handles rendering cheaply but unbounded VRAM growth is dangerous.
       let effectiveRate = params.particleRate;
 
       // Account for pair-production multiplier: workers emit
@@ -604,19 +536,9 @@ async function main() {
         : 0;
       const totalMultiplier = 1 + ppFraction;
 
-      // When bloom is active the 4-pass pipeline makes each particle
-      // ~3× more expensive to render.  Scale down the effective ceiling
-      // so the existing CPU-side caps kick in at the right level.
-      const bloomActive = params.bloomEnabled || params.ringBloomEnabled;
-      const frameBudgetScale = frameLeewayScale();
-      const baseVisibleHitBudget = bloomActive
-        ? Math.round(budget.maxVisibleHits * 0.35)
-        : budget.maxVisibleHits;
-      const effectiveMaxHits = Math.max(1, Math.round(baseVisibleHitBudget * frameBudgetScale));
-
-      // (a) Renderer cost: cap total rate so totalRate × persistence ≤ effectiveMaxHits
-      const maxByRenderer = effectiveMaxHits / (Math.max(params.persistence, 0.2) * totalMultiplier);
-      if (effectiveRate > maxByRenderer) effectiveRate = maxByRenderer;
+      // (a) VRAM cap: cap total rate so totalRate × persistence ≤ vramBudgetParticles
+      const maxByVRAM = VRAM_BUDGET_PARTICLES / (Math.max(params.persistence, 0.2) * totalMultiplier);
+      if (effectiveRate > maxByVRAM) effectiveRate = maxByVRAM;
 
       // (b) Physics cost: cap total rate so totalRate × numCoeffs ≤ maxPhysicsCostPerSec
       const numCoeffs = params.lMax * params.lMax + 2 * params.lMax; // Σ(2l+1) for l=1..lMax
@@ -625,20 +547,10 @@ async function main() {
         if (effectiveRate > maxByPhysics) effectiveRate = maxByPhysics;
       }
 
-      // (c) Total buffer: cap total rate so the total hit count
-      //     stays within 2× effectiveMaxHits (fade-expire iterates every hit).
-      const totalWindow = Math.max(params.persistence, 0.2)
-        + params.arrivalSpread * SPREAD_TAIL_MULT + FUTURE_MARGIN;
-      const maxTotalHits = effectiveMaxHits * 2;
-      const maxByBuffer = maxTotalHits / (totalWindow * totalMultiplier);
-      if (effectiveRate > maxByBuffer) effectiveRate = maxByBuffer;
-
-      // (d) Reactive back-pressure: smooth exponential reduction when
-      //     the buffer exceeds the effective ceiling.  Uses exp(-k)
-      //     instead of step-halving to prevent oscillation.
-      if (hits.length > effectiveMaxHits) {
-        const overshoot = hits.length / effectiveMaxHits;
-        effectiveRate *= Math.exp(-0.5 * (overshoot - 1));
+      // (c) Reactive back-pressure: reduce rate when ring buffer is near full
+      if (renderer.ringBuffer.totalWritten > renderer.ringBuffer.capacity * 0.8) {
+        const fillRatio = renderer.ringBuffer.totalWritten / renderer.ringBuffer.capacity;
+        effectiveRate *= Math.exp(-0.5 * (fillRatio - 0.8));
       }
 
       // Apply watchdog throttle (decays back to 1.0 between lag spikes)
@@ -672,103 +584,20 @@ async function main() {
         ppScatterRange: params.ppScatterRange,
       });
 
-      // Ingest particles from previous worker tick(s) incrementally.
-      // This prevents a temporary stall from turning into an unlimited
-      // burst of heap allocations on the next frame.
+      // Ingest particles from previous worker tick(s) — direct ring buffer writes.
+      // No per-frame cap needed: ring buffer writes are just memcpy.
       const batches = bridge.drain();
       if (batches.length > 0) pendingBatches.push(...batches);
-      const maxIngestPerFrame = Math.max(
-        1,
-        Math.round(Math.min(budget.maxArrivalsPerFrame, budget.maxHeapInsertsPerFrame) * frameLeewayScale()),
-      );
-      drainPendingBatches(maxIngestPerFrame);
-    }
-
-    // ── Fade-expire & partition hits (zero allocation) ————————————
-    // Single pass: compact live hits, partitioned as visible-first.
-    //   hits[0 .. visibleCount)          — already-arrived, rendered
-    //   hits[visibleCount .. total)      — future arrivals, kept but not rendered
-    //
-    // params.persistence = user-facing "fade duration" (seconds).
-    // τ = internal Weibull scale parameter derived from the user duration.
-    // cutoff = duration × safety margin (the user's slider value is the
-    //          exact time to reach the discard threshold, so the cutoff
-    //          is just duration × a small margin for anti-pop).
-    const fadeThreshold = FADE_THRESHOLD;
-    const k = params.fadeSharpness;
-    const tau = fadeDurationToTau(params.persistence, k);
-    const cutoff = params.persistence * CUTOFF_MARGIN;
-    visibleCount = 0;
-    let futureIdx = 0;
-    for (let i = 0; i < hits.length; i++) {
-      const hit = hits[i];
-      const age = displayTime - hit.born;
-      if (age > cutoff) continue;        // expired — discard
-      if (age < 0) {
-        // Future arrival — stash in reusable buffer, append after visible.
-        if (age < -(params.arrivalSpread * SPREAD_TAIL_MULT + FUTURE_MARGIN)) continue;
-        _futureHits[futureIdx++] = hit;
-        continue;
-      }
-      // Born: check if still bright enough to render (Weibull, matches renderer)
-      const fade = Math.exp(-Math.pow(age / tau, k));
-      if (fade < fadeThreshold) continue; // too dim — discard
-      hits[visibleCount++] = hit;
-    }
-    // Append future hits after visible partition
-    for (let i = 0; i < futureIdx; i++) {
-      hits[visibleCount + i] = _futureHits[i];
-    }
-    hits.length = visibleCount + futureIdx;
-
-    // ── Soft cap: hardware-budget drain ────────────────────────────
-    // Cull visible particles only when they exceed what the hardware
-    // can actually iterate per frame.  When bloom is active the GPU
-    // cost per particle is ~3× higher, so we use a reduced ceiling.
-    // Drain rate: 5% for mild excess → 30% for severe (≥2× ceiling).
-    const bloomOn = params.bloomEnabled || params.ringBloomEnabled;
-    const capHits = Math.max(
-      1,
-      Math.round(
-        (bloomOn ? budget.maxVisibleHits * 0.35 : budget.maxVisibleHits) * frameLeewayScale(),
-      ),
-    );
-    if (visibleCount > capHits) {
-      const excess = visibleCount - capHits;
-      const overRatio = Math.min(excess / Math.max(capHits, 1), 2);
-      const drainFraction = 0.05 + 0.25 * Math.min(overRatio, 1);
-      const dropCount = Math.max(1, Math.ceil(excess * drainFraction));
-      const newLen = hits.length - dropCount;
-      for (let i = dropCount; i < hits.length; i++) {
-        hits[i - dropCount] = hits[i];
-      }
-      hits.length = newLen;
-      visibleCount -= dropCount;
-    }
-
-    // ── Future cap: limit buffered future particles ──────────────
-    // Prevents unbounded memory growth from large arrivalSpread values.
-    // Hard limit: never buffer more future hits than maxVisibleHits.
-    const futureCount = hits.length - visibleCount;
-    const futureWindow = params.arrivalSpread * SPREAD_TAIL_MULT + FUTURE_MARGIN;
-    const maxFuture = Math.min(
-      Math.max(1, Math.round(budget.maxVisibleHits * frameLeewayScale())),
-      Math.max(10_000, Math.ceil(params.particleRate * futureWindow * 2)),
-    );
-    if (futureCount > maxFuture) {
-      hits.length = visibleCount + maxFuture;
-    }
-
-    // Enforce emergency ceiling (prevents multi-GB RAM at extreme settings)
-    if (hits.length > EMERGENCY_HIT_CAP) {
-      hits = hits.slice(hits.length - EMERGENCY_HIT_CAP);
-      // Recount visible after truncation (visible-first layout preserved)
-      visibleCount = 0;
-      for (let i = 0; i < hits.length; i++) {
-        if (hits[i].born <= displayTime) visibleCount++;
-        else break;  // visible partition ends at first future hit
+      const cutoff = params.persistence * CUTOFF_MARGIN;
+      while (pendingBatches.length > 0) {
+        const batch = pendingBatches.shift()!;
+        renderer.ringBuffer.writeBatch(batch.data, batch.count, PARTICLE_STRIDE, displayTime, cutoff);
+        arrivalCounter += batch.count;
       }
     }
+
+    // ── Compute tau for GPU shader uniform ────────────────────────
+    const tau = fadeDurationToTau(params.persistence, params.fadeSharpness);
 
     renderer.hitBaseSize = params.hitSize;
     renderer.brightnessMultiplier = params.brightness;
@@ -813,7 +642,7 @@ async function main() {
     renderer.minEps = physics.bounceProps(maxBetaEff).eps;
     renderer.backgroundColor = parseInt(params.backgroundColor.replace('#', ''), 16);
     renderer.zoom = params.zoom;
-    renderer.updateHits(hits, visibleCount, displayTime, tau);
+    renderer.updateUniforms(displayTime, tau);
     const renderStart = performance.now();
     renderer.render();
     renderMsAccum += performance.now() - renderStart;
@@ -842,7 +671,7 @@ async function main() {
         ? (params.betaPP / ECSKPhysics.BETA_CR).toFixed(2)
         : "off";
       hud.flux = arrivalRateSmooth.toFixed(0);
-      hud.visible = String(visibleCount);
+      hud.visible = String(renderer.ringBuffer.totalWritten);
       hud.fps = String(fps);
       // Update screen info in HUD (may change if moved between monitors)
       const si = screenDetector.info;
@@ -879,7 +708,7 @@ async function main() {
       const gpuPct = Math.round(gpuLoadSmooth * 100);
       const gpuColor = gpuLoadSmooth > 0.9 ? ' ⚠️ HIGH' : gpuLoadSmooth > 0.7 ? ' • BUSY' : '';
       hud.gpuLoad = `${gpuPct}%${gpuColor}`;
-      hud.bufferFill = `${(hits.length / 1000).toFixed(0)}K / ${(EMERGENCY_HIT_CAP / 1000).toFixed(0)}K`;
+      hud.bufferFill = `${(renderer.ringBuffer.totalWritten / 1000).toFixed(0)}K / ${(renderer.ringBuffer.capacity / 1000).toFixed(0)}K`;
       updateHUD();
     }
   }

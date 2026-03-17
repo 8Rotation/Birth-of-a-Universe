@@ -100,14 +100,10 @@ export interface SliderLimits {
 export interface ComputeBudget {
   /** Recommended default particle rate (/s) */
   particleRate: number;
-  /** Emergency hit cap (absolute max hits in memory) */
+  /** Emergency hit cap (absolute max hits in ring buffer VRAM) */
   emergencyHitCap: number;
   /** Max particles the worker should produce per tick */
   maxParticlesPerTick: number;
-  /** Max arrivals to process per frame on the main thread */
-  maxArrivalsPerFrame: number;
-  /** Max heap inserts per frame */
-  maxHeapInsertsPerFrame: number;
   /** Initial GPU buffer capacity (# of hits) */
   initialGpuCapacity: number;
   /** Whether bloom should default to on */
@@ -124,9 +120,9 @@ export interface ComputeBudget {
   // combinatorial explosion that individual slider limits miss.
 
   /**
-   * Max visible particles the CPU renderer loop can handle per frame
-   * at the target framerate (~100 ns per hit in updateHits).
-   * Caps the effective `particleRate × persistence` product.
+   * Max particles in the ring buffer (VRAM budget cap).
+   * Caps the effective `particleRate × persistence` product to prevent
+   * unbounded VRAM growth. At 28 bytes/particle, 2M = 56 MB VRAM.
    */
   maxVisibleHits: number;
 
@@ -444,8 +440,6 @@ function buildBudget(t: number, cpuCores: number, cpuT: number): ComputeBudget {
     // ARE capability-gated) rather than hidden hard ceilings.
     emergencyHitCap:        lerpInt(200_000,  20_000_000, t, 1.5),
     maxParticlesPerTick:    lerpInt(5_000,    300_000,    t, 1.3),
-    maxArrivalsPerFrame:    lerpInt(5_000,    150_000,    t, 1.2),
-    maxHeapInsertsPerFrame: lerpInt(8_000,    300_000,    t, 1.2),
     initialGpuCapacity:     lerpPow2(14, 20, t, 1.2), // 2^14=16K → 2^20=1M
 
     // ── Workers ──────────────────────────────────────────────────
@@ -465,10 +459,11 @@ function buildBudget(t: number, cpuCores: number, cpuT: number): ComputeBudget {
     },
 
     // ── Compound budget limits ──────────────────────────────────
-    // maxVisibleHits: CPU renderer iterates every visible hit per frame
-    // (~100 ns each).  At 60 fps the frame budget is 16.7 ms, leaving
-    // ~8 ms for updateHits → ~80 K hits.  Scale generously to allow
-    // some stutter at max settings while preventing multi-second frames.
+    // maxVisibleHits: VRAM budget cap for the ring buffer.
+    // At 28 bytes/particle, 800K = ~22 MB VRAM, 2M = ~56 MB.
+    // GPU handles rendering cheaply but unbounded VRAM growth is dangerous.
+    // Also used by controls.ts random-settings clamp to prevent
+    // combinatorial explosion of rate × persistence.
     maxVisibleHits:         lerpInt(50_000,   800_000,   t, 1.3),
 
     // maxPhysicsCostPerSec: spherical-harmonic evaluations across all

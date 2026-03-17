@@ -138,6 +138,8 @@ declare module "three/tsl" {
   export function dot(a: N, b: N): N;
   export function cross(a: N, b: N): N;
   export function select(condition: N, a: N | number, b: N | number): N;
+  export function step(edge: N | number, x: N | number): N;
+  export function mod(x: N | number, y: N | number): N;
   export function instancedBufferAttribute(attr: any, type?: string, stride?: number, offset?: number): N;
   export function instancedDynamicBufferAttribute(attr: any, type?: string, stride?: number, offset?: number): N;
   export function Discard(conditional?: N): N;
