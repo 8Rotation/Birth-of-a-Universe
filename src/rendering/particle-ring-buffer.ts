@@ -35,6 +35,8 @@ export class ParticleRingBuffer {
   private _gpuDevice: GPUDevice | null = null;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private _gpuBackend: any = null;
+  /** False after grow() until the next needsUpdate cycle re-creates GPUBuffers. */
+  private _gpuBufCacheValid = false;
 
   constructor(initialCapacity: number) {
     this._capacity = initialCapacity;
@@ -165,38 +167,45 @@ export class ParticleRingBuffer {
     if (grew) return;
 
     // Try direct partial GPU write (bypasses full-buffer re-upload)
-    if (this._gpuDevice && this._gpuBackend) {
+    if (this._gpuDevice && this._gpuBackend && this._gpuBufCacheValid) {
       const gpuBufA: GPUBuffer | undefined = this._gpuBackend.get(this._attrA)?.buffer;
       const gpuBufB: GPUBuffer | undefined = this._gpuBackend.get(this._attrB)?.buffer;
 
       if (gpuBufA && gpuBufB) {
-        // Cast: TS infers Float32Array<ArrayBufferLike> from attr.array,
-        // but these are always backed by a plain ArrayBuffer (not shared).
-        const srcA = a as Float32Array<ArrayBuffer>;
-        const srcB = b as Float32Array<ArrayBuffer>;
-
-        if (writeStart + count <= this._capacity) {
-          // Contiguous write — single GPU upload per attribute
-          const byteOffset = writeStart * 16; // 4 floats × 4 bytes
-          this._gpuDevice.queue.writeBuffer(gpuBufA, byteOffset, srcA, writeStart * 4, count * 4);
-          this._gpuDevice.queue.writeBuffer(gpuBufB, byteOffset, srcB, writeStart * 4, count * 4);
+        // Verify buffer sizes match current capacity (stale after grow)
+        const expectedSize = this._capacity * 16; // 4 floats × 4 bytes
+        if (gpuBufA.size < expectedSize || gpuBufB.size < expectedSize) {
+          // GPUBuffers are stale (pre-grow size) — fall through to needsUpdate
+          this._gpuBufCacheValid = false;
         } else {
-          // Wrap-around — two GPU uploads per attribute
-          const firstChunk = this._capacity - writeStart;
-          const byteOffset1 = writeStart * 16;
-          this._gpuDevice.queue.writeBuffer(gpuBufA, byteOffset1, srcA, writeStart * 4, firstChunk * 4);
-          this._gpuDevice.queue.writeBuffer(gpuBufB, byteOffset1, srcB, writeStart * 4, firstChunk * 4);
-          const wrapCount = count - firstChunk;
-          this._gpuDevice.queue.writeBuffer(gpuBufA, 0, srcA, 0, wrapCount * 4);
-          this._gpuDevice.queue.writeBuffer(gpuBufB, 0, srcB, 0, wrapCount * 4);
+          const srcA = a as Float32Array<ArrayBuffer>;
+          const srcB = b as Float32Array<ArrayBuffer>;
+
+          if (writeStart + count <= this._capacity) {
+            // Contiguous write — single GPU upload per attribute
+            const byteOffset = writeStart * 16; // 4 floats × 4 bytes
+            this._gpuDevice.queue.writeBuffer(gpuBufA, byteOffset, srcA, writeStart * 4, count * 4);
+            this._gpuDevice.queue.writeBuffer(gpuBufB, byteOffset, srcB, writeStart * 4, count * 4);
+          } else {
+            // Wrap-around — two GPU uploads per attribute
+            const firstChunk = this._capacity - writeStart;
+            const byteOffset1 = writeStart * 16;
+            this._gpuDevice.queue.writeBuffer(gpuBufA, byteOffset1, srcA, writeStart * 4, firstChunk * 4);
+            this._gpuDevice.queue.writeBuffer(gpuBufB, byteOffset1, srcB, writeStart * 4, firstChunk * 4);
+            const wrapCount = count - firstChunk;
+            this._gpuDevice.queue.writeBuffer(gpuBufA, 0, srcA, 0, wrapCount * 4);
+            this._gpuDevice.queue.writeBuffer(gpuBufB, 0, srcB, 0, wrapCount * 4);
+          }
+          return; // skip needsUpdate — we wrote directly to the GPU
         }
-        return; // skip needsUpdate — we wrote directly to the GPU
       }
     }
 
-    // Fallback: GPUBuffer not yet created (first frame) or no device
+    // Fallback: GPUBuffer not yet created (first frame), stale after grow, or no device.
+    // After Three.js processes needsUpdate it creates correctly-sized GPUBuffers.
     this._attrA.needsUpdate = true;
     this._attrB.needsUpdate = true;
+    this._gpuBufCacheValid = true; // new GPUBuffers will match capacity after upload
   }
 
   // ── Alive-range tracking ─────────────────────────────────────────────
@@ -215,27 +224,33 @@ export class ParticleRingBuffer {
 
     if (this._totalWritten <= this._capacity) {
       // Buffer hasn't wrapped — particles are at slots [0, totalWritten).
-      // Scan from 0 (oldest) to find first alive particle.
-      let start = 0;
-      while (start < this._totalWritten) {
-        const born = a[start * 4 + 2];
-        if (born > cutoff) break;
-        start++;
+      // Binary search for the first alive particle (bornTime > cutoff).
+      // bornTime is monotonically increasing in write order.
+      let lo = 0, hi = this._totalWritten;
+      while (lo < hi) {
+        const mid = (lo + hi) >>> 1;
+        if (a[mid * 4 + 2] <= cutoff) lo = mid + 1;
+        else hi = mid;
       }
-      return { start, count: this._totalWritten - start };
+      return { start: lo, count: this._totalWritten - lo };
     }
 
-    // Buffer has wrapped. Scan from writeHead (oldest slot) forward
-    // until we find the first alive particle.
-    let start = this._writeHead; // oldest slot
-    let skipped = 0;
-    while (skipped < this._capacity) {
-      const born = a[start * 4 + 2];
-      if (born > cutoff) break; // this particle is still alive
-      start = (start + 1) % this._capacity;
-      skipped++;
+    // Buffer has wrapped — oldest slot is at writeHead.
+    // Particles were written in chronological order, so bornTime is
+    // monotonically increasing from writeHead around the ring.
+    // Binary search over the logical (chronological) index space [0, capacity).
+    const cap = this._capacity;
+    const wh = this._writeHead;
+    let lo = 0, hi = cap;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      const physIdx = (wh + mid) % cap;
+      if (a[physIdx * 4 + 2] <= cutoff) lo = mid + 1;
+      else hi = mid;
     }
-    const count = this._capacity - skipped;
+    // lo = number of dead particles from oldest
+    const start = (wh + lo) % cap;
+    const count = cap - lo;
     return { start, count };
   }
 
@@ -302,6 +317,12 @@ export class ParticleRingBuffer {
     if (this._totalWritten >= oldCap) {
       this._writeHead = oldCap;
     }
+
+    // Invalidate cached GPU buffer references — the old GPUBuffers
+    // are now too small.  Next writeBatch() will either get the new
+    // GPUBuffer from the backend (after Three.js re-uploads via
+    // needsUpdate) or fall back to needsUpdate again.
+    this._gpuBufCacheValid = false;
 
     console.log(
       `[ring-buffer] Grown → ${newCap} particles ` +

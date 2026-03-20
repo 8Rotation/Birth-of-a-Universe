@@ -511,6 +511,18 @@ async function main() {
       // (Soft cap moved to after fade-expire partition — see below)
     }
 
+    // ── Proactive buffer pre-sizing ─────────────────────────────────
+    // When persistence is high, pre-grow the ring buffer so it doesn't
+    // hit repeated grow() stalls during the fill-up phase.  Only grows
+    // (never shrinks), cost amortized: each doubling happens at most once.
+    {
+      const neededCapacity = Math.ceil(params.particleRate * params.persistence * CUTOFF_MARGIN);
+      const clampedNeed = Math.min(neededCapacity, VRAM_BUDGET_PARTICLES);
+      if (clampedNeed > renderer.ringBuffer.capacity) {
+        renderer.ringBuffer.grow(clampedNeed);
+      }
+    }
+
     // ── Freeze: snapshot display time so particles stop aging ────
     if (params.frozen) {
       // On first frozen frame, capture the current time
@@ -603,8 +615,11 @@ async function main() {
     renderer.hitBaseSize = params.hitSize;
     renderer.brightnessMultiplier = params.brightness;
     renderer.roundParticles = params.roundParticles;
-    renderer.useBloom = params.bloomEnabled;
+    renderer.useBloom = params.bloomEnabled || params.ringBloomEnabled;
     renderer.particleBloomEnabled = params.bloomEnabled;
+    renderer.ringBloomEnabled = params.ringBloomEnabled;
+    renderer.ringBloomStrength = params.ringBloomStrength;
+    renderer.ringBloomRadius = params.ringBloomRadius;
     renderer.bloomStrength = params.bloomStrength;
     renderer.bloomRadius = params.bloomRadius;
     renderer.bloomThreshold = params.bloomThreshold;

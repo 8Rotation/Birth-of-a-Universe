@@ -259,6 +259,9 @@ export class SensorRenderer {
   // Ring geometry + bloom controls (independent of particle bloom)
   ringWidthPx = 2;           // ring thickness in CSS pixels
   particleBloomEnabled = true; // particle bloom on/off
+  ringBloomEnabled = true;   // ring bloom on/off (independent of particle bloom)
+  ringBloomStrength = 0.8;   // ring-only bloom intensity
+  ringBloomRadius = 0.4;     // ring-only bloom spread
   ringAutoColor = false;     // match ring colour to dominant particle hue
   /** Last effective ring colour (hex int), whether manual or auto-computed. */
   effectiveRingColor = 0xff6633;
@@ -661,18 +664,17 @@ export class SensorRenderer {
       );
       this._bloomNode = bloomNode;
 
-      // ── Bloom quality: patch setSize for resolution scaling ─────────
-      // BloomNode.updateBefore calls setSize(drawWidth, drawHeight) every
-      // frame. Intercepting it lets us halve the bloom resolution for
-      // 'low' quality (~4x fewer pixels) without recreating the pipeline.
-      const renderer = this;
+      // ── Bloom resolution cap: always cap at 1080p equivalent ─────────
+      // Bloom is a low-frequency effect — gaussian blur immediately destroys
+      // pixel-level detail. Running it at 1440p/4K is wasted fill-rate.
+      // Cap at 1080p (~2M pixels) regardless of display resolution.
       const origSetSize = bloomNode.setSize.bind(bloomNode);
+      const MAX_BLOOM_PIXELS = 1920 * 1080;
       bloomNode.setSize = (w: number, h: number) => {
-        const q = renderer.bloomQuality === 'auto'
-          ? renderer.bloomAutoResolvedQuality
-          : renderer.bloomQuality;
-        if (q === 'low') {
-          origSetSize(Math.round(w / 2), Math.round(h / 2));
+        const pixels = w * h;
+        if (pixels > MAX_BLOOM_PIXELS) {
+          const scale = Math.sqrt(MAX_BLOOM_PIXELS / pixels);
+          origSetSize(Math.round(w * scale), Math.round(h * scale));
         } else {
           origSetSize(w, h);
         }
@@ -1018,33 +1020,31 @@ export class SensorRenderer {
       this.renderer.toneMappingExposure = this.softHdrExposure;
     }
 
-    // Push latest UI values into BloomNode's own internal uniform nodes.
-    //
-    // NOTE: BloomNode's "radius" controls mip weight distribution, not spread
-    // distance directly.  At radius=0 the fine (tight) mips dominate, which
-    // seats the bloom halo on top of the particle and reads as blur.
-    // At radius=1 the coarse mips dominate, spreading the glow outward.
-    // This is the opposite of user-intuition ("0 = sharp, 1 = wide"), so we
-    // invert the value before passing it through.
-    // Zero particle bloom strength when particle bloom is disabled so the
-    // pass produces no output (ring bloom may still be active independently).
-    if (this._bloomNode) {
-      this._bloomNode.strength.value  = this.particleBloomEnabled ? this.bloomStrength : 0;
-      this._bloomNode.radius.value    = 1 - this.bloomRadius;   // inverted ↔ intuitive
-      this._bloomNode.threshold.value = this.bloomThreshold;
-    }
-
-    // Gate bloom in the composite via uniform multiplier.
-    // This is the authoritative on/off — strength=0 is just a perf hint.
-    if (this._particleBloomMul) this._particleBloomMul.value = this.particleBloomEnabled ? 1.0 : 0.0;
-
     // ── Render path selection ────────────────────────────────────────
-    // When bloom is enabled and the pipeline is available, use the full
-    // bloom pipeline (single scene + single bloom chain).  Otherwise
-    // fall back to a single renderer.render() call with no bloom.
-    const anyBloomActive = this.particleBloomEnabled && this.bloomStrength > 0;
+    // Use the bloom pipeline only when bloom is actively enabled.
+    // HDR works without bloom — the rgba16float canvas with NoToneMapping
+    // and extended tone mapping passes values >1.0 through to the display
+    // regardless of the render path.
+    const particleBloomActive = this.particleBloomEnabled && this.bloomStrength > 0;
+    const ringBloomActive = this.ringBloomEnabled && this.ringBloomStrength > 0;
+    const anyBloomActive = particleBloomActive || ringBloomActive;
     const needsBloom = this.useBloom && this.pipeline && anyBloomActive;
     if (needsBloom) {
+      if (this._bloomNode) {
+        // When both are active, use particle bloom params (dominant effect).
+        // When only ring bloom is active, use ring bloom params.
+        if (particleBloomActive) {
+          this._bloomNode.strength.value  = this.bloomStrength;
+          this._bloomNode.radius.value    = 1 - this.bloomRadius;
+          this._bloomNode.threshold.value = this.bloomThreshold;
+        } else {
+          this._bloomNode.strength.value  = this.ringBloomStrength;
+          this._bloomNode.radius.value    = 1 - this.ringBloomRadius;
+          this._bloomNode.threshold.value = this.bloomThreshold;
+        }
+      }
+      if (this._particleBloomMul) this._particleBloomMul.value = 1.0;
+
       try {
         this.pipeline!.render();
       } catch (e) {
@@ -1054,10 +1054,8 @@ export class SensorRenderer {
         });
       }
     } else {
-      // Lightweight no-bloom path: single scene render (ring is in main scene)
-      {
-        this.renderer.render(this.scene, this.camera);
-      }
+      // No-bloom path: direct render (HDR values preserved by canvas config)
+      this.renderer.render(this.scene, this.camera);
     }
   }
 
