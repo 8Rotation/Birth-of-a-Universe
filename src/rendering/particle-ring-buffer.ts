@@ -31,6 +31,11 @@ export class ParticleRingBuffer {
   // Packed: [brightness, eps, hitSize, 0] per particle
   private _attrB: THREE.InstancedBufferAttribute;
 
+  // GPU direct-write references (set after first render via setGpuBackend)
+  private _gpuDevice: GPUDevice | null = null;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private _gpuBackend: any = null;
+
   constructor(initialCapacity: number) {
     this._capacity = initialCapacity;
 
@@ -88,6 +93,19 @@ export class ParticleRingBuffer {
     return (this._attrB.array as Float32Array)[index * 4 + 2];
   }
 
+  // ── GPU direct-write setup ──────────────────────────────────────────
+
+  /**
+   * Provide GPU device and Three.js backend references for direct partial
+   * buffer uploads. Call after `renderer.init()` and first render so the
+   * backend has created GPUBuffers for the attributes.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  setGpuBackend(device: GPUDevice, backend: any): void {
+    this._gpuDevice = device;
+    this._gpuBackend = backend;
+  }
+
   // ── Write batch ─────────────────────────────────────────────────────
 
   /**
@@ -108,6 +126,8 @@ export class ParticleRingBuffer {
     cutoffDuration: number,
   ): void {
     const needed = count;
+    let grew = false;
+
     // Check if wrapping would overwrite still-alive slots
     if (this._totalWritten >= this._capacity) {
       const nextHead = this._writeHead;
@@ -115,9 +135,11 @@ export class ParticleRingBuffer {
       const oldest = a[nextHead * 4 + 2]; // bornTime
       if (oldest > now - cutoffDuration) {
         this.grow(this._capacity + needed);
+        grew = true;
       }
     }
 
+    const writeStart = this._writeHead;
     const a = this._attrA.array as Float32Array;
     const b = this._attrB.array as Float32Array;
 
@@ -139,8 +161,82 @@ export class ParticleRingBuffer {
       this._totalWritten++;
     }
 
+    // grow() already set needsUpdate = true for the full re-upload
+    if (grew) return;
+
+    // Try direct partial GPU write (bypasses full-buffer re-upload)
+    if (this._gpuDevice && this._gpuBackend) {
+      const gpuBufA: GPUBuffer | undefined = this._gpuBackend.get(this._attrA)?.buffer;
+      const gpuBufB: GPUBuffer | undefined = this._gpuBackend.get(this._attrB)?.buffer;
+
+      if (gpuBufA && gpuBufB) {
+        // Cast: TS infers Float32Array<ArrayBufferLike> from attr.array,
+        // but these are always backed by a plain ArrayBuffer (not shared).
+        const srcA = a as Float32Array<ArrayBuffer>;
+        const srcB = b as Float32Array<ArrayBuffer>;
+
+        if (writeStart + count <= this._capacity) {
+          // Contiguous write — single GPU upload per attribute
+          const byteOffset = writeStart * 16; // 4 floats × 4 bytes
+          this._gpuDevice.queue.writeBuffer(gpuBufA, byteOffset, srcA, writeStart * 4, count * 4);
+          this._gpuDevice.queue.writeBuffer(gpuBufB, byteOffset, srcB, writeStart * 4, count * 4);
+        } else {
+          // Wrap-around — two GPU uploads per attribute
+          const firstChunk = this._capacity - writeStart;
+          const byteOffset1 = writeStart * 16;
+          this._gpuDevice.queue.writeBuffer(gpuBufA, byteOffset1, srcA, writeStart * 4, firstChunk * 4);
+          this._gpuDevice.queue.writeBuffer(gpuBufB, byteOffset1, srcB, writeStart * 4, firstChunk * 4);
+          const wrapCount = count - firstChunk;
+          this._gpuDevice.queue.writeBuffer(gpuBufA, 0, srcA, 0, wrapCount * 4);
+          this._gpuDevice.queue.writeBuffer(gpuBufB, 0, srcB, 0, wrapCount * 4);
+        }
+        return; // skip needsUpdate — we wrote directly to the GPU
+      }
+    }
+
+    // Fallback: GPUBuffer not yet created (first frame) or no device
     this._attrA.needsUpdate = true;
     this._attrB.needsUpdate = true;
+  }
+
+  // ── Alive-range tracking ─────────────────────────────────────────────
+
+  /**
+   * Returns {start, count} — the contiguous range of potentially-alive slots.
+   * Particles outside this range are guaranteed dead (bornTime + cutoff < now).
+   * May overestimate (include some dead particles at the edges) but never
+   * underestimates (never skips a particle that could be alive).
+   */
+  computeAliveRange(now: number, cutoffDuration: number): { start: number; count: number } {
+    if (this._totalWritten === 0) return { start: 0, count: 0 };
+
+    const a = this._attrA.array as Float32Array;
+    const cutoff = now - cutoffDuration;
+
+    if (this._totalWritten <= this._capacity) {
+      // Buffer hasn't wrapped — particles are at slots [0, totalWritten).
+      // Scan from 0 (oldest) to find first alive particle.
+      let start = 0;
+      while (start < this._totalWritten) {
+        const born = a[start * 4 + 2];
+        if (born > cutoff) break;
+        start++;
+      }
+      return { start, count: this._totalWritten - start };
+    }
+
+    // Buffer has wrapped. Scan from writeHead (oldest slot) forward
+    // until we find the first alive particle.
+    let start = this._writeHead; // oldest slot
+    let skipped = 0;
+    while (skipped < this._capacity) {
+      const born = a[start * 4 + 2];
+      if (born > cutoff) break; // this particle is still alive
+      start = (start + 1) % this._capacity;
+      skipped++;
+    }
+    const count = this._capacity - skipped;
+    return { start, count };
   }
 
   // ── Clear ───────────────────────────────────────────────────────────

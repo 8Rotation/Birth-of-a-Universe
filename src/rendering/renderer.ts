@@ -15,16 +15,17 @@
  * viewed with an orthographic camera looking down -Z.
  *
  * NOTE: WebGPU point primitives are hard-capped at 1×1 pixel by the spec.
- * To get variable-sized particles we use instanced Sprites with
- * PointsNodeMaterial, which expands a quad per instance in the vertex
- * shader and fully supports sizeNode.
+ * To get variable-sized particles we use an InstancedBufferGeometry
+ * with a 2-triangle quad template plus per-instance packed vec4
+ * attributes, rendered via a Mesh with NodeMaterial. The vertex shader
+ * scales each quad to the computed particle size in world units.
  */
 
 import * as THREE from "three";
 import {
   WebGPURenderer,
   RenderPipeline,
-  PointsNodeMaterial,
+  NodeMaterial,
 } from "three/webgpu";
 import {
   pass,
@@ -36,8 +37,6 @@ import {
   smoothstep,
   mix,
   Fn,
-  screenUV,
-  vec2,
   vec3,
   step,
   max,
@@ -49,6 +48,8 @@ import {
   clamp,
   select,
   log,
+  positionLocal,
+  instanceIndex,
 } from "three/tsl";
 import { bloom } from "three/addons/tsl/display/BloomNode.js";
 import type { ScreenInfo } from "../ui/screen-info.js";
@@ -148,9 +149,10 @@ export class SensorRenderer {
   readonly scene: THREE.Scene;
   readonly camera: THREE.OrthographicCamera;
 
-  // Instanced sprite for particle hits (replaces THREE.Points which is
-  // limited to 1px in WebGPU).
-  private sprite!: THREE.Sprite;
+  // Instanced particle mesh: InstancedBufferGeometry (2-triangle quad
+  // template) + per-instance packed vec4 attributes, rendered as a Mesh.
+  private particleMesh!: THREE.Mesh;
+  private _particleGeometry!: THREE.InstancedBufferGeometry;
 
   // GPU ring buffer for write-once per-particle birth data
   private _ringBuf!: ParticleRingBuffer;
@@ -158,15 +160,6 @@ export class SensorRenderer {
   private material!: any; // PointsNodeMaterial (GPU-side path)
   private diskRing!: THREE.Mesh;
   private _ringMaterial!: THREE.MeshBasicMaterial;
-  private _ringScene!: THREE.Scene;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private _ringBloomNode: any = null;
-
-  // TSL uniforms for ring bloom inward-mask (frustum extents in world units)
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private _frustumHalfW: any = null;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private _frustumHalfH: any = null;
 
   // TSL uniform for hit size — drives sizeNode on the material so the
   // slider value propagates to the GPU every frame.
@@ -210,6 +203,16 @@ export class SensorRenderer {
   private _uMinEps!: any;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private _uMaxEps!: any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private _uPixelToWorld!: any;
+
+  // ── Alive-range uniforms (Task 4) ──────────────────────────────────
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private _uAliveStart!: any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private _uAliveCount!: any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private _uCapacity!: any;
 
   private pipeline: RenderPipeline | null = null;
   useBloom = true;
@@ -217,13 +220,11 @@ export class SensorRenderer {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private _bloomNode: any = null;
 
-  // TSL uniform multipliers — gate each bloom term in the composite.
+  // TSL uniform multiplier — gate bloom in the composite.
   // Setting the bloom node's strength to 0 alone is not enough because
   // the gaussian blur chain can still produce non-zero output.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private _particleBloomMul: any = null;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private _ringBloomMul: any = null;
 
   private _ready = false;
 
@@ -258,9 +259,6 @@ export class SensorRenderer {
   // Ring geometry + bloom controls (independent of particle bloom)
   ringWidthPx = 2;           // ring thickness in CSS pixels
   particleBloomEnabled = true; // particle bloom on/off
-  ringBloomEnabled = true;   // ring bloom on/off (independent of particle bloom)
-  ringBloomStrength = 0.8;   // ring-only bloom intensity
-  ringBloomRadius = 0.4;     // ring-only bloom spread
   ringAutoColor = false;     // match ring colour to dominant particle hue
   /** Last effective ring colour (hex int), whether manual or auto-computed. */
   effectiveRingColor = 0xff6633;
@@ -576,10 +574,10 @@ export class SensorRenderer {
       this._setupHDR(screenInfo);
     }
 
-    // ── Instanced sprite for particle hits ────────────────────────────
-    // WebGPU point primitives are always 1px.  PointsNodeMaterial on a
-    // Sprite expands a screen-aligned quad per instance, honouring
-    // sizeNode for arbitrary pixel sizes.
+    // ── Instanced particle mesh ─────────────────────────────────────
+    // WebGPU point primitives are always 1px.  An InstancedBufferGeometry
+    // with a 2-triangle quad template + per-instance attributes renders
+    // variable-sized screen-aligned particles with proper GPU instancing.
 
     // TSL uniforms (reactive every frame)
     this._sizeUniform = uniform(this.hitBaseSize);
@@ -602,11 +600,8 @@ export class SensorRenderer {
     });
     this.diskRing = new THREE.Mesh(baseGeo, this._ringMaterial);
 
-    // ── Separate ring scene for independent ring bloom ───────────────
-    // The ring lives in its own scene so it gets its own bloom pass,
-    // completely independent of particle bloom settings.
-    this._ringScene = new THREE.Scene();
-    this._ringScene.add(this.diskRing);
+    // Ring lives in the main scene — single bloom pass covers everything
+    this.scene.add(this.diskRing);
 
     // ── GPU ring buffer (write-once particle birth data) ─────────────
     this._ringBuf = new ParticleRingBuffer(this._capacity);
@@ -616,11 +611,20 @@ export class SensorRenderer {
     // fade, color, and visibility entirely on the GPU.
     this._initGpuMaterial();
 
-    // Create sprite with GPU material
-    this.sprite = new THREE.Sprite(this.material);
-    this.sprite.count = 0;  // no visible instances yet
-    this.sprite.frustumCulled = false;
-    this.scene.add(this.sprite);
+    // Create instanced particle mesh with GPU material
+    this.particleMesh = new THREE.Mesh(this._particleGeometry, this.material);
+    this.particleMesh.frustumCulled = false;
+    this.scene.add(this.particleMesh);
+
+    // Pass GPU device + backend to ring buffer for direct partial uploads.
+    // GPUBuffers for the attributes are created lazily on first render,
+    // so the initial writeBatch() will use the needsUpdate fallback.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const backend = (this.renderer as any).backend;
+    const gpuDevice: GPUDevice | undefined = backend?.device;
+    if (gpuDevice && backend) {
+      this._ringBuf.setGpuBackend(gpuDevice, backend);
+    }
 
     // Show the first frame immediately (lightweight no-bloom path),
     // then compile bloom shaders in the background.
@@ -635,107 +639,86 @@ export class SensorRenderer {
   }
 
   /**
-   * Compile the two-pass bloom pipeline in the background.
+   * Compile the single-pass bloom pipeline in the background.
    * Called from init() without await so the first frame renders immediately
    * via the lightweight no-bloom path. Once compilation succeeds,
    * `this.useBloom` is set to true and subsequent frames use bloom.
    */
   private _initBloom(): void {
-    // ── Two-pass bloom pipeline ───────────────────────────────────────
-    // Pass 1: particles (main scene) + particle bloom
-    // Pass 2: ring scene + ring bloom
-    // Final composite: pass1Color + pass1Bloom + pass2Color + pass2Bloom
+    // ── Single-pass bloom pipeline ────────────────────────────────────
+    // One scene render (particles + ring) + one bloom chain.
+    // ~12 render passes total vs ~23 with the old two-chain approach.
     try {
       this.pipeline = new RenderPipeline(this.renderer);
 
-      // Particle pass + particle bloom
       const scenePass = pass(this.scene, this.camera);
       const scenePassColor = scenePass.getTextureNode("output");
-      const particleBloom = bloom(
+      const bloomNode = bloom(
         scenePassColor,
         this.bloomStrength,
         this.bloomRadius,
         this.bloomThreshold,
       );
-      this._bloomNode = particleBloom;
-
-      // Ring pass + ring bloom
-      const ringPass = pass(this._ringScene, this.camera);
-      const ringPassColor = ringPass.getTextureNode("output");
-      const ringBloom = bloom(
-        ringPassColor,
-        this.ringBloomStrength,
-        this.ringBloomRadius,
-        0.0,
-      );
-      this._ringBloomNode = ringBloom;
+      this._bloomNode = bloomNode;
 
       // ── Bloom quality: patch setSize for resolution scaling ─────────
       // BloomNode.updateBefore calls setSize(drawWidth, drawHeight) every
       // frame. Intercepting it lets us halve the bloom resolution for
       // 'low' quality (~4x fewer pixels) without recreating the pipeline.
       const renderer = this;
-      for (const node of [particleBloom, ringBloom]) {
-        const origSetSize = node.setSize.bind(node);
-        node.setSize = (w: number, h: number) => {
-          const q = renderer.bloomQuality === 'auto'
-            ? renderer.bloomAutoResolvedQuality
-            : renderer.bloomQuality;
-          if (q === 'low') {
-            origSetSize(Math.round(w / 2), Math.round(h / 2));
-          } else {
-            origSetSize(w, h);
-          }
-        };
-      }
+      const origSetSize = bloomNode.setSize.bind(bloomNode);
+      bloomNode.setSize = (w: number, h: number) => {
+        const q = renderer.bloomQuality === 'auto'
+          ? renderer.bloomAutoResolvedQuality
+          : renderer.bloomQuality;
+        if (q === 'low') {
+          origSetSize(Math.round(w / 2), Math.round(h / 2));
+        } else {
+          origSetSize(w, h);
+        }
+      };
 
-      // ── Outward-only ring bloom mask ─────────────────────────────────
-      // Map screen UV → world-space distance from disk centre.
-      // Zero the ring bloom for any pixel whose world distance < ring
-      // inner radius (2.0) so glow only extends outward.
-      const initAspect = window.innerWidth / window.innerHeight;
-      this._frustumHalfW = uniform(CAMERA_HALF_SIZE * initAspect);
-      this._frustumHalfH = uniform(CAMERA_HALF_SIZE);
-
-      const centreUV = screenUV.sub(vec2(0.5, 0.5));
-      const worldX   = centreUV.x.mul(float(2.0)).mul(this._frustumHalfW);
-      const worldY   = centreUV.y.mul(float(2.0)).mul(this._frustumHalfH);
-      const worldDist = length(vec2(worldX, worldY));
-      // smoothstep: 0 inside ring, ramps to 1 across a thin band at the edge
-      const ringMask  = smoothstep(float(1.95), float(2.05), worldDist);
-      const maskedRingBloom = ringBloom.mul(ringMask);
-
-      // TSL uniform multipliers: definitively zero each bloom in the
+      // TSL uniform multiplier: definitively zero bloom in the
       // composite when its toggle is off, regardless of bloom-node internals.
       this._particleBloomMul = uniform(1.0);
-      this._ringBloomMul = uniform(1.0);
 
-      // ── Background ring composite ────────────────────────────────
-      // Ring is the base layer; particles are composited on top.
-      // The ring sits at r≈2.0 (disk edge) where particles are sparse,
-      // so overlap is minimal.  No per-pixel attenuation — this avoids
-      // edge-case issues where pass-node evaluation interferes with
-      // ring visibility when bloom is active.
-      this.pipeline.outputNode = ringPassColor
-        .add(maskedRingBloom.mul(this._ringBloomMul))
-        .add(scenePassColor)
-        .add(particleBloom.mul(this._particleBloomMul));
+      this.pipeline.outputNode = scenePassColor
+        .add(bloomNode.mul(this._particleBloomMul));
 
       this.useBloom = true;
-      console.log("[sensor] Two-pass bloom enabled (particles + ring)");
+      console.log("[sensor] Single-pass bloom enabled (particles + ring)");
     } catch (e) {
-      // Fallback: add ring to main scene, no separate bloom
-      console.warn("[sensor] Two-pass bloom failed, falling back:", e);
-      this.scene.add(this.diskRing);
+      console.warn("[sensor] Bloom compilation failed, falling back:", e);
       this.useBloom = false;
     }
   }
 
   /**
-   * Create the GPU-side PointsNodeMaterial that reads from ring buffer
-   * attributes and computes fade, color, and visibility in TSL shaders.
+   * Create the GPU-side NodeMaterial on an InstancedBufferGeometry
+   * (2-triangle quad template + per-instance packed vec4 attributes).
+   * Computes fade, color, size, and visibility entirely in TSL shaders.
    */
   private _initGpuMaterial(): void {
+    // ── Quad template geometry (unit quad: ±0.5) ────────────────────
+    const quadGeo = new THREE.InstancedBufferGeometry();
+    const verts = new Float32Array([
+      -0.5, -0.5, 0,   0.5, -0.5, 0,   0.5,  0.5, 0,
+      -0.5, -0.5, 0,   0.5,  0.5, 0,  -0.5,  0.5, 0,
+    ]);
+    const uvs = new Float32Array([
+      0, 0,  1, 0,  1, 1,
+      0, 0,  1, 1,  0, 1,
+    ]);
+    quadGeo.setAttribute('position', new THREE.BufferAttribute(verts, 3));
+    quadGeo.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+
+    // Attach per-instance packed attributes to the geometry
+    quadGeo.setAttribute('aPackedA', this._ringBuf.packedAttrA);
+    quadGeo.setAttribute('aPackedB', this._ringBuf.packedAttrB);
+    quadGeo.instanceCount = 0;  // no visible instances yet
+
+    this._particleGeometry = quadGeo;
+
     // ── TSL uniforms ────────────────────────────────────────────────
     this._uTime = uniform(0.0);
     this._uTau = uniform(1.0);
@@ -752,6 +735,12 @@ export class SensorRenderer {
     this._uPeakNits = uniform(SDR_REFERENCE_WHITE_NITS);
     this._uMinEps = uniform(10.0);
     this._uMaxEps = uniform(10000.0);
+    this._uPixelToWorld = uniform(1.0); // updated each frame
+
+    // Alive-range uniforms: skip dead particles early in the vertex shader
+    this._uAliveStart = uniform(0.0);
+    this._uAliveCount = uniform(0.0);
+    this._uCapacity = uniform(float(this._capacity));
 
     // ── Read packed ring buffer attributes (2 vec4s instead of 6 attrs) ──
     const packedA = instancedDynamicBufferAttribute(this._ringBuf.packedAttrA, "vec4");
@@ -766,22 +755,34 @@ export class SensorRenderer {
     const aEps      = packedB.y;
     const aSize     = packedB.z;
 
-    // ── Position: lx,ly → vec3(lx, ly, 0) ──────────────────────────
-    const posNode = vec3(aLx, aLy, float(0.0));
+    // ── Alive-range pre-filter: skip dead particles before Weibull ──
+    // Compute ring-distance from aliveStart; if >= aliveCount, particle is dead.
+    // Since dead particles form contiguous blocks, entire GPU wavefronts
+    // skip the expensive Weibull+HSL work via branch coherence.
+    const ringDist = mod(instanceIndex.toFloat().sub(this._uAliveStart).add(this._uCapacity), this._uCapacity);
+    const inRange = step(ringDist, this._uAliveCount.sub(float(0.5)));
 
-    // ── Size: Weibull fade + dead-particle culling ──────────────────
+    // ── Size + fade: Weibull fade + dead-particle culling ───────────
     const uTime = this._uTime;
     const uTau = this._uTau;
     const uFadeSharpness = this._uFadeSharpness;
     const uHitBaseSize = this._uHitBaseSize;
+    const uPixelToWorld = this._uPixelToWorld;
 
     // ── Shared per-vertex fade (computed once, used by size + color) ──
     const rawAge = uTime.sub(aBornTime);
     const age = max(float(0.0), rawAge);
     const fade = exp(pow(age.div(uTau), uFadeSharpness).negate());
-    const alive = step(float(0.0), rawAge).mul(step(float(FADE_THRESHOLD), fade));
+    const alive = inRange.mul(step(float(0.0), rawAge)).mul(step(float(FADE_THRESHOLD), fade));
 
-    const sizeNode = aSize.mul(uHitBaseSize).mul(alive);
+    // Size in world units: pixel size × pixel-to-world conversion
+    const sizeWorld = aSize.mul(uHitBaseSize).mul(alive).mul(uPixelToWorld);
+
+    // ── Position: scale quad vertices by size, translate to instance pos ──
+    // positionLocal is the quad template vertex (±0.5, ±0.5, 0).
+    // Scale by sizeWorld and translate to the particle's (lx, ly, 0).
+    const instancePos = vec3(aLx, aLy, float(0.0));
+    const posNode = instancePos.add(positionLocal.mul(sizeWorld));
 
     // ── Color: HSL→RGB + SDR/HDR brightness scaling ─────────────────
     const uBri = this._uBrightnessMultiplier;
@@ -837,15 +838,13 @@ export class SensorRenderer {
     });
 
     // ── Assemble GPU material ───────────────────────────────────────
-    this.material = new PointsNodeMaterial({
-      sizeAttenuation: false,
+    this.material = new NodeMaterial({
       transparent: true,
       depthWrite: false,
       blending: THREE.AdditiveBlending,
     });
     this.material.positionNode = posNode;
     this.material.colorNode = colorNode;
-    this.material.sizeNode = sizeNode;
     this.material.opacityNode = gpuCircleOpacity();
     this.material.alphaTest = 0.01;
   }
@@ -920,8 +919,33 @@ export class SensorRenderer {
     }
     this._uAutoGain.value = autoGain;
 
-    // ── Sprite count = only slots with real data ─────────────────────
-    this.sprite.count = this._ringBuf.activeCount;
+    // ── Alive-range optimization: skip dead particles ─────────────
+    // Compute the Weibull cutoff duration (age beyond which fade < threshold)
+    const k = Math.max(0.01, this.fadeSharpness);
+    const cutoffDuration = tau * Math.pow(-Math.log(FADE_THRESHOLD), 1 / k) * 1.2;
+    const { start, count } = this._ringBuf.computeAliveRange(now, cutoffDuration);
+    this._uAliveStart.value = start;
+    this._uAliveCount.value = count;
+    this._uCapacity.value = this._ringBuf.capacity;
+
+    // Set instanceCount: draw only up to the end of the alive range.
+    // When the alive range doesn't wrap, we can skip trailing dead slots.
+    const aliveEnd = start + count;
+    if (aliveEnd <= this._ringBuf.capacity) {
+      // Contiguous alive range — draw [0, aliveEnd), shader culls [0, start)
+      this._particleGeometry.instanceCount = aliveEnd;
+    } else {
+      // Alive range wraps — must draw all active slots
+      this._particleGeometry.instanceCount = this._ringBuf.activeCount;
+    }
+
+    // ── Pixel-to-world conversion for quad sizing ────────────────────
+    const aspect = window.innerWidth / window.innerHeight;
+    const baseV = aspect < 1 ? CAMERA_HALF_SIZE / aspect : CAMERA_HALF_SIZE;
+    const V_update = baseV / Math.max(this.zoom, 0.01);
+    const frustumH = 2 * V_update;
+    const renderH = this.renderer.domElement.height;  // backing store px
+    this._uPixelToWorld.value = frustumH / renderH;
 
     // ── Auto-ring-color (sample from ring buffer arrays) ─────────────
     this.effectiveRingColor = this.ringColor;
@@ -953,8 +977,8 @@ export class SensorRenderer {
 
     // Ring width: convert CSS pixels → world units
     const viewportH = window.innerHeight;
-    const frustumH = (2 * CAMERA_HALF_SIZE) / Math.max(this.zoom, 0.01);
-    const ringWidthWorld = Math.max(0.001, this.ringWidthPx * (frustumH / viewportH));
+    const ringFrustumH = (2 * CAMERA_HALF_SIZE) / Math.max(this.zoom, 0.01);
+    const ringWidthWorld = Math.max(0.001, this.ringWidthPx * (ringFrustumH / viewportH));
     if (Math.abs(ringWidthWorld - this._lastRingWidthWorld) > 1e-6) {
       this._lastRingWidthWorld = ringWidthWorld;
       const oldGeo = this.diskRing.geometry;
@@ -1010,35 +1034,15 @@ export class SensorRenderer {
       this._bloomNode.threshold.value = this.bloomThreshold;
     }
 
-    // Push ring bloom uniforms (same inversion convention for radius)
-    // Zero strength when ring bloom is disabled so the pass produces no output.
-    if (this._ringBloomNode) {
-      this._ringBloomNode.strength.value  = this.ringBloomEnabled ? this.ringBloomStrength : 0;
-      this._ringBloomNode.radius.value    = 1 - this.ringBloomRadius;
-    }
-
-    // Gate each bloom term in the composite via uniform multipliers.
+    // Gate bloom in the composite via uniform multiplier.
     // This is the authoritative on/off — strength=0 is just a perf hint.
     if (this._particleBloomMul) this._particleBloomMul.value = this.particleBloomEnabled ? 1.0 : 0.0;
-    if (this._ringBloomMul) this._ringBloomMul.value = this.ringBloomEnabled ? 1.0 : 0.0;
-
-    // Keep ring-bloom mask in sync with current zoom / aspect
-    if (this._frustumHalfW && this._frustumHalfH) {
-      const aspect = window.innerWidth / window.innerHeight;
-      this._frustumHalfW.value = V * aspect;
-      this._frustumHalfH.value = V;
-    }
 
     // ── Render path selection ────────────────────────────────────────
     // When bloom is enabled and the pipeline is available, use the full
-    // multi-pass bloom pipeline.  Otherwise fall back to a lightweight
-    // two-pass render (particles + ring scene) with no bloom.
-    // The pipeline is needed whenever either bloom toggle is on — ring
-    // bloom should work even with 0 particles since the ring has its own
-    // scene.  Skip only when both strengths are zero (pure waste).
-    const anyBloomActive =
-      (this.particleBloomEnabled && this.bloomStrength > 0)
-      || (this.ringBloomEnabled && this.ringBloomStrength > 0);
+    // bloom pipeline (single scene + single bloom chain).  Otherwise
+    // fall back to a single renderer.render() call with no bloom.
+    const anyBloomActive = this.particleBloomEnabled && this.bloomStrength > 0;
     const needsBloom = this.useBloom && this.pipeline && anyBloomActive;
     if (needsBloom) {
       try {
@@ -1050,16 +1054,8 @@ export class SensorRenderer {
         });
       }
     } else {
-      // Lightweight no-bloom path: ring first (background), particles on top
-      const r = this.renderer as any;
-      if (this._ringScene && this.ringOpacity > 0) {
-        r.autoClear = true;
-        this.renderer.render(this._ringScene, this.camera);
-        r.autoClear = false;
-        this.renderer.render(this.scene, this.camera);
-        r.autoClear = true;
-      } else {
-        r.autoClear = true;
+      // Lightweight no-bloom path: single scene render (ring is in main scene)
+      {
         this.renderer.render(this.scene, this.camera);
       }
     }
@@ -1094,8 +1090,8 @@ export class SensorRenderer {
     this.diskRing?.geometry.dispose();
     this._ringMaterial?.dispose();
 
-    // Sprite + material
-    this.sprite.geometry.dispose();
+    // Particle mesh + material
+    this._particleGeometry.dispose();
     this.material.dispose();
 
     // Renderer last (invalidates the GL/WebGPU context)

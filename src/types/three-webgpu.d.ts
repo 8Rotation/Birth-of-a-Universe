@@ -63,6 +63,20 @@ declare module "three/webgpu" {
     constructor(array: Float32Array, itemSize: number);
   }
 
+  export class NodeMaterial {
+    constructor(params?: any);
+    positionNode: any;
+    colorNode: any;
+    opacityNode: any;
+    fragmentNode: any;
+    transparent: boolean;
+    blending: any;
+    depthWrite: boolean;
+    side: any;
+    alphaTest: number;
+    needsUpdate: boolean;
+  }
+
   export class PointsNodeMaterial {
     constructor(params?: any);
     size: number;
@@ -148,6 +162,7 @@ declare module "three/tsl" {
   export const positionLocal: N;
   export const positionWorld: N;
   export const cameraPosition: N;
+  export const instanceIndex: N;
   export function luminance(color: N): N;
   export const output: N;
   export const emissive: N;

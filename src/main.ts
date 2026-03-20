@@ -603,7 +603,7 @@ async function main() {
     renderer.hitBaseSize = params.hitSize;
     renderer.brightnessMultiplier = params.brightness;
     renderer.roundParticles = params.roundParticles;
-    renderer.useBloom = params.bloomEnabled || (params.ringEnabled && params.ringBloomEnabled);  // either bloom activates pipeline
+    renderer.useBloom = params.bloomEnabled;
     renderer.particleBloomEnabled = params.bloomEnabled;
     renderer.bloomStrength = params.bloomStrength;
     renderer.bloomRadius = params.bloomRadius;
@@ -617,9 +617,6 @@ async function main() {
     renderer.ringOpacity = params.ringEnabled ? params.ringOpacity : 0;
     renderer.ringColor = parseInt(params.ringColor.replace('#', ''), 16);
     renderer.ringWidthPx = params.ringWidthPx;
-    renderer.ringBloomEnabled = params.ringEnabled && params.ringBloomEnabled;
-    renderer.ringBloomStrength = params.ringBloomStrength;
-    renderer.ringBloomRadius = params.ringBloomRadius;
     renderer.ringAutoColor = params.ringEnabled;
 
     // When auto-colour is active, feed the computed colour back into the
