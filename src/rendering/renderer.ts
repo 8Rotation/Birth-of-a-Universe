@@ -132,6 +132,8 @@ const RING_SEGMENTS = 256;
 const DEFAULT_INITIAL_CAPACITY = 65_536;
 /** Fixed outer radius for circular particle clipping. */
 const CIRCLE_OUTER_R = 0.50;
+/** Three.js layer index for bloom-eligible objects (separate from default layer 0). */
+const BLOOM_LAYER = 1;
 
 // ── Auto-brightness constants ─────────────────────────────────────────────
 /** Log-scale reference for eps→brightness mapping (must match shell.ts). */
@@ -219,6 +221,10 @@ export class SensorRenderer {
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private _bloomNode: any = null;
+
+  // Camera clone used for the selective bloom pass — only sees BLOOM_LAYER.
+  // Synced with the main camera's projection each frame.
+  private _bloomCamera: THREE.OrthographicCamera | null = null;
 
   // TSL uniform multiplier — gate bloom in the composite.
   // Setting the bloom node's strength to 0 alone is not enough because
@@ -648,16 +654,27 @@ export class SensorRenderer {
    * `this.useBloom` is set to true and subsequent frames use bloom.
    */
   private _initBloom(): void {
-    // ── Single-pass bloom pipeline ────────────────────────────────────
-    // One scene render (particles + ring) + one bloom chain.
-    // ~12 render passes total vs ~23 with the old two-chain approach.
+    // ── Layer-based selective bloom pipeline ──────────────────────────
+    // Two scene passes: one full scene (display), one bloom-eligible
+    // objects only (bloom input). ~13 render passes total.
+    // Particle bloom and ring bloom are truly independent: each object's
+    // BLOOM_LAYER membership controls whether it contributes to bloom.
     try {
       this.pipeline = new RenderPipeline(this.renderer);
 
+      // Pass 1: full scene for display (main camera sees default layer 0)
       const scenePass = pass(this.scene, this.camera);
       const scenePassColor = scenePass.getTextureNode("output");
+
+      // Pass 2: bloom-eligible objects only (bloom camera sees BLOOM_LAYER)
+      this._bloomCamera = this.camera.clone();
+      this._bloomCamera.layers.set(BLOOM_LAYER);
+      const bloomScenePass = pass(this.scene, this._bloomCamera);
+      const bloomSceneColor = bloomScenePass.getTextureNode("output");
+
+      // Bloom computed from bloom-eligible objects only
       const bloomNode = bloom(
-        scenePassColor,
+        bloomSceneColor,
         this.bloomStrength,
         this.bloomRadius,
         this.bloomThreshold,
@@ -684,11 +701,12 @@ export class SensorRenderer {
       // composite when its toggle is off, regardless of bloom-node internals.
       this._particleBloomMul = uniform(1.0);
 
+      // Composite: full scene + selective bloom glow
       this.pipeline.outputNode = scenePassColor
         .add(bloomNode.mul(this._particleBloomMul));
 
       this.useBloom = true;
-      console.log("[sensor] Single-pass bloom enabled (particles + ring)");
+      console.log("[sensor] Selective bloom enabled (layer-based, particles + ring independent)");
     } catch (e) {
       console.warn("[sensor] Bloom compilation failed, falling back:", e);
       this.useBloom = false;
@@ -1020,6 +1038,26 @@ export class SensorRenderer {
       this.renderer.toneMappingExposure = this.softHdrExposure;
     }
 
+    // ── Selective bloom: toggle object layer membership ───────────────
+    // Objects on BLOOM_LAYER are seen by the bloom camera and contribute
+    // to the bloom glow. Objects always remain on layer 0 (main camera).
+    if (this.particleBloomEnabled) {
+      this.particleMesh.layers.enable(BLOOM_LAYER);
+    } else {
+      this.particleMesh.layers.disable(BLOOM_LAYER);
+    }
+    if (this.ringBloomEnabled && this.diskRing.visible) {
+      this.diskRing.layers.enable(BLOOM_LAYER);
+    } else {
+      this.diskRing.layers.disable(BLOOM_LAYER);
+    }
+
+    // Sync bloom camera with main camera (projection, position, zoom)
+    if (this._bloomCamera) {
+      this._bloomCamera.copy(this.camera);
+      this._bloomCamera.layers.set(BLOOM_LAYER);  // restore after copy
+    }
+
     // ── Render path selection ────────────────────────────────────────
     // Use the bloom pipeline only when bloom is actively enabled.
     // HDR works without bloom — the rgba16float canvas with NoToneMapping
@@ -1031,8 +1069,8 @@ export class SensorRenderer {
     const needsBloom = this.useBloom && this.pipeline && anyBloomActive;
     if (needsBloom) {
       if (this._bloomNode) {
-        // When both are active, use particle bloom params (dominant effect).
-        // When only ring bloom is active, use ring bloom params.
+        // Use particle bloom params when particle bloom is active,
+        // otherwise use ring bloom params.
         if (particleBloomActive) {
           this._bloomNode.strength.value  = this.bloomStrength;
           this._bloomNode.radius.value    = 1 - this.bloomRadius;
