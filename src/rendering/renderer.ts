@@ -291,6 +291,9 @@ export class SensorRenderer {
   backgroundColor = 0x000000;
   /** Orthographic zoom multiplier (1.0 = default framing). */
   zoom = 1.0;
+  /** Arrival spread (seconds) — used to extend alive-range cutoff so the
+   *  binary search handles non-monotonic bornTimes correctly. */
+  arrivalSpread = 0;
 
   // ── Auto-brightness ────────────────────────────────────────────────
   /** When true, normalise brightness so the brightest *possible* particle
@@ -1003,7 +1006,13 @@ export class SensorRenderer {
     // ── Alive-range optimization: skip dead particles ─────────────
     // Compute the Weibull cutoff duration (age beyond which fade < threshold)
     const k = Math.max(0.01, this.fadeSharpness);
-    const cutoffDuration = tau * Math.pow(-Math.log(FADE_THRESHOLD), 1 / k) * 1.2;
+    // Extend cutoff by 3× arrivalSpread to account for non-monotonic bornTimes.
+    // arrivalSpread offsets each bornTime by up to ±1.5× spread, so adjacent
+    // slots can differ by up to 3× spread. Without this margin the binary
+    // search in computeAliveRange lands on random positions each frame,
+    // producing visible flicker as chunks of alive particles are clipped.
+    const cutoffDuration = tau * Math.pow(-Math.log(FADE_THRESHOLD), 1 / k) * 1.2
+      + this.arrivalSpread * 3;
     const { start, count } = this._ringBuf.computeAliveRange(now, cutoffDuration);
     this._uAliveStart.value = start;
     this._uAliveCount.value = count;

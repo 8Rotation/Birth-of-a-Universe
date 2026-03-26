@@ -445,9 +445,10 @@ export class StreamEmitter {
         brightness:  bri,
         eps:         epsBuf[i] * dbBriScale,
         // Size: lerp between uniform (1.0) and physics-driven based on sizeVariation.
-        // normAcc is 0–1 from global bounds; at variation=0 all particles are size 1.0.
+        // normAcc clamped to [0,1] — actual perturbations can exceed the
+        // nominal amplitude when many spherical harmonics align.
         hitSize:     1.0 - c.sizeVariation * 0.5
-                     + ((accBuf[i] - globalMinAcc) / globalAccR) * c.sizeVariation,
+                     + Math.max(0, Math.min(1, (accBuf[i] - globalMinAcc) / globalAccR)) * c.sizeVariation,
         tailAngle:   tailBuf[i],
       });
     }
@@ -550,7 +551,7 @@ export class StreamEmitter {
             brightness:  ppBriB[i] * dbBriScale,
             eps:         ppEpsB[i] * dbBriScale,
             hitSize:     (1.0 - c.sizeVariation * 0.5
-                         + ((ppAccB[i] - ppGlobalMin) / ppGlobalR) * c.sizeVariation)
+                         + Math.max(0, Math.min(1, (ppAccB[i] - ppGlobalMin) / ppGlobalR)) * c.sizeVariation)
                          * c.ppSizeScale,
             tailAngle:   ppTailB[i],
           });

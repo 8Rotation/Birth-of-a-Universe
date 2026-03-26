@@ -672,6 +672,7 @@ async function main() {
     renderer.minEps = physics.bounceProps(maxBetaEff).eps;
     renderer.backgroundColor = parseInt(params.backgroundColor.replace('#', ''), 16);
     renderer.zoom = params.zoom;
+    renderer.arrivalSpread = params.arrivalSpread;
     renderer.updateUniforms(displayTime, tau);
     const renderStart = performance.now();
     renderer.render();
