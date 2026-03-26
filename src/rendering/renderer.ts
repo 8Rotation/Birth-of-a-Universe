@@ -132,8 +132,6 @@ const RING_SEGMENTS = 256;
 const DEFAULT_INITIAL_CAPACITY = 65_536;
 /** Fixed outer radius for circular particle clipping. */
 const CIRCLE_OUTER_R = 0.50;
-/** Three.js layer index for bloom-eligible objects (separate from default layer 0). */
-const BLOOM_LAYER = 1;
 
 // ── Auto-brightness constants ─────────────────────────────────────────────
 /** Log-scale reference for eps→brightness mapping (must match shell.ts). */
@@ -222,15 +220,18 @@ export class SensorRenderer {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private _bloomNode: any = null;
 
-  // Camera clone used for the selective bloom pass — only sees BLOOM_LAYER.
-  // Synced with the main camera's projection each frame.
-  private _bloomCamera: THREE.OrthographicCamera | null = null;
-
   // TSL uniform multiplier — gate bloom in the composite.
   // Setting the bloom node's strength to 0 alone is not enough because
   // the gaussian blur chain can still produce non-zero output.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private _particleBloomMul: any = null;
+
+  // ── Ring glow mesh (replaces bloom-scene-based ring bloom) ────────
+  // A wider annular ring behind the main ring with gaussian alpha falloff,
+  // rendered via additive blending. Controlled independently of particle bloom.
+  private _glowRing: THREE.Mesh | null = null;
+  private _glowRingMaterial: THREE.ShaderMaterial | null = null;
+  private _lastGlowWidth = -1;  // track for geometry rebuild
 
   private _ready = false;
 
@@ -609,7 +610,6 @@ export class SensorRenderer {
     });
     this.diskRing = new THREE.Mesh(baseGeo, this._ringMaterial);
 
-    // Ring lives in the main scene — single bloom pass covers everything
     this.scene.add(this.diskRing);
 
     // ── GPU ring buffer (write-once particle birth data) ─────────────
@@ -635,6 +635,11 @@ export class SensorRenderer {
       this._ringBuf.setGpuBackend(gpuDevice, backend);
     }
 
+    // ── Ring glow mesh (shader-based gaussian falloff, additive blend) ──
+    // Replaces the expensive bloom-scene-based ring bloom with a simple
+    // annular mesh that has gaussian alpha falloff. Independently controlled.
+    this._initGlowRing();
+
     // Show the first frame immediately (lightweight no-bloom path),
     // then compile bloom shaders in the background.
     this.useBloom = false;
@@ -648,33 +653,27 @@ export class SensorRenderer {
   }
 
   /**
-   * Compile the single-pass bloom pipeline in the background.
+   * Compile the bloom pipeline in the background.
    * Called from init() without await so the first frame renders immediately
    * via the lightweight no-bloom path. Once compilation succeeds,
    * `this.useBloom` is set to true and subsequent frames use bloom.
+   *
+   * Single scene pass: bloom is computed on the main scene directly.
+   * Particle bloom is controlled via strength/radius/threshold + a gate uniform.
+   * Ring glow is handled by a separate shader mesh (no bloom chain needed).
    */
   private _initBloom(): void {
-    // ── Layer-based selective bloom pipeline ──────────────────────────
-    // Two scene passes: one full scene (display), one bloom-eligible
-    // objects only (bloom input). ~13 render passes total.
-    // Particle bloom and ring bloom are truly independent: each object's
-    // BLOOM_LAYER membership controls whether it contributes to bloom.
     try {
       this.pipeline = new RenderPipeline(this.renderer);
 
-      // Pass 1: full scene for display (main camera sees default layer 0)
+      // Single scene pass — particles + disk ring + glow ring all in one
       const scenePass = pass(this.scene, this.camera);
       const scenePassColor = scenePass.getTextureNode("output");
 
-      // Pass 2: bloom-eligible objects only (bloom camera sees BLOOM_LAYER)
-      this._bloomCamera = this.camera.clone();
-      this._bloomCamera.layers.set(BLOOM_LAYER);
-      const bloomScenePass = pass(this.scene, this._bloomCamera);
-      const bloomSceneColor = bloomScenePass.getTextureNode("output");
-
-      // Bloom computed from bloom-eligible objects only
+      // Bloom computed from the single scene pass (particles dominate;
+      // the disk ring is below bloom threshold at normal opacity)
       const bloomNode = bloom(
-        bloomSceneColor,
+        scenePassColor,
         this.bloomStrength,
         this.bloomRadius,
         this.bloomThreshold,
@@ -682,9 +681,6 @@ export class SensorRenderer {
       this._bloomNode = bloomNode;
 
       // ── Bloom resolution cap: always cap at 1080p equivalent ─────────
-      // Bloom is a low-frequency effect — gaussian blur immediately destroys
-      // pixel-level detail. Running it at 1440p/4K is wasted fill-rate.
-      // Cap at 1080p (~2M pixels) regardless of display resolution.
       const origSetSize = bloomNode.setSize.bind(bloomNode);
       const MAX_BLOOM_PIXELS = 1920 * 1080;
       bloomNode.setSize = (w: number, h: number) => {
@@ -698,19 +694,84 @@ export class SensorRenderer {
       };
 
       // TSL uniform multiplier: definitively zero bloom in the
-      // composite when its toggle is off, regardless of bloom-node internals.
+      // composite when particle bloom is off.
       this._particleBloomMul = uniform(1.0);
 
-      // Composite: full scene + selective bloom glow
+      // Composite: scene + bloom (gated by particle bloom toggle)
       this.pipeline.outputNode = scenePassColor
         .add(bloomNode.mul(this._particleBloomMul));
 
       this.useBloom = true;
-      console.log("[sensor] Selective bloom enabled (layer-based, particles + ring independent)");
+      console.log("[sensor] Bloom enabled (single scene pass + shader glow ring)");
     } catch (e) {
       console.warn("[sensor] Bloom compilation failed, falling back:", e);
       this.useBloom = false;
     }
+  }
+
+  /**
+   * Create the ring glow mesh — a wider annular ring behind the main ring
+   * with gaussian alpha falloff, rendered via additive blending.
+   * Replaces the expensive bloom-scene-based ring bloom.
+   */
+  private _initGlowRing(): void {
+    const glowMat = new THREE.ShaderMaterial({
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      side: THREE.DoubleSide,
+      uniforms: {
+        uColor: { value: new THREE.Color(this.ringColor) },
+        uOpacity: { value: this.ringBloomStrength },
+        uInnerRadius: { value: 2.0 },
+        uGlowWidth: { value: 0.15 },
+      },
+      vertexShader: /* glsl */ `
+        varying vec2 vWorldPos;
+        void main() {
+          vec4 worldPos = modelMatrix * vec4(position, 1.0);
+          vWorldPos = worldPos.xy;
+          gl_Position = projectionMatrix * viewMatrix * worldPos;
+        }
+      `,
+      fragmentShader: /* glsl */ `
+        uniform vec3 uColor;
+        uniform float uOpacity;
+        uniform float uInnerRadius;
+        uniform float uGlowWidth;
+        varying vec2 vWorldPos;
+        void main() {
+          float dist = length(vWorldPos);
+          // Distance from the ring center line (r = innerRadius)
+          float d = abs(dist - uInnerRadius);
+          // Gaussian falloff: sigma = glowWidth / 3 so edges are ~0
+          float sigma = uGlowWidth / 3.0;
+          float glow = exp(-0.5 * (d * d) / (sigma * sigma));
+          gl_FragColor = vec4(uColor * uOpacity * glow, uOpacity * glow);
+        }
+      `,
+    });
+
+    this._glowRingMaterial = glowMat;
+
+    // Initial glow ring geometry: extends glowWidth beyond the ring center
+    const glowWidth = this._ringBloomRadiusToGlowWidth(this.ringBloomRadius);
+    const geo = new THREE.RingGeometry(
+      Math.max(0.01, 2.0 - glowWidth), 2.0 + glowWidth, RING_SEGMENTS,
+    );
+    this._glowRing = new THREE.Mesh(geo, glowMat);
+    this._glowRing.renderOrder = -1;  // behind the main ring and particles
+    this._glowRing.visible = this.ringBloomEnabled;
+    this._lastGlowWidth = glowWidth;
+    this.scene.add(this._glowRing);
+  }
+
+  /**
+   * Convert the user-facing ringBloomRadius [0..1+] to a world-unit glow width.
+   * 0 = tight glow, 1 = wide glow (~0.4 world units).
+   */
+  private _ringBloomRadiusToGlowWidth(radius: number): number {
+    return Math.max(0.02, radius * 0.4);
   }
 
   /**
@@ -1002,8 +1063,29 @@ export class SensorRenderer {
     if (Math.abs(ringWidthWorld - this._lastRingWidthWorld) > 1e-6) {
       this._lastRingWidthWorld = ringWidthWorld;
       const oldGeo = this.diskRing.geometry;
-      this.diskRing.geometry = new THREE.RingGeometry(2.0, 2.0 + ringWidthWorld, RING_SEGMENTS);
+      const newGeo = new THREE.RingGeometry(2.0, 2.0 + ringWidthWorld, RING_SEGMENTS);
+      this.diskRing.geometry = newGeo;
       oldGeo.dispose();
+    }
+
+    // ── Glow ring (shader-based ring bloom replacement) ──────────────
+    if (this._glowRing && this._glowRingMaterial) {
+      this._glowRing.visible = this.ringBloomEnabled && this.ringOpacity > 0;
+      const ringCol = new THREE.Color(this.effectiveRingColor);
+      this._glowRingMaterial.uniforms.uColor.value.copy(ringCol);
+      this._glowRingMaterial.uniforms.uOpacity.value = this.ringBloomStrength;
+      const glowWidth = this._ringBloomRadiusToGlowWidth(this.ringBloomRadius);
+      this._glowRingMaterial.uniforms.uGlowWidth.value = glowWidth;
+      // Rebuild glow geometry when width changes significantly
+      if (Math.abs(glowWidth - this._lastGlowWidth) > 0.005) {
+        this._lastGlowWidth = glowWidth;
+        const oldGlowGeo = this._glowRing.geometry;
+        const newGlowGeo = new THREE.RingGeometry(
+          Math.max(0.01, 2.0 - glowWidth), 2.0 + glowWidth, RING_SEGMENTS,
+        );
+        this._glowRing.geometry = newGlowGeo;
+        oldGlowGeo.dispose();
+      }
     }
 
     this._sizeUniform.value = this.hitBaseSize * this.hitSizeScaleFactor;
@@ -1038,61 +1120,29 @@ export class SensorRenderer {
       this.renderer.toneMappingExposure = this.softHdrExposure;
     }
 
-    // ── Selective bloom: toggle object layer membership ───────────────
-    // Objects on BLOOM_LAYER are seen by the bloom camera and contribute
-    // to the bloom glow. Objects always remain on layer 0 (main camera).
-    if (this.particleBloomEnabled) {
-      this.particleMesh.layers.enable(BLOOM_LAYER);
-    } else {
-      this.particleMesh.layers.disable(BLOOM_LAYER);
-    }
-    if (this.ringBloomEnabled && this.diskRing.visible) {
-      this.diskRing.layers.enable(BLOOM_LAYER);
-    } else {
-      this.diskRing.layers.disable(BLOOM_LAYER);
-    }
-
-    // Sync bloom camera with main camera (projection, position, zoom)
-    if (this._bloomCamera) {
-      this._bloomCamera.copy(this.camera);
-      this._bloomCamera.layers.set(BLOOM_LAYER);  // restore after copy
-    }
-
     // ── Render path selection ────────────────────────────────────────
-    // Use the bloom pipeline only when bloom is actively enabled.
-    // HDR works without bloom — the rgba16float canvas with NoToneMapping
-    // and extended tone mapping passes values >1.0 through to the display
-    // regardless of the render path.
+    // Once the bloom pipeline is compiled, ALWAYS use it to avoid flicker
+    // from switching between pipeline.render() and renderer.render().
+    // When particle bloom is off, the bloom multiplier is set to 0 so the
+    // bloom pass contributes nothing — same visual result, stable path.
+    // Ring glow is handled by the glow mesh (lives in scene), not bloom.
+    // HDR works either way — the canvas config preserves values > 1.0.
     const particleBloomActive = this.particleBloomEnabled && this.bloomStrength > 0;
-    const ringBloomActive = this.ringBloomEnabled && this.ringBloomStrength > 0;
-    const anyBloomActive = particleBloomActive || ringBloomActive;
-    const needsBloom = this.useBloom && this.pipeline && anyBloomActive;
-    if (needsBloom) {
-      if (this._bloomNode) {
-        // Use particle bloom params when particle bloom is active,
-        // otherwise use ring bloom params.
-        if (particleBloomActive) {
-          this._bloomNode.strength.value  = this.bloomStrength;
-          this._bloomNode.radius.value    = 1 - this.bloomRadius;
-          this._bloomNode.threshold.value = this.bloomThreshold;
-        } else {
-          this._bloomNode.strength.value  = this.ringBloomStrength;
-          this._bloomNode.radius.value    = 1 - this.ringBloomRadius;
-          this._bloomNode.threshold.value = this.bloomThreshold;
-        }
-      }
-      if (this._particleBloomMul) this._particleBloomMul.value = 1.0;
 
-      try {
-        this.pipeline!.render();
-      } catch (e) {
-        console.warn("[sensor] Sync render failed, trying async:", e);
-        this.pipeline!.renderAsync().catch((e2: unknown) => {
-          console.error("[sensor] Both render paths failed:", e2);
-        });
+    if (this.useBloom && this.pipeline) {
+      if (this._bloomNode) {
+        this._bloomNode.strength.value  = this.bloomStrength;
+        this._bloomNode.radius.value    = 1 - this.bloomRadius;
+        this._bloomNode.threshold.value = this.bloomThreshold;
       }
+      // Gate bloom contribution: 1.0 when particle bloom is active, 0.0 otherwise.
+      if (this._particleBloomMul) {
+        this._particleBloomMul.value = particleBloomActive ? 1.0 : 0.0;
+      }
+
+      this.pipeline!.render();
     } else {
-      // No-bloom path: direct render (HDR values preserved by canvas config)
+      // Pipeline not yet compiled — direct render (first frame)
       this.renderer.render(this.scene, this.camera);
     }
   }
@@ -1125,6 +1175,10 @@ export class SensorRenderer {
     // Dispose ring geometry + material
     this.diskRing?.geometry.dispose();
     this._ringMaterial?.dispose();
+
+    // Dispose glow ring
+    this._glowRing?.geometry.dispose();
+    this._glowRingMaterial?.dispose();
 
     // Particle mesh + material
     this._particleGeometry.dispose();

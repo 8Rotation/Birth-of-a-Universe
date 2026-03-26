@@ -615,7 +615,6 @@ async function main() {
     renderer.hitBaseSize = params.hitSize;
     renderer.brightnessMultiplier = params.brightness;
     renderer.roundParticles = params.roundParticles;
-    renderer.useBloom = params.bloomEnabled || params.ringBloomEnabled;
     renderer.particleBloomEnabled = params.bloomEnabled;
     renderer.ringBloomEnabled = params.ringBloomEnabled;
     renderer.ringBloomStrength = params.ringBloomStrength;
