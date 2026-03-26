@@ -310,6 +310,33 @@ export class ECSKPhysics {
   }
 
   /**
+   * Global acceleration range for bounce particles across the full
+   * perturbation amplitude.  Returns [minAcc, maxAcc] for
+   *   β_eff ∈ [β(1−amplitude), β(1+amplitude)]
+   * so per-particle sizing can normalise against stable bounds
+   * instead of per-batch min/max.
+   */
+  bounceAccRange(amplitude: number): { minAcc: number; maxAcc: number } {
+    const lo = this.bounceProps(this.beta * (1 - amplitude)).acc;
+    const hi = this.bounceProps(this.beta * (1 + amplitude)).acc;
+    // acc is monotonic in β_eff; smaller β → larger acc (harder kick)
+    const minAcc = Math.min(lo, hi);
+    const maxAcc = Math.max(lo, hi);
+    return { minAcc, maxAcc };
+  }
+
+  /**
+   * Global acceleration range for production particles.
+   */
+  productionAccRange(amplitude: number, betaPP: number): { minAcc: number; maxAcc: number } {
+    const lo = this.productionProps(this.beta * (1 - amplitude), betaPP).acc;
+    const hi = this.productionProps(this.beta * (1 + amplitude), betaPP).acc;
+    const minAcc = Math.min(lo, hi);
+    const maxAcc = Math.max(lo, hi);
+    return { minAcc, maxAcc };
+  }
+
+  /**
    * Sensitivity: dT_half / dβ, by central finite difference.
    *
    * Determines how perturbations in β shift the bounce time:

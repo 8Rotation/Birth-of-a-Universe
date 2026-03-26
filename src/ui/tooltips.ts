@@ -615,6 +615,20 @@ export const TOOLTIPS: Record<string, Tooltip> = {
       "High rate + large size = solid-fill appearance.",
   },
 
+  sizeVariation: {
+    simple: "How much particle size varies based on bounce physics.",
+    visual:
+      "0: all particles are exactly the Dot Size value (uniform).\n" +
+      "0.5 (default): moderate spread — particles range from 0.75× to 1.25× base size.\n" +
+      "1.0: full physics range — particles range from 0.5× to 1.5× base size.\n" +
+      "Higher-energy bounces (violet) produce larger particles.",
+    range: "0 – 1.0. Default: 0.5.",
+    performance: "None. Single per-particle multiply.",
+    notes:
+      "Uses stable global bounds from the physics, so sizes are consistent " +
+      "regardless of frame rate or batch size.",
+  },
+
   brightness: {
     simple: "Manual brightness multiplier (when auto-brightness is off).",
     visual:
@@ -986,18 +1000,16 @@ export const READOUT_TOOLTIPS: Record<string, Tooltip> = {
       "birth rate or ℓ_max to free headroom.",
   },
   gpuLoad: {
-    simple: "Measured GPU render cost (% of frame budget at your refresh rate).",
+    simple: "Render call cost as % of frame budget at your refresh rate.",
     detail:
       "Measures wall-clock time spent in the render submission call as a " +
       "fraction of each frame's time budget (1000 ms ÷ refresh rate).\n\n" +
-      "This is CPU-side submission timing, not true GPU execution time. " +
-      "However, the bloom pipeline's synchronous render call blocks " +
-      "proportionally to GPU work, making this a close proxy for actual " +
-      "GPU load when bloom is active.\n\n" +
-      "Bloom (two full-screen multi-pass gaussian blurs) is the primary " +
-      "GPU cost driver — it dominates over particle rendering. When bloom " +
-      "is bypassed (no visible particles or bloom disabled), this drops " +
-      "to near-zero, accurately matching Task Manager GPU usage.",
+      "This is NOT actual GPU utilization (WebGPU doesn't expose that). " +
+      "It measures how long the CPU blocks on submitting render commands, " +
+      "which correlates with GPU work when bloom is active but can " +
+      "underestimate true GPU load.\n\n" +
+      "High values mean the render pipeline is consuming most of your " +
+      "frame budget. Reduce bloom, particle count, or lower target framerate.",
   },
   bufferFill: {
     simple: "GPU particle buffer usage (current / ceiling).",
@@ -1062,24 +1074,27 @@ export const READOUT_TOOLTIPS: Record<string, Tooltip> = {
       "Used to set the capability score and particle buffer size.\n" +
       "Discrete GPUs (RTX, RX, Arc) score much higher than integrated (Intel UHD, etc.).",
   },
-  capability: {
-    simple: "Combined hardware performance score (0–100%).",
+  ramGB: {
+    simple: "System RAM in GB — enter your actual value.",
     detail:
-      "Blends:\n" +
-      "  • CPU speed (benchmark result)\n" +
-      "  • CPU core count\n" +
-      "  • GPU capability (discrete vs integrated)\n" +
-      "  • Available RAM\n" +
-      "  • Penalty for high screen resolution (more pixels = more GPU load)\n\n" +
-      "Drives all automatic defaults: birth rate, worker count, bloom on/off, " +
-      "ℓ_max, persistence max, buffer size.",
+      "Browsers cap navigator.deviceMemory at 8 GB for fingerprint protection, " +
+      "so auto-detection is unreliable.\n\n" +
+      "Enter your real RAM size to let the budget system account for it. " +
+      "Higher RAM adds a small bonus to budget calculations. Leave at 0 for auto.",
   },
-  tier: {
-    simple: "Performance tier label.",
+  vramGB: {
+    simple: "Dedicated GPU VRAM in GB — enter your actual value.",
     detail:
-      "LOW / MID / HIGH / ULTRA — a human-readable label for the capability score.\n\n" +
-      "This is cosmetic only. All budget values (birth rate, ℓ_max, bloom, etc.) " +
-      "are smoothly interpolated from the continuous capability score, not " +
-      "hard-switched at tier boundaries.",
+      "Browsers expose no VRAM API at all, so auto-detection is impossible.\n\n" +
+      "Enter your GPU's VRAM size to unlock VRAM-aware budget caps. " +
+      "This directly controls the maximum particle buffer size and visible-hit limit. " +
+      "Leave at 0 for conservative auto-scaling.",
+  },
+  peakNits: {
+    simple: "Peak display brightness in nits — enter your actual value.",
+    detail:
+      "The Screen Details API is rarely available, so auto-detection usually returns '?'.\n\n" +
+      "Enter your monitor's peak brightness (e.g. 400 for SDR, 1000+ for HDR) " +
+      "to get an accurate readout in the HDR mode display. Leave at 0 for auto.",
   },
 };

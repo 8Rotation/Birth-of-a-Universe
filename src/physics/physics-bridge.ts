@@ -60,6 +60,7 @@ export interface PhysicsBridgeConfig {
   ppSizeScale?: number;
   ppBaseDelay?: number;
   ppScatterRange?: number;
+  sizeVariation?: number;
 }
 
 type TickParams = {
@@ -84,6 +85,7 @@ type TickParams = {
   ppSizeScale?: number;
   ppBaseDelay?: number;
   ppScatterRange?: number;
+  sizeVariation?: number;
 };
 
 type TickMessage = {

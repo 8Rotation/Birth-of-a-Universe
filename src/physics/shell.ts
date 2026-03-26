@@ -43,8 +43,6 @@ const DEF_HUE_MIN = 25;
 const DEF_HUE_RANGE = 245;
 const DEF_BRIGHTNESS_FLOOR = 0.15;
 const DEF_BRIGHTNESS_CEIL = 1.0;
-/** Base offset for hit-size normalisation (0–1 range). */
-const HIT_SIZE_BASE = 0.5;
 
 // ── Arrival-time delay clamping ───────────────────────────────────────────
 
@@ -117,6 +115,8 @@ export interface EmitterConfig {
   ppSizeScale: number;
   ppBaseDelay: number;
   ppScatterRange: number;
+  // Size variation (0=uniform, 1=full physics range)
+  sizeVariation: number;
 }
 
 /** Build an EmitterConfig with defaults for any missing fields. */
@@ -141,6 +141,7 @@ export function defaultEmitterConfig(partial: Partial<EmitterConfig> = {}): Emit
     ppSizeScale:      partial.ppSizeScale ?? DEF_PP_SIZE_SCALE,
     ppBaseDelay:      partial.ppBaseDelay ?? DEF_PP_BASE_DELAY,
     ppScatterRange:   partial.ppScatterRange ?? DEF_PP_SCATTER_RANGE,
+    sizeVariation:    partial.sizeVariation ?? 0.5,
   };
 }
 
@@ -265,6 +266,7 @@ export class StreamEmitter {
     if (config.ppSizeScale      !== undefined) c.ppSizeScale      = config.ppSizeScale;
     if (config.ppBaseDelay      !== undefined) c.ppBaseDelay      = config.ppBaseDelay;
     if (config.ppScatterRange   !== undefined) c.ppScatterRange   = config.ppScatterRange;
+    if (config.sizeVariation    !== undefined) c.sizeVariation    = config.sizeVariation;
     if (config.silkDamping      !== undefined) c.silkDamping      = config.silkDamping;
 
     const lMax = config.lMax ?? c.lMax;
@@ -372,8 +374,13 @@ export class StreamEmitter {
     const sens = this.physics.sensitivity();
     const result: PendingParticle[] = [];
 
-    // Per-particle min/max for hit-size normalisation within this batch.
-    // We accumulate raw acc values first, then normalise.
+    // Global acceleration bounds for stable per-particle size normalisation.
+    // Precomputed from physics (β, amplitude) so every particle gets a
+    // consistent size regardless of batch composition.
+    const { minAcc: globalMinAcc, maxAcc: globalMaxAcc } =
+      this.physics.bounceAccRange(c.perturbAmplitude);
+    const globalAccR = globalMaxAcc - globalMinAcc || 1;
+
     const lxBuf = new Float32Array(count);
     const lyBuf = new Float32Array(count);
     const tBuf  = new Float32Array(count);
@@ -383,7 +390,6 @@ export class StreamEmitter {
     const accBuf = new Float32Array(count);
     const tailBuf = new Float32Array(count);
 
-    let minAcc = Infinity, maxAcc = 0;
     let minW = 0, maxW = -Infinity;
     const wBuf = new Float32Array(count);
 
@@ -419,13 +425,10 @@ export class StreamEmitter {
         Math.log(props.eps + 1) / EPS_LOG_REF,
       ));
 
-      if (props.acc < minAcc) minAcc = props.acc;
-      if (props.acc > maxAcc) maxAcc = props.acc;
       if (props.wEff < minW) minW = props.wEff;
       if (props.wEff > maxW) maxW = props.wEff;
     }
 
-    const accR = maxAcc - minAcc || 1;
     const wR   = minW - maxW   || 1;
 
     for (let i = 0; i < count; i++) {
@@ -441,7 +444,10 @@ export class StreamEmitter {
         hue:         hueBuf[i],
         brightness:  bri,
         eps:         epsBuf[i] * dbBriScale,
-        hitSize:     HIT_SIZE_BASE + (accBuf[i] - minAcc) / accR,
+        // Size: lerp between uniform (1.0) and physics-driven based on sizeVariation.
+        // normAcc is 0–1 from global bounds; at variation=0 all particles are size 1.0.
+        hitSize:     1.0 - c.sizeVariation * 0.5
+                     + ((accBuf[i] - globalMinAcc) / globalAccR) * c.sizeVariation,
         tailAngle:   tailBuf[i],
       });
     }
@@ -485,7 +491,11 @@ export class StreamEmitter {
         const ppBriB  = new Float32Array(ppCount);
         const ppTailB = new Float32Array(ppCount);
 
-        let ppMinAcc = Infinity, ppMaxAcc = 0;
+        // Global production acceleration bounds (stable across batches)
+        const { minAcc: ppGlobalMin, maxAcc: ppGlobalMax } =
+          this.physics.productionAccRange(c.perturbAmplitude, c.betaPP);
+        const ppGlobalR = ppGlobalMax - ppGlobalMin || 1;
+
         let ppMinW = 0, ppMaxW = -Infinity;
 
         for (let i = 0; i < ppCount; i++) {
@@ -523,13 +533,10 @@ export class StreamEmitter {
             Math.log(ppProps.eps + 1) / EPS_LOG_REF,
           ) * c.ppBriBoost);
 
-          if (ppProps.acc < ppMinAcc) ppMinAcc = ppProps.acc;
-          if (ppProps.acc > ppMaxAcc) ppMaxAcc = ppProps.acc;
           if (ppProps.wEff < ppMinW)  ppMinW  = ppProps.wEff;
           if (ppProps.wEff > ppMaxW)  ppMaxW  = ppProps.wEff;
         }
 
-        const ppAccR = ppMaxAcc - ppMinAcc || 1;
         const ppWR   = ppMinW  - ppMaxW    || 1;
 
         const ppHueMax = c.hueMin + c.hueRange;
@@ -542,7 +549,9 @@ export class StreamEmitter {
             hue:         Math.min(ppHueMax, baseHue + c.ppHueShift + dbHueShift),
             brightness:  ppBriB[i] * dbBriScale,
             eps:         ppEpsB[i] * dbBriScale,
-            hitSize:     (HIT_SIZE_BASE + (ppAccB[i] - ppMinAcc) / ppAccR) * c.ppSizeScale,
+            hitSize:     (1.0 - c.sizeVariation * 0.5
+                         + ((ppAccB[i] - ppGlobalMin) / ppGlobalR) * c.sizeVariation)
+                         * c.ppSizeScale,
             tailAngle:   ppTailB[i],
           });
         }

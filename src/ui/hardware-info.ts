@@ -10,34 +10,34 @@
  * Sub-score design (each maps a raw measurement to 0 → 1 via a
  * clamped log or linear ramp):
  *
- *   CPU single-thread benchmark   (weight 0.25)
+ *   CPU single-thread benchmark   (weight 0.35)
  *     Measured via 20 ms transcendental-math loop.
  *     0.0 at bench ≤ 0.3×  (very slow / throttled)
  *     1.0 at bench ≥ 4.0×  (current-gen high-end desktop)
  *
- *   CPU logical cores             (weight 0.15)
+ *   CPU logical cores             (weight 0.25)
  *     0.0 at ≤ 2 threads
  *     1.0 at ≥ 32 threads
  *
- *   Device RAM                    (weight 0.10)
- *     0.0 at ≤ 2 GB
- *     1.0 at ≥ 64 GB
- *     Unknown (API unavailable) → 0.35 (assume ≈ 8 GB)
- *
- *   GPU capability                (weight 0.50)
- *     Combines maxBufferSize + maxTextureDimension2D into a single
- *     0 → 1 value, with a penalty for integrated GPUs and a hard
- *     cap for software renderers (0.05).
+ *   GPU class                     (weight 0.40)
+ *     Software renderer → 0.05
+ *     Integrated (Intel/AMD) → 0.25
+ *     Apple integrated → 0.55
+ *     Discrete GPU → 0.75
+ *     WebGPU does not expose VRAM, shader cores, or clock speed.
+ *     maxBufferSize and maxTextureDimension2D are API limits that
+ *     are identical across vastly different GPUs — not used.
  *
  * Weighted sum → raw hardware capability h ∈ [0, 1].
  *
- * Screen penalty:
- *   effectiveCapability = h × (1 / sqrt(renderPixels / 1080pPixels))
- *   clamped to [0.02, h].  Never boosts, only attenuates.
+ * Screen resolution is logged for diagnostics but does NOT penalise the
+ * capability score or any budget parameter.  Bloom and particle costs do
+ * scale with pixel count, but the user has manual sliders for those —
+ * the budget system should not pre-emptively throttle.
  *
  * All budget numbers and slider limits are then:
- *   value = floor + (ceiling − floor) × t^exponent
- * where t = effectiveCapability.
+ *   value = floor + (ceiling − floor) × h^exponent
+ * where h = raw hardware capability.
  *
  * A cosmetic tier label (low / mid / high / ultra) is still derived
  * for display but has no functional effect.
@@ -50,16 +50,12 @@ export type HardwareTier = "low" | "mid" | "high" | "ultra";
 export interface CpuInfo {
   /** Logical core count (navigator.hardwareConcurrency) */
   logicalCores: number;
-  /** Device memory in GB (navigator.deviceMemory, 0 if unavailable) */
-  deviceMemoryGB: number;
   /** Single-thread benchmark score. ~1.0 on a mid-range 2020 CPU. */
   benchmarkScore: number;
   /** Continuous sub-score 0 → 1 for single-thread speed */
   benchSub: number;
   /** Continuous sub-score 0 → 1 for core count */
   coresSub: number;
-  /** Continuous sub-score 0 → 1 for RAM */
-  ramSub: number;
 }
 
 export interface GpuInfo {
@@ -134,6 +130,19 @@ export interface ComputeBudget {
   maxPhysicsCostPerSec: number;
 }
 
+/**
+ * User-supplied hardware specs that the browser cannot measure.
+ * A value of 0 means "not set / use auto-detection only".
+ */
+export interface ManualOverrides {
+  /** System RAM in GB (navigator.deviceMemory is capped at 8 by browsers) */
+  ramGB: number;
+  /** Dedicated GPU VRAM in GB (browsers expose no VRAM API) */
+  vramGB: number;
+  /** Peak display brightness in nits (Screen Details API often unavailable) */
+  peakNits: number;
+}
+
 export interface HardwareInfo {
   cpu: CpuInfo;
   gpu: GpuInfo;
@@ -148,6 +157,8 @@ export interface HardwareInfo {
   budget: ComputeBudget;
   /** Human-readable summary */
   summary: string;
+  /** Active manual overrides (if any) */
+  overrides: ManualOverrides;
 }
 
 // ── Math helpers ──────────────────────────────────────────────────────────
@@ -196,12 +207,6 @@ const BASELINE_OPS_PER_MS = 4500;
 
 function detectCpuCores(): number {
   return navigator.hardwareConcurrency || 4;
-}
-
-function detectDeviceMemory(): number {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const mem = (navigator as any).deviceMemory;
-  return typeof mem === "number" ? mem : 0;
 }
 
 /**
@@ -256,31 +261,34 @@ function detectIntegratedGpu(vendor: string, device: string): boolean {
 }
 
 /**
- * Continuous GPU sub-score ∈ [0, 1].
+ * GPU sub-score ∈ [0, 1].
  *
- * Signals:
- *   - maxBufferSize: log-ramp from 128 MB to 16 GB  (70% weight)
- *     Proxy for VRAM — imperfect but the best WebGPU exposes.
- *   - maxTextureDimension2D: ramp from 4096 to 16384 (30% weight)
- *   - Integrated penalty: iGPU × 0.55 (Apple × 0.85)
- *   - Software renderer: hard cap at 0.05
+ * WebGPU does not expose VRAM size, shader core count, or clock speed.
+ * maxBufferSize and maxTextureDimension2D are API limits that are nearly
+ * identical across all discrete GPUs (a 3060 and a 4090 report the same).
+ *
+ * The only reliable signal from the browser is the GPU class:
+ *   - Software renderer (SwiftShader / llvmpipe): very slow
+ *   - Integrated (Intel UHD, AMD Vega): limited
+ *   - Apple integrated (M1+): strong for integrated
+ *   - Discrete (NVIDIA, AMD, Intel Arc): capable
+ *
+ * We score conservatively within each class.  The user has sliders and
+ * override mode for fine-tuning beyond what we can detect.
  */
 function computeGpuSub(
   vendor: string,
-  maxBufferSize: number,
-  maxTexDim: number,
+  _maxBufferSize: number,
+  _maxTexDim: number,
   isIntegrated: boolean,
 ): number {
   if (vendor === "software") return 0.05;
-
-  const bufSub = logRamp(maxBufferSize, 128 * 1024 * 1024, 16 * 1024 * 1024 * 1024);
-  const texSub = ramp(maxTexDim, 4096, 16384);
-  let sub = bufSub * 0.7 + texSub * 0.3;
-
-  if (isIntegrated && vendor !== "apple") sub *= 0.55;
-  if (isIntegrated && vendor === "apple") sub *= 0.85;
-
-  return clamp(sub, 0, 1);
+  if (isIntegrated && vendor === "apple") return 0.55;
+  if (isIntegrated) return 0.25;
+  // Discrete GPU — we know it's capable but can't distinguish tiers.
+  // 0.75 is a conservative middle ground: strong enough to unlock high
+  // budgets, but not maxed out (users with extreme hardware can override).
+  return 0.75;
 }
 
 async function detectGpu(existingAdapter?: GPUAdapter | null): Promise<GpuInfo> {
@@ -359,53 +367,35 @@ function computeCoresSub(cores: number): number {
   return logRamp(cores, 2, 32);
 }
 
-/**
- * RAM sub-score: 0 → 1.
- *   0.0 at ≤ 2 GB
- *   1.0 at ≥ 64 GB
- *   Unknown (0) → 0.35 (assume about 8 GB).
- */
-function computeRamSub(memGB: number): number {
-  if (memGB === 0) return 0.35;
-  return logRamp(memGB, 2, 64);
-}
-
 // ── Composite capability ──────────────────────────────────────────────────
 
 /**
- * Sub-score weights.
- * GPU dominates (50%) — this is a GPU-heavy particle renderer.
- * CPU bench (25%) — physics runs off-thread.
- * Cores (15%) and RAM (10%) are secondary.
+ * Sub-score weights — based only on what the browser can actually measure.
+ *
+ * GPU class   (40%) — discrete vs integrated vs software.  Coarse but
+ *                      reliable.  The single most important factor for
+ *                      this particle renderer.
+ * CPU bench   (35%) — our own 20 ms microbenchmark.  Directly measures
+ *                      the math operations used in physics workers.
+ * CPU cores   (25%) — navigator.hardwareConcurrency.  Accurate.
+ *
+ * Removed from scoring:
+ *   - deviceMemory: capped at 8 GB by browsers (fingerprinting protection)
+ *   - maxBufferSize / maxTextureDimension2D: WebGPU API limits, identical
+ *     across vastly different discrete GPUs
+ *   - Screen resolution: not a hardware capability
  */
-const W_BENCH = 0.25;
-const W_CORES = 0.15;
-const W_RAM   = 0.10;
-const W_GPU   = 0.50;
+const W_BENCH = 0.35;
+const W_CORES = 0.25;
+const W_GPU   = 0.40;
 
 function computeRawCapability(cpu: CpuInfo, gpu: GpuInfo): number {
   return clamp(
     cpu.benchSub * W_BENCH +
     cpu.coresSub * W_CORES +
-    cpu.ramSub   * W_RAM   +
     gpu.gpuSub   * W_GPU,
     0, 1,
   );
-}
-
-// ── Screen penalty ────────────────────────────────────────────────────────
-
-/**
- * Attenuate capability based on render-pixel count.
- * Reference: 1920×1080 ≈ 2.07 MP → factor 1.0.
- * 4K ≈ 8.3 MP → factor ≈ 0.5.
- * Below 1080p → no boost (clamped at 1.0).
- */
-function screenPenalty(renderPixels: number): number {
-  const REF = 1920 * 1080;
-  const ratio = renderPixels / REF;
-  if (ratio <= 1.0) return 1.0;
-  return 1.0 / Math.sqrt(ratio);
 }
 
 // ── Cosmetic tier label ───────────────────────────────────────────────────
@@ -421,58 +411,91 @@ function tierLabel(t: number): HardwareTier {
 
 /**
  * Build a complete ComputeBudget by interpolating every parameter along
- * the effective capability t ∈ [0, 1].
+ * the raw hardware capability h ∈ [0, 1].
  *
- * floor   = value at t = 0 (worst hardware + demanding display)
- * ceiling = value at t = 1 (best hardware + modest display)
+ * Screen resolution is NOT factored in.  Bloom and particle rendering
+ * costs scale with resolution, but the user has sliders for that —
+ * the budget shouldn't pre-emptively throttle based on pixel count.
+ *
+ * floor   = value at h = 0 (worst hardware)
+ * ceiling = value at h = 1 (best hardware)
  * exponent > 1 skews toward ceiling (high-end benefits more)
  */
-function buildBudget(t: number, cpuCores: number, cpuT: number): ComputeBudget {
+/** Bytes per particle in the GPU ring buffer (2 × vec4 × 4 bytes). */
+const BYTES_PER_PARTICLE = 32;
+/**
+ * Fraction of user-reported VRAM we're willing to dedicate to the
+ * particle ring buffer.  Conservative: 15 % leaves plenty for textures,
+ * bloom FBOs, depth buffers, etc.
+ */
+const VRAM_BUDGET_FRACTION = 0.15;
+
+function buildBudget(
+  h: number,
+  cpuCores: number,
+  cpuT: number,
+  overrides: ManualOverrides = { ramGB: 0, vramGB: 0, peakNits: 0 },
+): ComputeBudget {
+  // ── VRAM-aware caps ──────────────────────────────────────────
+  // When the user tells us their VRAM size, compute a hard cap from
+  // that instead of the conservative h-based interpolation.
+  let emergencyHitCap   = lerpInt(200_000,  20_000_000, h, 1.5);
+  let maxVisibleHits    = lerpInt(50_000,   800_000,    h, 1.3);
+  let initialGpuCap     = lerpPow2(14, 20, h, 1.2);
+
+  if (overrides.vramGB > 0) {
+    const vramBytes = overrides.vramGB * 1_073_741_824; // 1 GiB
+    const particleBudget = Math.floor(vramBytes * VRAM_BUDGET_FRACTION / BYTES_PER_PARTICLE);
+    // Emergency cap: up to full VRAM budget, still capped at 20M absolute
+    emergencyHitCap  = Math.min(particleBudget, 20_000_000);
+    // Visible-hits cap: a tenth of the VRAM-based budget, max 4M
+    maxVisibleHits   = Math.min(Math.floor(particleBudget * 0.4), 4_000_000);
+    // Initial GPU buffer: nearest power-of-2 between 16K and VRAM cap
+    const idealInit  = Math.min(particleBudget, 1 << 20);
+    initialGpuCap    = 1 << Math.max(14, Math.min(20, Math.round(Math.log2(idealInit))));
+  }
+
+  // ── RAM bonus ────────────────────────────────────────────────
+  // When the user tells us actual RAM, add a small bonus to h
+  // (RAM ≥ 16 GB lifts, RAM < 8 GB drags down).  Only affects
+  // this budget calculation — does not change rawCapability.
+  let hEffective = h;
+  if (overrides.ramGB > 0) {
+    // 0 at ≤ 4 GB, 1 at ≥ 64 GB  →  mapped to ±0.10 bonus
+    const ramFactor = ramp(overrides.ramGB, 4, 64);
+    hEffective = clamp(h + (ramFactor - 0.5) * 0.20, 0, 1);
+  }
+
   return {
     // ── Defaults (first-launch values) ────────────────────────────
-    particleRate:           lerpInt(300,      20_000,    t, 1.3),
-    recommendedLMax:        lerpInt(3,        32,        t, 1.2),
-    bloomDefault:           t >= 0.35,
+    particleRate:           lerpInt(300,      20_000,    hEffective, 1.3),
+    recommendedLMax:        lerpInt(3,        32,        hEffective, 1.2),
+    bloomDefault:           hEffective >= 0.20,
 
     // ── Internal throughput caps ──────────────────────────────────
-    // These are internal pipeline caps, not user-facing.  Set
-    // generously so the real bottleneck is the slider limits (which
-    // ARE capability-gated) rather than hidden hard ceilings.
-    emergencyHitCap:        lerpInt(200_000,  20_000_000, t, 1.5),
-    maxParticlesPerTick:    lerpInt(5_000,    300_000,    t, 1.3),
-    initialGpuCapacity:     lerpPow2(14, 20, t, 1.2), // 2^14=16K → 2^20=1M
+    emergencyHitCap,
+    maxParticlesPerTick:    lerpInt(5_000,    300_000,    hEffective, 1.3),
+    initialGpuCapacity:     initialGpuCap,
 
     // ── Workers ──────────────────────────────────────────────────
-    // Workers are CPU-only — scale with the CPU sub-score (cpuT)
-    // instead of the composite score which is 50% GPU-weighted.
-    // This ensures a strong CPU isn't under-allocated due to a
-    // modest GPU.  Reserve 2 cores for main thread + OS.
     recommendedWorkers:     Math.max(1, Math.min(lerpInt(2, cpuCores - 2, cpuT), cpuCores - 2)),
 
     // ── Slider limits (normal mode) ──────────────────────────────
     sliderLimits: {
-      particleRateMax:      lerpInt(1_000,    200_000,   t, 1.4),
-      lMaxMax:              lerpInt(6,        96,        t, 1.2),
-      persistenceMax:       lerpInt(3,        120,       t, 1.1),
-      arrivalSpreadMax:     lerp(10,          120,       t, 1.1),
-      bloomStrengthMax:     lerp(1.5,         8,         t, 1.0),
+      particleRateMax:      lerpInt(1_000,    200_000,   hEffective, 1.4),
+      lMaxMax:              lerpInt(6,        96,        hEffective, 1.2),
+      persistenceMax:       lerpInt(3,        120,       hEffective, 1.1),
+      arrivalSpreadMax:     lerp(10,          120,       hEffective, 1.1),
+      bloomStrengthMax:     lerp(1.5,         8,         hEffective, 1.0),
     },
 
     // ── Compound budget limits ──────────────────────────────────
-    // maxVisibleHits: VRAM budget cap for the ring buffer.
-    // At 28 bytes/particle, 800K = ~22 MB VRAM, 2M = ~56 MB.
-    // GPU handles rendering cheaply but unbounded VRAM growth is dangerous.
-    // Also used by controls.ts random-settings clamp to prevent
-    // combinatorial explosion of rate × persistence.
-    maxVisibleHits:         lerpInt(50_000,   800_000,   t, 1.3),
+    maxVisibleHits,
 
-    // maxPhysicsCostPerSec: spherical-harmonic evaluations across all
-    // workers.  A single thread sustains ~5 M evals/s; with N workers
-    // the budget is N × 5 M.  Scale with both t and worker count.
     maxPhysicsCostPerSec:   lerpInt(
       2_000_000,
       Math.max(1, Math.min(lerpInt(2, cpuCores - 2, cpuT), cpuCores - 2)) * 8_000_000,
-      t, 1.2,
+      hEffective, 1.2,
     ),
   };
 }
@@ -482,15 +505,13 @@ function buildBudget(t: number, cpuCores: number, cpuT: number): ComputeBudget {
 function buildSummary(
   cpu: CpuInfo,
   gpu: GpuInfo,
-  rawH: number,
-  t: number,
+  h: number,
   renderPixels: number,
 ): string {
   const parts: string[] = [];
 
   // CPU
   parts.push(`CPU: ${cpu.logicalCores} threads`);
-  if (cpu.deviceMemoryGB > 0) parts.push(`${cpu.deviceMemoryGB}GB RAM`);
   parts.push(`bench ${cpu.benchmarkScore.toFixed(2)}×`);
 
   // GPU
@@ -508,13 +529,9 @@ function buildSummary(
   }
 
   // Capability
-  const tier = tierLabel(t);
-  const rawPct = (rawH * 100).toFixed(0);
-  const effPct = (t * 100).toFixed(0);
-  const capStr = renderPixels > 0 && rawH !== t
-    ? `Capability: ${rawPct}% hw → ${effPct}% eff (${tier.toUpperCase()})`
-    : `Capability: ${effPct}% (${tier.toUpperCase()})`;
-  parts.push(capStr);
+  const tier = tierLabel(h);
+  const pct = (h * 100).toFixed(0);
+  parts.push(`Capability: ${pct}% (${tier.toUpperCase()})`);
 
   return parts.join(" · ");
 }
@@ -557,46 +574,40 @@ export class HardwareDetector {
     const [gpu, benchResult] = await this._benchPromise!;
 
     const cores = detectCpuCores();
-    const memGB = detectDeviceMemory();
 
     const cpu: CpuInfo = {
       logicalCores: cores,
-      deviceMemoryGB: memGB,
       benchmarkScore: benchResult,
       benchSub: computeBenchSub(benchResult),
       coresSub: computeCoresSub(cores),
-      ramSub:   computeRamSub(memGB),
     };
 
     const rawH = computeRawCapability(cpu, gpu);
 
-    // Screen penalty
-    const penalty = renderPixels > 0 ? screenPenalty(renderPixels) : 1.0;
-    const t = clamp(rawH * penalty, 0.02, 1.0);
-
     // CPU-only sub-score for worker allocation (bench 60%, cores 40%).
-    // Workers are purely CPU-bound so the GPU and screen penalty should
-    // not limit how many threads we spin up.
+    // Workers are purely CPU-bound so the GPU should not limit how many
+    // threads we spin up.
     const cpuT = clamp(cpu.benchSub * 0.6 + cpu.coresSub * 0.4, 0.05, 1.0);
 
-    const tier = tierLabel(t);
-    const budget = buildBudget(t, cpu.logicalCores, cpuT);
-    const summary = buildSummary(cpu, gpu, rawH, t, renderPixels);
+    const noOverrides: ManualOverrides = { ramGB: 0, vramGB: 0, peakNits: 0 };
+    const tier = tierLabel(rawH);
+    const budget = buildBudget(rawH, cpu.logicalCores, cpuT, noOverrides);
+    const summary = buildSummary(cpu, gpu, rawH, renderPixels);
 
     this._info = {
       cpu, gpu, tier,
       rawCapability: rawH,
-      capability: t,
+      capability: rawH,
       renderPixels,
       budget, summary,
+      overrides: noOverrides,
     };
 
     console.log(`[hardware] ${summary}`);
     console.log(
       `[hardware] Sub-scores: bench=${(cpu.benchSub * 100).toFixed(0)}% ` +
       `cores=${(cpu.coresSub * 100).toFixed(0)}% ` +
-      `ram=${(cpu.ramSub * 100).toFixed(0)}% ` +
-      `gpu=${(gpu.gpuSub * 100).toFixed(0)}%`,
+      `gpu=${gpu.isIntegrated ? 'integrated' : 'discrete'} (${(gpu.gpuSub * 100).toFixed(0)}%)`,
     );
     console.log(
       `[hardware] Budget: default ${budget.particleRate}/s, ` +
@@ -604,6 +615,45 @@ export class HardwareDetector {
       `${(budget.emergencyHitCap / 1_000_000).toFixed(1)}M hit cap, ` +
       `bloom=${budget.bloomDefault}, lMax=${budget.recommendedLMax}, ` +
       `GPU buf=${budget.initialGpuCapacity}`,
+    );
+
+    return this._info;
+  }
+
+  /**
+   * Recalculate the budget using user-supplied manual overrides
+   * (RAM, VRAM, peak brightness) that the browser cannot detect.
+   * Re-uses the original CPU/GPU benchmark results.
+   *
+   * Returns the updated HardwareInfo, or null if finalize() hasn't run.
+   */
+  recalculate(overrides: ManualOverrides): HardwareInfo | null {
+    if (!this._info) return null;
+
+    const { cpu, gpu, renderPixels } = this._info;
+    const rawH = this._info.rawCapability;
+    const cpuT = clamp(cpu.benchSub * 0.6 + cpu.coresSub * 0.4, 0.05, 1.0);
+
+    const budget = buildBudget(rawH, cpu.logicalCores, cpuT, overrides);
+    const summary = buildSummary(cpu, gpu, rawH, renderPixels);
+
+    this._info = {
+      ...this._info,
+      budget,
+      summary,
+      overrides,
+    };
+
+    console.log(
+      `[hardware] Recalculated with overrides: ` +
+      `RAM=${overrides.ramGB || 'auto'} GB, ` +
+      `VRAM=${overrides.vramGB || 'auto'} GB, ` +
+      `brightness=${overrides.peakNits || 'auto'} nits`,
+    );
+    console.log(
+      `[hardware] Budget: default ${budget.particleRate}/s, ` +
+      `slider max ${budget.sliderLimits.particleRateMax}/s, ` +
+      `${(budget.emergencyHitCap / 1_000_000).toFixed(1)}M hit cap`,
     );
 
     return this._info;

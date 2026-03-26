@@ -92,7 +92,7 @@ async function main() {
   console.log(`[main] Hardware detection: ${(performance.now() - t1).toFixed(0)} ms — ${hwInfo.summary}`);
 
   // Budget already incorporates screen-resolution penalty
-  const budget = hwInfo.budget;
+  let budget = hwInfo.budget;
 
   // Apply hardware-derived limits
   VRAM_BUDGET_PARTICLES = budget.emergencyHitCap;
@@ -173,7 +173,7 @@ async function main() {
 
   // ── 4. Controls (auto-configured from hardware budget) ────────────
   const tCtrl = performance.now();
-  const { params, hud, updateHUD, setHDRMode, setForceHDRCallback, updateTargetFpsLabel } = createSensorControls(() => {
+  const { params, hud, updateHUD, setHDRMode, setForceHDRCallback, updateTargetFpsLabel, setOverridesCallback, manualOverrides } = createSensorControls(() => {
     // Full reset: terminate and recreate all workers (recovers from
     // crashes), wipe all particle state, and re-sync timing.
     // Equivalent to browser reload but keeps current settings.
@@ -228,6 +228,7 @@ async function main() {
       ppSizeScale: params.ppSizeScale,
       ppBaseDelay: params.ppBaseDelay,
       ppScatterRange: params.ppScatterRange,
+      sizeVariation: params.sizeVariation,
     });
     // Re-sync prev-snapshots so the first frame after reset sees no change
     prevParticleRate      = params.particleRate;
@@ -268,6 +269,21 @@ async function main() {
       renderer.disableSoftHDR();
     }
     setHDRMode(renderer.hdrMode);
+  });
+
+  // Wire manual hardware overrides (RAM, VRAM, peak brightness)
+  // When the user enters values the browser can't detect, recalculate
+  // the full budget and update all runtime caps.
+  setOverridesCallback((overrides) => {
+    const updated = hwDetector.recalculate(overrides);
+    if (!updated) return;
+    budget = updated.budget;
+    VRAM_BUDGET_PARTICLES = budget.emergencyHitCap;
+    console.log(
+      `[main] Budget recalculated — hit cap: ${(VRAM_BUDGET_PARTICLES / 1e6).toFixed(1)}M, ` +
+      `visible max: ${(budget.maxVisibleHits / 1e3).toFixed(0)}K, ` +
+      `physics cap: ${(budget.maxPhysicsCostPerSec / 1e6).toFixed(1)}M evals/s`,
+    );
   });
 
   function effectiveDisplaySyncHz(): number {
@@ -316,6 +332,7 @@ async function main() {
     ppSizeScale: params.ppSizeScale,
     ppBaseDelay: params.ppBaseDelay,
     ppScatterRange: params.ppScatterRange,
+    sizeVariation: params.sizeVariation,
   }, budget.recommendedWorkers);
 
   // ── 6. GPU pipeline ready ──────────────────────────────────────────
@@ -595,6 +612,7 @@ async function main() {
         ppSizeScale: params.ppSizeScale,
         ppBaseDelay: params.ppBaseDelay,
         ppScatterRange: params.ppScatterRange,
+        sizeVariation: params.sizeVariation,
       });
 
       // Ingest particles from previous worker tick(s) — direct ring buffer writes.
@@ -694,8 +712,9 @@ async function main() {
       const effectiveSyncHz = effectiveDisplaySyncHz();
       hud.screen = `${si.screenWidth}×${si.screenHeight}`;
       hud.hz = `${effectiveSyncHz}${Number(params.displaySyncHz) > 0 ? " override" : ""}${si.vrrDetected ? " VRR" : ""}`;
+      const peakNits = manualOverrides.peakNits > 0 ? manualOverrides.peakNits : si.peakBrightnessNits;
       hud.hdr = renderer.hdrMode === 'full'
-        ? `FULL (~${si.peakBrightnessNits ?? '?'} nits)`
+        ? `FULL (~${peakNits ?? '?'} nits)`
         : renderer.hdrMode === 'soft'
           ? `SOFT${si.hdrCapable ? '' : ' (forced)'}`
           : si.hdrCapable ? "Detected (SDR fallback)" : "No";
@@ -704,8 +723,6 @@ async function main() {
       hud.cpuCores = String(hwInfo.cpu.logicalCores);
       hud.cpuBench = hwInfo.cpu.benchmarkScore.toFixed(2) + "×";
       hud.gpu = hwInfo.gpu.device || hwInfo.gpu.vendor;
-      hud.capability = `${(hwInfo.capability * 100).toFixed(0)}%`;
-      hud.tier = `${hwInfo.tier.toUpperCase()}`;
       hud.cpuUsage = `${bridge.workerCount} / ${hwInfo.cpu.logicalCores} threads`;
       // CPU load: measured worker utilization (fraction of available worker time)
       const measuredCpuLoad = bridge.updateCpuLoad(fpsTime + (fpsTime === 0 ? FPS_SAMPLE_INTERVAL : 0));

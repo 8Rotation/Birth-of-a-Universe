@@ -13,7 +13,7 @@
 
 import GUI from "lil-gui";
 import type { Controller } from "lil-gui";
-import type { ComputeBudget } from "./hardware-info.js";
+import type { ComputeBudget, ManualOverrides } from "./hardware-info.js";
 import { TOOLTIPS, READOUT_TOOLTIPS } from "./tooltips.js";
 import type { Tooltip } from "./tooltips.js";
 
@@ -54,6 +54,7 @@ export interface SensorParams {
 
   // Display
   hitSize: number;       // base point size in pixels
+  sizeVariation: number; // how much physics varies particle size (0=uniform, 1=full range)
   brightness: number;    // brightness multiplier
   persistence: number;   // fade time constant (seconds)
   roundParticles: boolean; // circular vs square particles
@@ -125,8 +126,6 @@ export interface HUDData {
   cpuCores: string;
   cpuBench: string;
   gpu: string;
-  capability: string;
-  tier: string;
 }
 
 // ── Numeric controller descriptor ────────────────────────────────────────
@@ -923,6 +922,7 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
 
     // Display
     hitSize: 1.0,
+    sizeVariation: 0.5,
     brightness: 5.0,
     persistence: 1.0,
     roundParticles: true,
@@ -1178,6 +1178,7 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
     { folder: hueRamp, prop: "brightnessCeil",   label: "Brightness ceil",     min: 0,     max: 1,                  step: 0.01,  overrideMax: 5         },
     // Particles
     { folder: particles, prop: "hitSize",          label: "Dot size (px)",             min: 1,     max: 30,                 step: 0.5,   overrideMax: 10000     },
+    { folder: particles, prop: "sizeVariation",    label: "Size variation",            min: 0,     max: 1,                  step: 0.01,  overrideMax: 3         },
     { folder: particles, prop: "brightness",       label: "Brightness gain",           min: 0.1,   max: 5,                  step: 0.1,   overrideMax: 10000     },
     { folder: particles, prop: "persistence",      label: "Fade duration (s)",         min: 0.2,   max: sl.persistenceMax,   step: 0.1,   overrideMax: 100000    },
     { folder: particles, prop: "fadeSharpness",    label: "Fade sharpness",            min: 0.3,   max: 4,                  step: 0.1,   overrideMax: 100       },
@@ -1394,8 +1395,6 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
     cpuCores: "--",
     cpuBench: "--",
     gpu: "detecting...",
-    capability: "--",
-    tier: "--",
   };
 
   const readoutGui = new GUI({ title: "Readout" });
@@ -1551,7 +1550,7 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
     perfReadout.add(hud, "fps").name("Frame rate").listen().disable(),
     perfReadout.add(hud, "cpuUsage").name("CPU threads used").listen().disable(),
     perfReadout.add(hud, "cpuLoad").name("CPU load").listen().disable(),
-    perfReadout.add(hud, "gpuLoad").name("GPU load").listen().disable(),
+    perfReadout.add(hud, "gpuLoad").name("Render cost").listen().disable(),
     perfReadout.add(hud, "bufferFill").name("Buffer fill").listen().disable(),
   );
 
@@ -1565,9 +1564,36 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
     hwReadout.add(hud, "cpuCores").name("CPU cores").listen().disable(),
     hwReadout.add(hud, "cpuBench").name("CPU speed").listen().disable(),
     hwReadout.add(hud, "gpu").name("Graphics chip").listen().disable(),
-    hwReadout.add(hud, "capability").name("Overall score").listen().disable(),
-    hwReadout.add(hud, "tier").name("Performance tier").listen().disable(),
   );
+
+  // ── Manual hardware overrides (browser can't measure these) ─────────
+  const manualOverrides: ManualOverrides = { ramGB: 0, vramGB: 0, peakNits: 0 };
+  let onOverridesChanged: ((o: ManualOverrides) => void) | null = null;
+
+  const fireOverrideChange = () => {
+    if (onOverridesChanged) onOverridesChanged({ ...manualOverrides });
+  };
+
+  const overrideFolder = readoutGui.addFolder("Manual specs");
+  overrideFolder.close();
+  const overrideCtrlRam = overrideFolder.add(manualOverrides, "ramGB", 0, 256, 1)
+    .name("RAM (GB)")
+    .onChange(fireOverrideChange);
+  const overrideCtrlVram = overrideFolder.add(manualOverrides, "vramGB", 0, 48, 1)
+    .name("VRAM (GB)")
+    .onChange(fireOverrideChange);
+  const overrideCtrlNits = overrideFolder.add(manualOverrides, "peakNits", 0, 2000, 10)
+    .name("Peak nits")
+    .onChange(fireOverrideChange);
+  const overrideControllers: { el: HTMLElement; key: string }[] = [
+    { el: overrideCtrlRam.domElement, key: "ramGB" },
+    { el: overrideCtrlVram.domElement, key: "vramGB" },
+    { el: overrideCtrlNits.domElement, key: "peakNits" },
+  ];
+
+  function setOverridesCallback(cb: (o: ManualOverrides) => void): void {
+    onOverridesChanged = cb;
+  }
 
   function updateHUD() {
     for (const c of controllers) c.updateDisplay();
@@ -1785,10 +1811,14 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
     "beta", "aMin", "wEff", "torsionRatio", "ppStrength",
     "flux", "visible", "fps", "cpuUsage", "cpuLoad", "gpuLoad", "bufferFill",
     "screen", "hz", "hdr", "gamut",
-    "cpuCores", "cpuBench", "gpu", "capability", "tier",
+    "cpuCores", "cpuBench", "gpu",
   ];
   for (let i = 0; i < controllers.length && i < readoutHudKeys.length; i++) {
     attachTooltip(controllers[i].domElement, readoutHudKeys[i], READOUT_TOOLTIPS);
+  }
+  // Attach tooltips to manual override controllers
+  for (const { el, key } of overrideControllers) {
+    attachTooltip(el, key, READOUT_TOOLTIPS);
   }
 
   /**
@@ -2034,5 +2064,5 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
     onForceHDR = cb;
   }
 
-  return { gui, readoutGui, params, hud, updateHUD, setHDRMode, setForceHDRCallback, updateTargetFpsLabel };
+  return { gui, readoutGui, params, hud, updateHUD, setHDRMode, setForceHDRCallback, updateTargetFpsLabel, manualOverrides, setOverridesCallback };
 }
