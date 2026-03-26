@@ -95,6 +95,24 @@ export class ParticleRingBuffer {
     return (this._attrB.array as Float32Array)[index * 4 + 2];
   }
 
+  /**
+   * Subsample the alive range and return the maximum eps found.
+   * Uses strided access to stay cheap even with large alive counts.
+   */
+  sampleMaxEps(start: number, count: number, maxSamples = 2048): number {
+    if (count === 0) return 0;
+    const b = this._attrB.array as Float32Array;
+    const cap = this._capacity;
+    const step = Math.max(1, Math.floor(count / maxSamples));
+    let best = 0;
+    for (let i = 0; i < count; i += step) {
+      const idx = (start + i) % cap;
+      const eps = b[idx * 4 + 1];
+      if (eps > best) best = eps;
+    }
+    return best;
+  }
+
   // ── GPU direct-write setup ──────────────────────────────────────────
 
   /**

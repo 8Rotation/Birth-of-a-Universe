@@ -999,18 +999,6 @@ export const READOUT_TOOLTIPS: Record<string, Tooltip> = {
       "High values mean your CPU workers are near saturation — reduce " +
       "birth rate or ℓ_max to free headroom.",
   },
-  gpuLoad: {
-    simple: "Render call cost as % of frame budget at your refresh rate.",
-    detail:
-      "Measures wall-clock time spent in the render submission call as a " +
-      "fraction of each frame's time budget (1000 ms ÷ refresh rate).\n\n" +
-      "This is NOT actual GPU utilization (WebGPU doesn't expose that). " +
-      "It measures how long the CPU blocks on submitting render commands, " +
-      "which correlates with GPU work when bloom is active but can " +
-      "underestimate true GPU load.\n\n" +
-      "High values mean the render pipeline is consuming most of your " +
-      "frame budget. Reduce bloom, particle count, or lower target framerate.",
-  },
   bufferFill: {
     simple: "GPU particle buffer usage (current / ceiling).",
     detail:

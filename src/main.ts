@@ -279,6 +279,10 @@ async function main() {
     if (!updated) return;
     budget = updated.budget;
     VRAM_BUDGET_PARTICLES = budget.emergencyHitCap;
+    // Push manual peak-nits override to the renderer so HDR brightness changes
+    if (overrides.peakNits > 0) {
+      renderer.peakNits = overrides.peakNits;
+    }
     console.log(
       `[main] Budget recalculated — hit cap: ${(VRAM_BUDGET_PARTICLES / 1e6).toFixed(1)}M, ` +
       `visible max: ${(budget.maxVisibleHits / 1e3).toFixed(0)}K, ` +
@@ -390,9 +394,7 @@ async function main() {
   let rateTime = 0;
 
   // ── GPU / render timing accumulators ────────────────────────────
-  let renderMsAccum = 0;   // total ms spent in renderer.render() this interval
-  let renderFrameCount = 0; // frames rendered this interval
-  let gpuLoadSmooth = 0;    // EMA-smoothed GPU load (0–1)
+
 
   setInfo(""); // Clear loading message
 
@@ -674,10 +676,7 @@ async function main() {
     renderer.zoom = params.zoom;
     renderer.arrivalSpread = params.arrivalSpread;
     renderer.updateUniforms(displayTime, tau);
-    const renderStart = performance.now();
     renderer.render();
-    renderMsAccum += performance.now() - renderStart;
-    renderFrameCount++;
 
     // ── FPS + HUD ─────────────────────────────────────────────────
     frameCount++;
@@ -730,18 +729,6 @@ async function main() {
       const cpuPct = Math.round(measuredCpuLoad * 100);
       const cpuColor = measuredCpuLoad > 0.9 ? ' ⚠️ HIGH' : measuredCpuLoad > 0.7 ? ' • BUSY' : '';
       hud.cpuLoad = `${cpuPct}%${cpuColor}`;
-      // GPU load: measured render time as fraction of frame budget
-      if (renderFrameCount > 0) {
-        const avgRenderMs = renderMsAccum / renderFrameCount;
-        const frameBudgetMs = 1000 / effectivePresentationHz();
-        const rawGpuLoad = avgRenderMs / frameBudgetMs;
-        gpuLoadSmooth = gpuLoadSmooth * 0.6 + rawGpuLoad * 0.4;
-      }
-      renderMsAccum = 0;
-      renderFrameCount = 0;
-      const gpuPct = Math.round(gpuLoadSmooth * 100);
-      const gpuColor = gpuLoadSmooth > 0.9 ? ' ⚠️ HIGH' : gpuLoadSmooth > 0.7 ? ' • BUSY' : '';
-      hud.gpuLoad = `${gpuPct}%${gpuColor}`;
       hud.bufferFill = `${(renderer.ringBuffer.activeCount / 1000).toFixed(0)}K / ${(renderer.ringBuffer.capacity / 1000).toFixed(0)}K`;
       updateHUD();
     }

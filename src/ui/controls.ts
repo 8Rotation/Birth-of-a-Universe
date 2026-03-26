@@ -116,7 +116,6 @@ export interface HUDData {
   fps: string;
   cpuUsage: string;
   cpuLoad: string;
-  gpuLoad: string;
   bufferFill: string;
   screen: string;
   hz: string;
@@ -1386,7 +1385,6 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
     fps: "0",
     cpuUsage: "1 / ? threads",
     cpuLoad: "0%",
-    gpuLoad: "0%",
     bufferFill: "0",
     screen: "detecting...",
     hz: "--",
@@ -1550,7 +1548,6 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
     perfReadout.add(hud, "fps").name("Frame rate").listen().disable(),
     perfReadout.add(hud, "cpuUsage").name("CPU threads used").listen().disable(),
     perfReadout.add(hud, "cpuLoad").name("CPU load").listen().disable(),
-    perfReadout.add(hud, "gpuLoad").name("Render cost").listen().disable(),
     perfReadout.add(hud, "bufferFill").name("Buffer fill").listen().disable(),
   );
 
@@ -1809,7 +1806,7 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
   // Match by property name from the HUD data object
   const readoutHudKeys: string[] = [
     "beta", "aMin", "wEff", "torsionRatio", "ppStrength",
-    "flux", "visible", "fps", "cpuUsage", "cpuLoad", "gpuLoad", "bufferFill",
+    "flux", "visible", "fps", "cpuUsage", "cpuLoad", "bufferFill",
     "screen", "hz", "hdr", "gamut",
     "cpuCores", "cpuBench", "gpu",
   ];

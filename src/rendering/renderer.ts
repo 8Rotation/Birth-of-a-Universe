@@ -316,6 +316,13 @@ export class SensorRenderer {
    */
   minEps = 10;
 
+  /**
+   * Smoothed observed max eps among alive particles. Fast-attack,
+   * slow-decay so the display responds instantly to new bright
+   * particles but doesn't flicker when they fade.
+   */
+  private _observedMaxEps = 0;
+
   /** Current hit-size scale factor derived from screen density. */
   hitSizeScaleFactor = 1.0;
   /** Current pixel ratio cap from screen detection. */
@@ -333,6 +340,9 @@ export class SensorRenderer {
 
   /** Active HDR rendering mode ('full' | 'soft' | 'none'). */
   get hdrMode(): HDRMode { return this._hdrMode; }
+
+  /** Override peak display brightness (nits). 0 = use auto-detection. */
+  set peakNits(nits: number) { if (nits > 0) this._peakNits = nits; }
 
   /** GPU ring buffer for write-once per-particle birth data. */
   get ringBuffer(): ParticleRingBuffer { return this._ringBuf; }
@@ -966,12 +976,39 @@ export class SensorRenderer {
       ? (this._peakNits / SDR_REFERENCE_WHITE_NITS) * 2
       : 20;
 
+    // ── Alive-range optimization: skip dead particles ─────────────
+    // Compute the Weibull cutoff duration (age beyond which fade < threshold)
+    const k = Math.max(0.01, this.fadeSharpness);
+    // Extend cutoff by 3× arrivalSpread to account for non-monotonic bornTimes.
+    // arrivalSpread offsets each bornTime by up to ±1.5× spread, so adjacent
+    // slots can differ by up to 3× spread. Without this margin the binary
+    // search in computeAliveRange lands on random positions each frame,
+    // producing visible flicker as chunks of alive particles are clipped.
+    const cutoffDuration = tau * Math.pow(-Math.log(FADE_THRESHOLD), 1 / k) * 1.2
+      + this.arrivalSpread * 3;
+    const { start, count } = this._ringBuf.computeAliveRange(now, cutoffDuration);
+    this._uAliveStart.value = start;
+    this._uAliveCount.value = count;
+    this._uCapacity.value = this._ringBuf.capacity;
+
     // ── Auto-brightness gain (scalar — no per-particle iteration) ───
     let autoGain = 1;
     if (this.autoBrightness) {
       if (this._hdrMode !== 'none') {
+        // Sample alive particles for the actual max eps on screen.
+        // Fast-attack / slow-decay smoothing avoids flicker while
+        // ensuring the brightest visible particle reaches peak nits.
+        const sampledMax = this._ringBuf.sampleMaxEps(start, count);
+        if (sampledMax >= this._observedMaxEps) {
+          this._observedMaxEps = sampledMax;           // instant jump up
+        } else {
+          this._observedMaxEps *= 0.97;                // slow decay
+          if (this._observedMaxEps < sampledMax) this._observedMaxEps = sampledMax;
+        }
+        const effectiveMaxEps = Math.max(this.minEps + 1, this._observedMaxEps);
+
         const sMax = Math.min(1.0, this.saturationFloor + this.saturationRange);
-        const maxNits = epsToNits(this.maxEps, this._peakNits, 20, this.minEps, this.maxEps);
+        const maxNits = epsToNits(effectiveMaxEps, this._peakNits, 20, this.minEps, this.maxEps);
         const maxLinear = maxNits / SDR_REFERENCE_WHITE_NITS;
         const maxScale = maxLinear * (this.brightnessMultiplier / SensorRenderer.SDR_BRIGHTNESS_REF);
         const target = this._peakNits / SDR_REFERENCE_WHITE_NITS;
@@ -1002,21 +1039,6 @@ export class SensorRenderer {
       autoGain = Math.max(0.05, Math.min(autoGain, 20));
     }
     this._uAutoGain.value = autoGain;
-
-    // ── Alive-range optimization: skip dead particles ─────────────
-    // Compute the Weibull cutoff duration (age beyond which fade < threshold)
-    const k = Math.max(0.01, this.fadeSharpness);
-    // Extend cutoff by 3× arrivalSpread to account for non-monotonic bornTimes.
-    // arrivalSpread offsets each bornTime by up to ±1.5× spread, so adjacent
-    // slots can differ by up to 3× spread. Without this margin the binary
-    // search in computeAliveRange lands on random positions each frame,
-    // producing visible flicker as chunks of alive particles are clipped.
-    const cutoffDuration = tau * Math.pow(-Math.log(FADE_THRESHOLD), 1 / k) * 1.2
-      + this.arrivalSpread * 3;
-    const { start, count } = this._ringBuf.computeAliveRange(now, cutoffDuration);
-    this._uAliveStart.value = start;
-    this._uAliveCount.value = count;
-    this._uCapacity.value = this._ringBuf.capacity;
 
     // Set instanceCount: draw only up to the end of the alive range.
     // When the alive range doesn't wrap, we can skip trailing dead slots.
@@ -1130,28 +1152,29 @@ export class SensorRenderer {
     }
 
     // ── Render path selection ────────────────────────────────────────
-    // Once the bloom pipeline is compiled, ALWAYS use it to avoid flicker
-    // from switching between pipeline.render() and renderer.render().
-    // When particle bloom is off, the bloom multiplier is set to 0 so the
-    // bloom pass contributes nothing — same visual result, stable path.
+    // When particle bloom is active AND the pipeline is ready, use the
+    // bloom pipeline (scene → bloom blur → composite).
+    // When bloom is off, render the scene directly — this skips the
+    // expensive render-to-texture + blur passes entirely, which can
+    // halve GPU cost at high resolutions and eliminate GPU-overload
+    // flicker that occurred when the pipeline ran even with bloom zeroed.
     // Ring glow is handled by the glow mesh (lives in scene), not bloom.
     // HDR works either way — the canvas config preserves values > 1.0.
     const particleBloomActive = this.particleBloomEnabled && this.bloomStrength > 0;
 
-    if (this.useBloom && this.pipeline) {
+    if (particleBloomActive && this.useBloom && this.pipeline) {
       if (this._bloomNode) {
         this._bloomNode.strength.value  = this.bloomStrength;
         this._bloomNode.radius.value    = 1 - this.bloomRadius;
         this._bloomNode.threshold.value = this.bloomThreshold;
       }
-      // Gate bloom contribution: 1.0 when particle bloom is active, 0.0 otherwise.
       if (this._particleBloomMul) {
-        this._particleBloomMul.value = particleBloomActive ? 1.0 : 0.0;
+        this._particleBloomMul.value = 1.0;
       }
 
       this.pipeline!.render();
     } else {
-      // Pipeline not yet compiled — direct render (first frame)
+      // Bloom off or pipeline not yet compiled — direct scene render
       this.renderer.render(this.scene, this.camera);
     }
   }
