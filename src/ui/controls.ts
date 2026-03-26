@@ -69,6 +69,7 @@ export interface SensorParams {
 
   // Fade
   fadeSharpness: number;    // Weibull shape: 1=exponential, >1=sharp cutoff, <1=long tail
+  fadeToBlack: boolean;    // true = fade to background colour (opaque), false = fade to transparent
 
   // Color tuning (renderer-side HSL mapping)
   lightnessFloor: number;   // minimum lightness (0–1)
@@ -931,6 +932,7 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
     bloomThreshold: 0.05,
     bloomQuality: 'auto',
     fadeSharpness: 1.0,
+    fadeToBlack: false,
     lightnessFloor: 0.20,
     lightnessRange: 0.65,
     saturationFloor: 0.70,
@@ -1112,6 +1114,7 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
   particles.add(params, "roundParticles").name("Round particles").onChange(() => {
     updateConditionalFolders();
   });
+  particles.add(params, "fadeToBlack").name("Fade to black");
   particles.add(params, "autoBrightness").name("Auto brightness").onChange(() => {
     updateConditionalFolders();
   });
@@ -1234,6 +1237,7 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
       (params as unknown as Record<string, unknown>)[def.prop] = clampNumber(stepped, def.min, effectiveMax);
     }
     // Randomise boolean toggles (frozen excluded)
+    params.fadeToBlack = rand() > 0.5;
     params.roundParticles = rand() > 0.3;    // bias toward round
     params.bloomEnabled = rand() > 0.5;
     params.ringEnabled = rand() > 0.5;

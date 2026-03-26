@@ -644,6 +644,7 @@ async function main() {
     renderer.bloomThreshold = params.bloomThreshold;
     renderer.bloomQuality = params.bloomQuality;
     renderer.fadeSharpness = params.fadeSharpness;
+    renderer.fadeToBlack = params.fadeToBlack;
     renderer.lightnessFloor = params.lightnessFloor;
     renderer.lightnessRange = params.lightnessRange;
     renderer.saturationFloor = params.saturationFloor;

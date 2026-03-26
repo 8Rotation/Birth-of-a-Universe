@@ -205,6 +205,8 @@ export class SensorRenderer {
   private _uMaxEps!: any;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private _uPixelToWorld!: any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private _uFadeToBlack!: any;  // 0=transparent, 1=black
 
   // ── Alive-range uniforms (Task 4) ──────────────────────────────────
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -251,6 +253,7 @@ export class SensorRenderer {
   /** Hardware-tier resolved quality for 'auto' mode (set by main.ts). */
   bloomAutoResolvedQuality: 'high' | 'low' = 'high';
   fadeSharpness = 1.0;
+  fadeToBlack = false;
 
   // Color tuning
   lightnessFloor = 0.20;
@@ -830,6 +833,7 @@ export class SensorRenderer {
     this._uMinEps = uniform(10.0);
     this._uMaxEps = uniform(10000.0);
     this._uPixelToWorld = uniform(1.0); // updated each frame
+    this._uFadeToBlack = uniform(0.0);   // 0 = fade to transparent, 1 = fade to black
 
     // Alive-range uniforms: skip dead particles early in the vertex shader
     this._uAliveStart = uniform(0.0);
@@ -893,12 +897,14 @@ export class SensorRenderer {
     const SDR_WHITE_F = float(SDR_REFERENCE_WHITE_NITS);
     const SDR_BRI_REF = float(SensorRenderer.SDR_BRIGHTNESS_REF);
 
+    const uFadeToBlack = this._uFadeToBlack;
+
     const colorNode = Fn(() => {
       // ── SDR path ──────────────────────────────────────────────────
       const sdrLightness = uLFloor.add(aBrightness.mul(uLRange));
       const sdrSaturation = uSFloor.add(aBrightness.oneMinus().mul(uSRange));
       const sdrRgb = tslHslToRgb(aHue, sdrSaturation, sdrLightness);
-      const sdrScale = fade.mul(uBri);
+      const sdrScale = uBri;
 
       // ── HDR path ──────────────────────────────────────────────────
       const hdrSat = min(float(1.0), uSFloor.add(uSRange));
@@ -908,7 +914,7 @@ export class SensorRenderer {
       const epsT = clamp(aEps.sub(uMinEps).div(max(epsRange, float(0.001))), 0.0, 1.0);
       const nits = float(20.0).add(epsT.mul(uPeakNits.sub(float(20.0))));
       const linearRelSDR = nits.div(SDR_WHITE_F);
-      const hdrScale = fade.mul(linearRelSDR).mul(uBri.div(SDR_BRI_REF));
+      const hdrScale = linearRelSDR.mul(uBri.div(SDR_BRI_REF));
 
       // select SDR/HDR path (0=SDR, >0=HDR)
       const isHdr = step(float(0.5), uHdrMode);
@@ -917,7 +923,10 @@ export class SensorRenderer {
 
       // Apply auto-gain and peak clamp, gate by alive (dead → vec3(0))
       const finalScale = min(scale.mul(uAutoGain), uPeakScale);
-      return rgb.mul(finalScale).mul(alive);
+      // fadeToBlack=1: fade baked into RGB (particles darken toward black).
+      // fadeToBlack=0: fade handled in alpha (particles become transparent).
+      const colorFade = mix(float(1.0), fade, uFadeToBlack);
+      return rgb.mul(finalScale).mul(alive).mul(colorFade);
     })();
 
     // ── Circular clipping (same as old material) ────────────────────
@@ -928,7 +937,11 @@ export class SensorRenderer {
       const dist = length(coord);
       const innerR = float(CIRCLE_OUTER_R).sub(softEdgeU);
       const circle = smoothstep(float(CIRCLE_OUTER_R), innerR, dist);
-      return mix(float(1.0), circle, roundU);
+      const shapeAlpha = mix(float(1.0), circle, roundU);
+      // fadeToBlack=0: fade via alpha so particles become transparent.
+      // fadeToBlack=1: alpha is shape-only (fade already in RGB).
+      const alphaFade = mix(fade, float(1.0), uFadeToBlack);
+      return shapeAlpha.mul(alphaFade).mul(alive);
     });
 
     // ── Assemble GPU material ───────────────────────────────────────
@@ -962,6 +975,7 @@ export class SensorRenderer {
     this._uLightnessRange.value = this.lightnessRange;
     this._uSaturationFloor.value = this.saturationFloor;
     this._uSaturationRange.value = this.saturationRange;
+    this._uFadeToBlack.value = this.fadeToBlack ? 1.0 : 0.0;
 
     // HDR mode uniform
     const hdrModeNum = this._hdrMode === 'full' ? 2.0

@@ -686,6 +686,16 @@ export const TOOLTIPS: Record<string, Tooltip> = {
     notes: "Interacts with fade duration (the time scale of the decay).",
   },
 
+  fadeToBlack: {
+    simple: "How particles disappear: fade to black or fade to transparent.",
+    visual:
+      "Off (default): Particles become transparent as they age — clean on any background.\n" +
+      "On: Particles darken toward black — looks best on a black background, " +
+      "but overlapping particles can create dark patches on coloured backgrounds.",
+    performance: "None. Single branch in the shader.",
+    notes: "Use 'fade to transparent' when using a non-black background colour.",
+  },
+
   particleSoftEdge: {
     simple: "How soft the edges of round particles are.",
     visual:
