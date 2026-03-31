@@ -93,6 +93,13 @@ export interface SliderLimits {
   bloomStrengthMax: number;
 }
 
+export interface GpuComputeBenchmark {
+  /** Measured GPU compute throughput in particles/second */
+  particlesPerSec: number;
+  /** Optimal workgroup size determined by benchmark */
+  optimalWorkgroupSize: number;
+}
+
 export interface ComputeBudget {
   /** Recommended default particle rate (/s) */
   particleRate: number;
@@ -166,6 +173,8 @@ export interface HardwareInfo {
   summary: string;
   /** Active manual overrides (if any) */
   overrides: ManualOverrides;
+  /** GPU compute benchmark result (null if not yet run or unavailable) */
+  gpuComputeBenchmark: GpuComputeBenchmark | null;
 }
 
 // ── Math helpers ──────────────────────────────────────────────────────────
@@ -669,6 +678,7 @@ export class HardwareDetector {
       renderPixels,
       budget, summary,
       overrides: noOverrides,
+      gpuComputeBenchmark: null,
     };
 
     console.log(`[hardware] ${summary}`);
@@ -746,4 +756,225 @@ export class HardwareDetector {
   get info(): HardwareInfo | null {
     return this._info;
   }
+
+  /**
+   * Benchmark GPU compute throughput by dispatching a simple compute shader
+   * and measuring wall-clock time. Returns particles/second capability.
+   *
+   * Should be called after the renderer is initialized and a GPUDevice is
+   * available. The result is stored on HardwareInfo.gpuComputeBenchmark.
+   *
+   * @param device  The GPUDevice to benchmark on.
+   */
+  async benchmarkGpuCompute(device: GPUDevice): Promise<GpuComputeBenchmark | null> {
+    try {
+      const result = await runGpuComputeBenchmark(device);
+      if (this._info) {
+        this._info = { ...this._info, gpuComputeBenchmark: result };
+      }
+      console.log(
+        `[hardware] GPU compute benchmark: ${(result.particlesPerSec / 1000).toFixed(0)}K particles/s, ` +
+        `optimal workgroup size: ${result.optimalWorkgroupSize}`,
+      );
+      return result;
+    } catch (e) {
+      console.warn("[hardware] GPU compute benchmark failed:", e);
+      return null;
+    }
+  }
+}
+
+// ── GPU Compute Benchmark ────────────────────────────────────────────────
+
+/**
+ * Minimal WGSL shader that does the core per-particle work:
+ * PCG PRNG, perturbation eval at lMax=8, bounceProps, visual encoding.
+ * Writes a single f32 per invocation to prevent dead-code elimination.
+ */
+function makeBenchmarkShader(workgroupSize: number): string {
+  return /* wgsl */`
+struct BenchParams {
+  count: u32,
+  seed: u32,
+};
+@group(0) @binding(0) var<uniform> params: BenchParams;
+@group(0) @binding(1) var<storage, read_write> out: array<f32>;
+
+fn pcg(state: ptr<function, u32>) -> u32 {
+  let old = *state;
+  *state = old * 747796405u + 2891336453u;
+  let word = ((old >> ((old >> 28u) + 4u)) ^ old) * 277803737u;
+  return (word >> 22u) ^ word;
+}
+
+fn rand01(state: ptr<function, u32>) -> f32 {
+  return f32(pcg(state)) / 4294967296.0;
+}
+
+@compute @workgroup_size(${workgroupSize})
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let idx = gid.x;
+  if (idx >= params.count) { return; }
+
+  var rng: u32 = params.seed ^ (idx * 2654435761u);
+
+  // Sphere sampling
+  let u1 = rand01(&rng);
+  let u2 = rand01(&rng);
+  let cosT = 1.0 - 2.0 * u1;
+  let sinT = sqrt(max(0.0, 1.0 - cosT * cosT));
+  let phi = 6.283185307 * u2;
+
+  // Fake perturbation eval (lMax=8 worth of trig + recurrence)
+  var delta: f32 = 0.0;
+  let cosPhi = cos(phi);
+  let sinPhi = sin(phi);
+  var pmm: f32 = 1.0;
+  var cosMPhi: f32 = 1.0;
+  var sinMPhi: f32 = 0.0;
+  for (var m: u32 = 0u; m <= 8u; m = m + 1u) {
+    if (m > 0u) {
+      pmm *= -(f32(2u * m) - 1.0) * sinT;
+      let c = cosMPhi * cosPhi - sinMPhi * sinPhi;
+      let s = sinMPhi * cosPhi + cosMPhi * sinPhi;
+      cosMPhi = c;
+      sinMPhi = s;
+    }
+    var plm_curr: f32 = pmm;
+    var plm_prev: f32 = 0.0;
+    for (var l: u32 = m; l <= 8u; l = l + 1u) {
+      if (l > m) {
+        let plm_next = ((2.0 * f32(l) - 1.0) * cosT * plm_curr - (f32(l + m) - 1.0) * plm_prev) / f32(l - m);
+        plm_prev = plm_curr;
+        plm_curr = plm_next;
+      }
+      if (l >= 1u) {
+        let norm = sqrt((2.0 * f32(l) + 1.0) * 0.07957747154594767 / max(1.0, f32(l)));
+        delta += norm * plm_curr * cosMPhi * rand01(&rng);
+      }
+    }
+  }
+
+  // bounceProps
+  let beta: f32 = 0.10;
+  let betaEff = clamp(beta * (1.0 + delta * 0.1), 0.002, 0.2499);
+  let disc = sqrt(max(0.0, 1.0 - 4.0 * betaEff));
+  let a2 = (1.0 - disc) / 2.0;
+  let a = sqrt(a2);
+  let eps = 1.0 / (a2 * a2);
+  let acc = -1.0 / (a2 * a) + (2.0 * betaEff) / (a2 * a2 * a);
+  let wDenom = 3.0 * (a2 - betaEff);
+  var wEff: f32 = -1.0;
+  if (abs(wDenom) > 1e-12) {
+    wEff = (a2 - 3.0 * betaEff) / wDenom;
+  }
+
+  // Visual encoding (same math as production shader)
+  let brightness = clamp(log(eps + 1.0) / 9.210440366976517, 0.0, 1.0);
+  let normAcc = clamp(acc / max(1e-6, abs(acc) + 1.0), 0.0, 1.0);
+  let theta = acos(cosT);
+  let lx = 2.0 * sin(theta / 2.0) * cos(phi);
+  let ly = 2.0 * sin(theta / 2.0) * sin(phi);
+
+  // Write result to prevent dead-code elimination
+  out[idx] = lx + ly + brightness + wEff + normAcc;
+}
+`;
+}
+
+const BENCH_PARTICLE_COUNT = 10_000;
+const BENCH_ITERATIONS = 3;
+const BENCH_WORKGROUP_SIZES = [32, 64, 128, 256];
+
+async function runGpuComputeBenchmark(device: GPUDevice): Promise<GpuComputeBenchmark> {
+  const BUF_UNIFORM  = 0x0040;
+  const BUF_STORAGE  = 0x0080;
+  const BUF_COPY_DST = 0x0008;
+
+  // Determine max workgroup size supported
+  const maxWgSize = device.limits.maxComputeWorkgroupSizeX ?? 256;
+  const sizesToTest = BENCH_WORKGROUP_SIZES.filter(s => s <= maxWgSize);
+  if (sizesToTest.length === 0) sizesToTest.push(32);
+
+  // Create output buffer (shared across all sizes)
+  const outBuffer = device.createBuffer({
+    size: BENCH_PARTICLE_COUNT * 4,
+    usage: BUF_STORAGE,
+  });
+
+  // Create params buffer
+  const paramsBuffer = device.createBuffer({
+    size: 8, // count (u32) + seed (u32)
+    usage: BUF_UNIFORM | BUF_COPY_DST,
+  });
+  const paramData = new Uint32Array([BENCH_PARTICLE_COUNT, 42]);
+  device.queue.writeBuffer(paramsBuffer, 0, paramData);
+
+  let bestRate = 0;
+  let bestSize = sizesToTest[0];
+
+  for (const wgSize of sizesToTest) {
+    const module = device.createShaderModule({ code: makeBenchmarkShader(wgSize) });
+    const pipeline = device.createComputePipeline({
+      layout: 'auto',
+      compute: { module, entryPoint: 'main' },
+    });
+
+    const bindGroup = device.createBindGroup({
+      layout: pipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: paramsBuffer } },
+        { binding: 1, resource: { buffer: outBuffer } },
+      ],
+    });
+
+    const dispatchCount = Math.ceil(BENCH_PARTICLE_COUNT / wgSize);
+    const times: number[] = [];
+
+    // Warm-up run
+    {
+      const enc = device.createCommandEncoder();
+      const pass = enc.beginComputePass();
+      pass.setPipeline(pipeline);
+      pass.setBindGroup(0, bindGroup);
+      pass.dispatchWorkgroups(dispatchCount);
+      pass.end();
+      device.queue.submit([enc.finish()]);
+      await device.queue.onSubmittedWorkDone();
+    }
+
+    // Timed runs
+    for (let i = 0; i < BENCH_ITERATIONS; i++) {
+      const t0 = performance.now();
+      const enc = device.createCommandEncoder();
+      const pass = enc.beginComputePass();
+      pass.setPipeline(pipeline);
+      pass.setBindGroup(0, bindGroup);
+      pass.dispatchWorkgroups(dispatchCount);
+      pass.end();
+      device.queue.submit([enc.finish()]);
+      await device.queue.onSubmittedWorkDone();
+      const t1 = performance.now();
+      times.push(t1 - t0);
+    }
+
+    // Take the median time
+    times.sort((a, b) => a - b);
+    const medianMs = times[Math.floor(times.length / 2)];
+    const rate = medianMs > 0 ? (BENCH_PARTICLE_COUNT / medianMs) * 1000 : 0;
+
+    if (rate > bestRate) {
+      bestRate = rate;
+      bestSize = wgSize;
+    }
+  }
+
+  // Cleanup
+  outBuffer.destroy();
+  paramsBuffer.destroy();
+
+  return {
+    particlesPerSec: Math.round(bestRate),
+    optimalWorkgroupSize: bestSize,
+  };
 }

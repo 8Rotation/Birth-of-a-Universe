@@ -93,6 +93,9 @@ export interface SensorParams {
   backgroundColor: string;  // background colour (hex string)
   zoom: number;             // orthographic camera zoom multiplier
 
+  // GPU compute
+  gpuCompute: boolean;  // true = GPU compute emission, false = CPU workers
+
   // Playback
   frozen: boolean;
   displaySyncHz: number; // 0 = auto-detect, >0 = force auto-sync pacing to this refresh rate
@@ -126,6 +129,8 @@ export interface HUDData {
   cpuCores: string;
   cpuBench: string;
   gpu: string;
+  // GPU compute
+  gpuCompute: string;
 }
 
 // ── Numeric controller descriptor ────────────────────────────────────────
@@ -950,6 +955,7 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
     autoBrightness: true,
     backgroundColor: "#000000",
     zoom: 1.0,
+    gpuCompute: false,
     frozen: false,
     displaySyncHz: 0,
     targetFps: 0,  // VSync by default
@@ -1064,6 +1070,7 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
   // ── Flow ──────────────────────────────────────────────────────────
   const flow = gui.addFolder("Flow");
   flow.add(params, "frozen").name("Freeze").listen();
+  flow.add(params, "gpuCompute").name("GPU compute");
   flow.add(params, "reset").name("⟳ Reset");
   flow.add(params, "resetSettings").name("⟳ Reset Settings");
   // Random button moved to bottom bar as quick-setting
@@ -1206,7 +1213,7 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
 
   // Wire up randomSettings now that numericDefs is available
   // Excluded from randomisation: background colour, zoom, target framerate
-  const randomExclude = new Set(["backgroundColor", "zoom", "targetFps"]);
+  const randomExclude = new Set(["backgroundColor", "zoom", "targetFps", "gpuCompute"]);
   // Budget-derived compound limits (used to clamp random combos)
   const _maxVisibleHits     = budget?.maxVisibleHits     ?? 200_000;
   const _maxPhysicsCost     = budget?.maxPhysicsCostPerSec ?? 2_000_000;
@@ -1397,6 +1404,7 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
     cpuCores: "--",
     cpuBench: "--",
     gpu: "detecting...",
+    gpuCompute: "OFF (CPU)",
   };
 
   const readoutGui = new GUI({ title: "Readout" });
@@ -1550,6 +1558,7 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
     perfReadout.add(hud, "flux").name("Particles / sec").listen().disable(),
     perfReadout.add(hud, "visible").name("On screen").listen().disable(),
     perfReadout.add(hud, "fps").name("Frame rate").listen().disable(),
+    perfReadout.add(hud, "gpuCompute").name("GPU compute").listen().disable(),
     perfReadout.add(hud, "cpuUsage").name("CPU threads used").listen().disable(),
     perfReadout.add(hud, "cpuLoad").name("CPU load").listen().disable(),
     perfReadout.add(hud, "bufferFill").name("Buffer fill").listen().disable(),
@@ -2065,5 +2074,22 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
     onForceHDR = cb;
   }
 
-  return { gui, readoutGui, params, hud, updateHUD, setHDRMode, setForceHDRCallback, updateTargetFpsLabel, manualOverrides, setOverridesCallback };
+  /**
+   * Update the normal-mode maximum for the particleRate slider.
+   * Used when GPU compute is activated (higher throughput) or deactivated.
+   * Has no effect in Override Mode (overrideMax is already very high).
+   */
+  function updateParticleRateMax(newMax: number): void {
+    const idx = numericDefs.findIndex(d => d.prop === "particleRate");
+    if (idx < 0) return;
+    const rounded = Math.round(newMax / 100) * 100; // snap to step
+    if (rounded === numericDefs[idx].max) return;
+    numericDefs[idx].max = Math.max(1000, rounded);
+    // Rebuild sliders to apply new range (only in normal mode)
+    if (!overrideState.overrideMode) {
+      rebuildNumericControllers(false);
+    }
+  }
+
+  return { gui, readoutGui, params, hud, updateHUD, setHDRMode, setForceHDRCallback, updateTargetFpsLabel, manualOverrides, setOverridesCallback, updateParticleRateMax };
 }

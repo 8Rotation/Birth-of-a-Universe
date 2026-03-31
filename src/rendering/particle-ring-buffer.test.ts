@@ -618,4 +618,171 @@ describe("ParticleRingBuffer", () => {
       expect(count).toBe(3); // slots 0,1,2 are alive
     });
   });
+
+  // ── GPU compute mode: alive-range from write history ──────────────
+
+  describe("GPU compute alive-range", () => {
+    it("gpuComputeMode defaults to false", () => {
+      const buf = new ParticleRingBuffer(8);
+      expect(buf.gpuComputeMode).toBe(false);
+    });
+
+    it("recordGpuWrite advances write head and totalWritten", () => {
+      const buf = new ParticleRingBuffer(16);
+      buf.gpuComputeMode = true;
+
+      buf.recordGpuWrite(5, 10.0, 10.5);
+      expect(buf.totalWritten).toBe(5);
+      expect(buf.writeHead).toBe(5);
+
+      buf.recordGpuWrite(3, 11.0, 11.5);
+      expect(buf.totalWritten).toBe(8);
+      expect(buf.writeHead).toBe(8);
+    });
+
+    it("recordGpuWrite wraps write head around capacity", () => {
+      const buf = new ParticleRingBuffer(8);
+      buf.gpuComputeMode = true;
+
+      buf.recordGpuWrite(6, 1.0, 1.5);
+      expect(buf.writeHead).toBe(6);
+
+      buf.recordGpuWrite(4, 2.0, 2.5);
+      expect(buf.writeHead).toBe(2); // (6+4) % 8 = 2
+      expect(buf.totalWritten).toBe(10);
+    });
+
+    it("recordGpuWrite with count=0 does nothing", () => {
+      const buf = new ParticleRingBuffer(8);
+      buf.gpuComputeMode = true;
+
+      buf.recordGpuWrite(0, 1.0, 1.5);
+      expect(buf.totalWritten).toBe(0);
+      expect(buf.writeHead).toBe(0);
+    });
+
+    it("computeAliveRange uses history when gpuComputeMode is true", () => {
+      const buf = new ParticleRingBuffer(64);
+      buf.gpuComputeMode = true;
+
+      // Record 3 batches at increasing times
+      buf.recordGpuWrite(10, 1.0, 1.5);  // writeHead: 0 → 10
+      buf.recordGpuWrite(10, 5.0, 5.5);  // writeHead: 10 → 20
+      buf.recordGpuWrite(10, 10.0, 10.5); // writeHead: 20 → 30
+
+      // now=12, cutoff=8 → deadline=4 → batches with maxBorn > 4 are alive
+      // Batch 0: maxBorn=1.5 < 4 → dead
+      // Batch 1: maxBorn=5.5 > 4 → alive (start here)
+      // Batch 2: maxBorn=10.5 > 4 → alive
+      const { start, count } = buf.computeAliveRange(12, 8);
+      expect(start).toBe(10); // writeHead of batch 1
+      expect(count).toBe(20); // from slot 10 to slot 30
+    });
+
+    it("returns count=0 when all GPU batches are dead", () => {
+      const buf = new ParticleRingBuffer(64);
+      buf.gpuComputeMode = true;
+
+      buf.recordGpuWrite(10, 1.0, 1.5);
+      buf.recordGpuWrite(10, 2.0, 2.5);
+
+      // now=100, cutoff=5 → deadline=95 → all maxBorn < 95 → all dead
+      const { start, count } = buf.computeAliveRange(100, 5);
+      expect(count).toBe(0);
+    });
+
+    it("returns all particles when all GPU batches are alive", () => {
+      const buf = new ParticleRingBuffer(64);
+      buf.gpuComputeMode = true;
+
+      buf.recordGpuWrite(10, 10.0, 10.5);
+      buf.recordGpuWrite(10, 11.0, 11.5);
+
+      // now=12, cutoff=100 → deadline=-88 → all maxBorn > -88 → all alive
+      const { start, count } = buf.computeAliveRange(12, 100);
+      expect(start).toBe(0);
+      expect(count).toBe(20);
+    });
+
+    it("handles wrap-around in history-based alive range", () => {
+      const cap = 16;
+      const buf = new ParticleRingBuffer(cap);
+      buf.gpuComputeMode = true;
+
+      // Fill and wrap
+      buf.recordGpuWrite(10, 1.0, 1.5);   // writeHead: 0 → 10
+      buf.recordGpuWrite(10, 5.0, 5.5);   // writeHead: 10 → 4 (wraps)
+      buf.recordGpuWrite(4, 10.0, 10.5);  // writeHead: 4 → 8
+
+      // now=12, cutoff=8 → deadline=4, batch 1 maxBorn=5.5 > 4 → alive
+      const { start, count } = buf.computeAliveRange(12, 8);
+      expect(start).toBe(10); // writeHead of batch 1
+      // count = (8 - 10 + 16) % 16 = 14
+      expect(count).toBe(14);
+    });
+
+    it("clears history when gpuComputeMode is disabled", () => {
+      const buf = new ParticleRingBuffer(32);
+      buf.gpuComputeMode = true;
+      buf.recordGpuWrite(5, 1.0, 1.5);
+
+      buf.gpuComputeMode = false;
+
+      // Should fall back to CPU binary search (which sees empty bornTimes)
+      // but totalWritten is 5, so it will search the CPU data
+      // The CPU data has sentinels (no writeBatch was called), so all dead
+      // at any reasonable cutoff
+      const { count } = buf.computeAliveRange(10, 5);
+      // All 5 slots have sentinel bornTime, so all are dead
+      expect(count).toBe(0);
+    });
+
+    it("clear() resets GPU history", () => {
+      const buf = new ParticleRingBuffer(16);
+      buf.gpuComputeMode = true;
+      buf.recordGpuWrite(5, 1.0, 1.5);
+
+      buf.clear();
+
+      expect(buf.totalWritten).toBe(0);
+      const { count } = buf.computeAliveRange(10, 100);
+      expect(count).toBe(0);
+    });
+
+    it("falls back to CPU binary search when history is empty in GPU mode", () => {
+      const buf = new ParticleRingBuffer(8);
+      buf.gpuComputeMode = true;
+
+      // Write via CPU path (writeBatch), not recordGpuWrite
+      const batch = makeBatch([
+        { lx: 0, ly: 0, born: 5, hue: 0, bri: 0.5, eps: 10, size: 0.1 },
+        { lx: 0, ly: 0, born: 6, hue: 0, bri: 0.5, eps: 10, size: 0.1 },
+      ]);
+      buf.writeBatch(batch, 2, STRIDE, 6, 30);
+
+      // GPU history is empty → falls through to CPU binary search
+      const { start, count } = buf.computeAliveRange(10, 30);
+      expect(start).toBe(0);
+      expect(count).toBe(2);
+    });
+
+    it("trims history to max 600 entries", () => {
+      const buf = new ParticleRingBuffer(100000);
+      buf.gpuComputeMode = true;
+
+      // Record 650 batches
+      for (let i = 0; i < 650; i++) {
+        buf.recordGpuWrite(1, i, i + 0.5);
+      }
+
+      // Alive range should still work — oldest entries were trimmed
+      // now=700, cutoff=100 → deadline=600
+      // After trimming, entries 50..649 remain (600 entries)
+      // Entry 50 has maxBorn=50.5 < 600 → dead
+      // Entry 600 has maxBorn=600.5 > 600 → alive
+      const { count } = buf.computeAliveRange(700, 100);
+      expect(count).toBeGreaterThan(0);
+      expect(count).toBeLessThanOrEqual(650);
+    });
+  });
 });

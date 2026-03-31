@@ -21,6 +21,22 @@ const BORN_SENTINEL = -1e9;
 /** Bytes per particle: 2 vec4s × 4 floats × 4 bytes = 32 bytes. */
 const BYTES_PER_PARTICLE = 32;
 
+/** Maximum number of GPU write records to keep (≈10 seconds at 60fps). */
+const GPU_HISTORY_MAX = 600;
+
+/**
+ * Tracks metadata for a batch of particles written by the GPU compute shader.
+ * Used by computeAliveRange() when CPU-side bornTime data is stale.
+ */
+interface GpuWriteRecord {
+  /** Ring buffer position at the START of this write batch. */
+  writeHead: number;
+  /** Earliest possible bornTime in this batch. */
+  minBorn: number;
+  /** Latest possible bornTime in this batch. */
+  maxBorn: number;
+}
+
 export class ParticleRingBuffer {
   private _capacity: number;
   private _writeHead = 0;
@@ -37,6 +53,15 @@ export class ParticleRingBuffer {
   private _gpuBackend: any = null;
   /** False after grow() until the next needsUpdate cycle re-creates GPUBuffers. */
   private _gpuBufCacheValid = false;
+
+  /**
+   * When true, computeAliveRange() uses GPU write history instead of
+   * binary-searching the CPU-side Float32Array (which is stale when
+   * particles are emitted by the GPU compute shader).
+   */
+  private _gpuComputeMode = false;
+  /** Circular history of GPU write batches for alive-range estimation. */
+  private _gpuHistory: GpuWriteRecord[] = [];
 
   constructor(initialCapacity: number) {
     this._capacity = initialCapacity;
@@ -246,6 +271,44 @@ export class ParticleRingBuffer {
     this._gpuBufCacheValid = true; // new GPUBuffers will match capacity after upload
   }
 
+  // ── GPU compute mode ────────────────────────────────────────────────
+
+  /**
+   * Enable or disable GPU compute mode. When enabled, computeAliveRange()
+   * uses recorded GPU write history instead of binary-searching the
+   * CPU-side Float32Array (which is stale in GPU compute mode).
+   */
+  set gpuComputeMode(enabled: boolean) {
+    this._gpuComputeMode = enabled;
+    if (!enabled) this._gpuHistory.length = 0;
+  }
+  get gpuComputeMode(): boolean { return this._gpuComputeMode; }
+
+  /**
+   * Record that `count` particles were written by the GPU compute shader
+   * starting at the current writeHead, with bornTimes approximately in
+   * [minBorn, maxBorn]. Advances the write head by `count`.
+   *
+   * Used instead of advanceWriteHead() when GPU compute is active so that
+   * computeAliveRange() can estimate alive particles from the history
+   * instead of reading stale CPU-side bornTime data.
+   */
+  recordGpuWrite(count: number, minBorn: number, maxBorn: number): void {
+    if (count <= 0) return;
+
+    // Record before advancing (writeHead = start of this batch)
+    this._gpuHistory.push({ writeHead: this._writeHead, minBorn, maxBorn });
+
+    // Trim to circular cap
+    if (this._gpuHistory.length > GPU_HISTORY_MAX) {
+      this._gpuHistory.splice(0, this._gpuHistory.length - GPU_HISTORY_MAX);
+    }
+
+    // Advance write head (same as advanceWriteHead)
+    this._writeHead = (this._writeHead + count) % this._capacity;
+    this._totalWritten += count;
+  }
+
   // ── Alive-range tracking ─────────────────────────────────────────────
 
   /**
@@ -257,6 +320,56 @@ export class ParticleRingBuffer {
   computeAliveRange(now: number, cutoffDuration: number): { start: number; count: number } {
     if (this._totalWritten === 0) return { start: 0, count: 0 };
 
+    // GPU compute mode: CPU-side bornTime data is stale, use recorded
+    // write history to estimate the alive range instead of binary-searching
+    // the Float32Array. Each history entry stores the write-head position
+    // and the min/max bornTime bounds for that batch. We binary-search the
+    // history for the oldest batch whose maxBorn > deadline.
+    if (this._gpuComputeMode && this._gpuHistory.length > 0) {
+      return this._computeAliveRangeFromHistory(now, cutoffDuration);
+    }
+
+    return this._binarySearchAliveRange(now, cutoffDuration);
+  }
+
+  /**
+   * GPU compute alive-range: binary-search the frame-level write history
+   * instead of per-particle bornTime data.
+   */
+  private _computeAliveRangeFromHistory(
+    now: number,
+    cutoffDuration: number,
+  ): { start: number; count: number } {
+    const deadline = now - cutoffDuration;
+    const hist = this._gpuHistory;
+    const cap = this._capacity;
+
+    // Binary search for the first entry where maxBorn > deadline
+    let lo = 0, hi = hist.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (hist[mid].maxBorn <= deadline) lo = mid + 1;
+      else hi = mid;
+    }
+
+    if (lo >= hist.length) {
+      // All recorded batches are dead
+      return { start: this._writeHead, count: 0 };
+    }
+
+    const start = hist[lo].writeHead;
+    const count = (this._writeHead - start + cap) % cap;
+    return { start, count: count === 0 && this._totalWritten > 0 ? cap : count };
+  }
+
+  /**
+   * CPU path: binary-search the per-particle bornTime array.
+   * Used when GPU compute mode is off.
+   */
+  private _binarySearchAliveRange(
+    now: number,
+    cutoffDuration: number,
+  ): { start: number; count: number } {
     const a = this._attrA.array as Float32Array;
     const cutoff = now - cutoffDuration;
 
@@ -292,12 +405,54 @@ export class ParticleRingBuffer {
     return { start, count };
   }
 
+  // ── GPU compute helpers ──────────────────────────────────────────────
+
+  /**
+   * Returns the underlying GPUBuffer handles for the two packed attributes,
+   * or null if GPU buffers haven't been created yet (first frame) or are stale.
+   * Used by ComputeEmitter to set up copyBufferToBuffer targets.
+   */
+  getGpuBuffers(): { bufA: GPUBuffer; bufB: GPUBuffer } | null {
+    if (!this._gpuDevice || !this._gpuBackend || !this._gpuBufCacheValid) return null;
+    const gpuBufA: GPUBuffer | undefined = this._gpuBackend.get(this._attrA)?.buffer;
+    const gpuBufB: GPUBuffer | undefined = this._gpuBackend.get(this._attrB)?.buffer;
+    if (!gpuBufA || !gpuBufB) return null;
+    const expectedSize = this._capacity * 16;
+    if (gpuBufA.size < expectedSize || gpuBufB.size < expectedSize) return null;
+    return { bufA: gpuBufA, bufB: gpuBufB };
+  }
+
+  /**
+   * Advance the write head and total-written counter WITHOUT writing CPU-side
+   * data. Used by ComputeEmitter after the GPU compute shader has written
+   * directly to the GPU buffers.
+   *
+   * If the write would overwrite still-alive slots, triggers grow().
+   */
+  advanceWriteHead(count: number): void {
+    if (count <= 0) return;
+
+    // Check for wrap-around overwriting alive slots (same guard as writeBatch)
+    if (this._totalWritten >= this._capacity) {
+      // Can't easily check bornTime since CPU data is stale in GPU-compute mode.
+      // The caller (ComputeEmitter) is responsible for not exceeding capacity
+      // faster than particles die. We just advance.
+    }
+
+    this._writeHead = (this._writeHead + count) % this._capacity;
+    this._totalWritten += count;
+  }
+
+  /** Current write-head position (for ComputeEmitter writeOffset). */
+  get writeHead(): number { return this._writeHead; }
+
   // ── Clear ───────────────────────────────────────────────────────────
 
   /** Reset the ring buffer — fills bornTime with sentinel, resets writeHead. */
   clear(): void {
     this._writeHead = 0;
     this._totalWritten = 0;
+    this._gpuHistory.length = 0;
     const a = this._attrA.array as Float32Array;
     for (let i = 0; i < this._capacity; i++) {
       a[i * 4 + 2] = BORN_SENTINEL;

@@ -467,6 +467,12 @@ export class PhysicsBridge {
     console.log(`[bridge] Restarted ${this.workerCount} physics workers`);
   }
 
+  /** Expose coefficients for the GPU compute path. */
+  getCoeffs(): ReadonlyArray<PerturbMode> { return this.coeffs; }
+
+  /** Expose the coefficient RNG for the GPU compute path (direct O-U evolution). */
+  getCoeffRng(): () => number { return this.coeffRng; }
+
   dispose(): void {
     for (const worker of this.workers) {
       worker.terminate();

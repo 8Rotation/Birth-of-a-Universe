@@ -25,6 +25,9 @@ import { SensorRenderer } from "./rendering/renderer.js";
 import { createSensorControls } from "./ui/controls.js";
 import { ScreenDetector } from "./ui/screen-info.js";
 import { HardwareDetector } from "./ui/hardware-info.js";
+import { ComputeEmitter } from "./compute/compute-emitter.js";
+import type { ComputeParams } from "./compute/compute-emitter.js";
+import shaderSource from "./compute/particle-emit.wgsl?raw";
 
 console.log("[main] Birth of a Universe — ECSK Bounce Sensor");
 
@@ -173,10 +176,12 @@ async function main() {
   // EMA-smoothed pair-production multiplier — avoids abrupt density
   // changes when betaPP slider is dragged.
   let smoothedPpMultiplier = 1;
+  // Track gpuCompute toggle to update slider limits on change.
+  let prevGpuComputeActive = false;
 
   // ── 4. Controls (auto-configured from hardware budget) ────────────
   const tCtrl = performance.now();
-  const { params, hud, updateHUD, setHDRMode, setForceHDRCallback, updateTargetFpsLabel, setOverridesCallback, manualOverrides } = createSensorControls(() => {
+  const { params, hud, updateHUD, setHDRMode, setForceHDRCallback, updateTargetFpsLabel, setOverridesCallback, manualOverrides, updateParticleRateMax } = createSensorControls(() => {
     // Full reset: terminate and recreate all workers (recovers from
     // crashes), wipe all particle state, and re-sync timing.
     // Equivalent to browser reload but keeps current settings.
@@ -342,7 +347,47 @@ async function main() {
     sizeVariation: params.sizeVariation,
   }, budget.recommendedWorkers);
 
-  // ── 6. GPU pipeline ready ──────────────────────────────────────────
+  // ── 6. GPU compute emitter (optional, parallel to CPU workers) ───
+  let computeEmitter: ComputeEmitter | null = null;
+  let gpuDevice: GPUDevice | undefined;
+  /** Phase accumulator for double-bounce rate modulation in GPU compute path. */
+  let gpuDbPhase = 0;
+  /** GPU compute benchmark result: particles/sec. 0 = not yet benchmarked. */
+  let gpuComputeRate = 0;
+  {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const backend = (renderer.renderer as any).backend;
+    gpuDevice = backend?.device as GPUDevice | undefined;
+    if (gpuDevice) {
+      computeEmitter = new ComputeEmitter(gpuDevice, renderer.ringBuffer, shaderSource);
+      // Defer init() to after first render (GPUBuffers exist).
+      // Use two rAF callbacks: first for the initial render, second to init compute.
+      const benchDevice = gpuDevice;
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          try {
+            computeEmitter!.init();
+            console.log("[main] GPU compute emitter ready");
+            // Run GPU compute benchmark (async, non-blocking)
+            hwDetector.benchmarkGpuCompute(benchDevice).then((result) => {
+              if (result) {
+                gpuComputeRate = result.particlesPerSec;
+                // Raise slider limit when GPU compute is available
+                const gpuSliderMax = Math.round(gpuComputeRate / 60); // particles/frame at 60fps
+                if (gpuSliderMax > budget.sliderLimits.particleRateMax) {
+                  updateParticleRateMax(gpuSliderMax);
+                }
+              }
+            });
+          } catch (e) {
+            console.warn("[main] GPU compute init failed, using CPU workers:", e);
+            computeEmitter = null;
+          }
+        });
+      });
+    }
+  }
+
   console.log(`[main] Worker spawn: ${(performance.now() - t3).toFixed(0)} ms`);
   console.log(`[main] Total init: ${(performance.now() - t0).toFixed(0)} ms`);
 
@@ -599,11 +644,35 @@ async function main() {
       const maxByVisible = budget.maxVisibleHits / (Math.max(params.persistence, 0.2) * totalMultiplier);
       if (effectiveRate > maxByVisible) effectiveRate = maxByVisible;
 
-      // (b) Physics cost: cap total rate so totalRate × numCoeffs ≤ maxPhysicsCostPerSec
-      const numCoeffs = params.lMax * params.lMax + 2 * params.lMax; // Σ(2l+1) for l=1..lMax
-      if (numCoeffs > 0) {
-        const maxByPhysics = budget.maxPhysicsCostPerSec / (numCoeffs * totalMultiplier);
-        if (effectiveRate > maxByPhysics) effectiveRate = maxByPhysics;
+      // (b) Physics cost: when GPU compute is active with a benchmark result,
+      // use GPU throughput to cap rate instead of CPU physics cost.
+      // Otherwise fall back to CPU-based physics cost cap.
+      const gpuActive = !!(params.gpuCompute && computeEmitter?.ready && gpuDevice);
+
+      // Update slider limits when GPU compute toggles on/off
+      if (gpuActive !== prevGpuComputeActive) {
+        prevGpuComputeActive = gpuActive;
+        if (gpuActive && gpuComputeRate > 0) {
+          const gpuSliderMax = Math.round(gpuComputeRate / 60);
+          if (gpuSliderMax > budget.sliderLimits.particleRateMax) {
+            updateParticleRateMax(gpuSliderMax);
+          }
+        } else {
+          updateParticleRateMax(budget.sliderLimits.particleRateMax);
+        }
+      }
+
+      if (gpuActive && gpuComputeRate > 0) {
+        // GPU compute: cap by measured GPU throughput / target FPS
+        const targetFps = Math.max(30, effectiveFrameCapHz);
+        const maxByGpu = gpuComputeRate / (targetFps * totalMultiplier);
+        if (effectiveRate > maxByGpu) effectiveRate = maxByGpu;
+      } else {
+        const numCoeffs = params.lMax * params.lMax + 2 * params.lMax; // Σ(2l+1) for l=1..lMax
+        if (numCoeffs > 0) {
+          const maxByPhysics = budget.maxPhysicsCostPerSec / (numCoeffs * totalMultiplier);
+          if (effectiveRate > maxByPhysics) effectiveRate = maxByPhysics;
+        }
       }
 
       // (c) Reactive back-pressure: reduce rate when ring buffer is near full
@@ -622,38 +691,179 @@ async function main() {
       // Floor: never drop below 100/s (keep something visible)
       effectiveRate = Math.max(100, effectiveRate);
 
-      // Request particles from worker (results arrive next frame)
+      // ── Emit particles: GPU compute or CPU workers ──────────────
       const _tp0 = performance.now();
-      bridge.tick(dt, simTime, effectiveRate, {
-        beta: params.beta,
-        kCurvature: Number(params.kCurvature),
-        perturbAmplitude: params.perturbAmplitude,
-        lMax: params.lMax,
-        nS: params.nS,
-        arrivalSpread: params.arrivalSpread,
-        fieldEvolution: params.fieldEvolution,
-        doubleBounce: params.doubleBounce,
-        betaPP: params.betaPP,
-        silkDamping: params.silkDamping,
-        hueMin: params.hueMin,
-        hueRange: params.hueRange,
-        brightnessFloor: params.brightnessFloor,
-        brightnessCeil: params.brightnessCeil,
-        dbSecondHueShift: params.dbSecondHueShift,
-        dbSecondBriScale: params.dbSecondBriScale,
-        ppHueShift: params.ppHueShift,
-        ppBriBoost: params.ppBriBoost,
-        ppSizeScale: params.ppSizeScale,
-        ppBaseDelay: params.ppBaseDelay,
-        ppScatterRange: params.ppScatterRange,
-        sizeVariation: params.sizeVariation,
-        ppFractionCap: budget.ppFractionCap,
-      }, budget.maxParticlesPerTick);
+
+      // Sync ring buffer mode: GPU compute writes directly to GPU buffers,
+      // so the CPU-side bornTime array is stale. gpuComputeMode tells
+      // computeAliveRange() to use recorded write history instead.
+      renderer.ringBuffer.gpuComputeMode = gpuActive;
+
+      if (gpuActive && computeEmitter?.ready && gpuDevice) {
+        // GPU compute path — evolve coefficients on main thread, dispatch
+        // compute shader, skip CPU workers entirely.
+        // Call bridge.tick with rate=0 so _syncCoeffs() handles lMax/amplitude
+        // changes (regenerates coefficients when structural params change),
+        // and evolveCoeffs() runs exactly once.  Workers receive rate=0 so
+        // they produce no particles.
+        bridge.tick(dt, simTime, 0, {
+          beta: params.beta,
+          kCurvature: Number(params.kCurvature),
+          perturbAmplitude: params.perturbAmplitude,
+          lMax: params.lMax,
+          nS: params.nS,
+          arrivalSpread: params.arrivalSpread,
+          fieldEvolution: params.fieldEvolution,
+          doubleBounce: params.doubleBounce,
+          betaPP: params.betaPP,
+          silkDamping: params.silkDamping,
+          hueMin: params.hueMin,
+          hueRange: params.hueRange,
+          brightnessFloor: params.brightnessFloor,
+          brightnessCeil: params.brightnessCeil,
+          dbSecondHueShift: params.dbSecondHueShift,
+          dbSecondBriScale: params.dbSecondBriScale,
+          ppHueShift: params.ppHueShift,
+          ppBriBoost: params.ppBriBoost,
+          ppSizeScale: params.ppSizeScale,
+          ppBaseDelay: params.ppBaseDelay,
+          ppScatterRange: params.ppScatterRange,
+          sizeVariation: params.sizeVariation,
+          ppFractionCap: budget.ppFractionCap,
+        }, 0);
+
+        // ── Double-bounce rate modulation (Approach A: CPU-side) ───
+        // Mirrors shell.ts logic: cos²(2π·2·phase) envelope on emission rate.
+        const DB_VIS_NORM = 645;
+        const DB_VIS_PERIOD_FLOOR = 0.3;
+        const DB_MOD_FLOOR = 0.05;
+        const DB_MOD_MEAN = 0.375;
+        const TD_DENOM_FLOOR = 1e-6;
+        const PP_BRIGHTNESS_CEIL = 1.5;
+
+        let gpuEffectiveRate = effectiveRate;
+        const currentK = Number(params.kCurvature);
+        const dbActive = params.doubleBounce && currentK === 1;
+
+        if (dbActive) {
+          const fp = physics.fullPeriod();
+          const dbDenom = Math.max(TD_DENOM_FLOOR,
+            Math.abs(physics.sensitivity()) * physics.beta * params.perturbAmplitude);
+          const dbTD = params.arrivalSpread / dbDenom;
+          const visPeriod = Math.max(DB_VIS_PERIOD_FLOOR, fp * dbTD / DB_VIS_NORM);
+          gpuDbPhase += dt / visPeriod;
+          gpuDbPhase %= 1.0;
+
+          const cosVal = Math.cos(2 * Math.PI * 2 * gpuDbPhase);
+          const mod = Math.max(DB_MOD_FLOOR, cosVal > 0 ? cosVal * cosVal : 0);
+          gpuEffectiveRate = effectiveRate * mod / DB_MOD_MEAN;
+        }
+
+        // ── Compute bounce + production particle counts ───────────
+        const bounceCount = Math.min(
+          Math.floor(gpuEffectiveRate * dt),
+          budget.maxParticlesPerTick,
+        );
+        const gpuPpFraction = params.betaPP > 0
+          ? Math.min(budget.ppFractionCap, params.betaPP / ECSKPhysics.BETA_CR)
+          : 0;
+        const ppCount = params.betaPP > 0
+          ? Math.max(0, Math.floor(bounceCount * gpuPpFraction))
+          : 0;
+        const emitCount = bounceCount + ppCount;
+
+        if (emitCount > 0) {
+          const minBetaEff = physics.beta * Math.max(0.001, 1 - params.perturbAmplitude);
+          const maxBetaEff = physics.beta * (1 + params.perturbAmplitude);
+          const accRange = physics.bounceAccRange(params.perturbAmplitude);
+
+          // Production normalization bounds (only computed when PP active)
+          let ppMinWEff = 0, ppMaxWEff = 0, ppGlobalMinAcc = 0, ppGlobalMaxAcc = 0;
+          if (ppCount > 0) {
+            ppMinWEff = physics.productionProps(minBetaEff, params.betaPP).wEff;
+            ppMaxWEff = physics.productionProps(maxBetaEff, params.betaPP).wEff;
+            const ppAccRange = physics.productionAccRange(params.perturbAmplitude, params.betaPP);
+            ppGlobalMinAcc = ppAccRange.minAcc;
+            ppGlobalMaxAcc = ppAccRange.maxAcc;
+          }
+
+          const computeParams: ComputeParams = {
+            beta: params.beta,
+            kCurvature: currentK,
+            perturbAmplitude: params.perturbAmplitude,
+            lMax: params.lMax,
+            arrivalSpread: params.arrivalSpread,
+            simTime,
+            sensitivity: physics.sensitivity(),
+            hueMin: params.hueMin,
+            hueRange: params.hueRange,
+            brightnessFloor: params.brightnessFloor,
+            brightnessCeil: params.brightnessCeil,
+            sizeVariation: params.sizeVariation,
+            globalMinAcc: accRange.minAcc,
+            globalMaxAcc: accRange.maxAcc,
+            minWEff: physics.bounceProps(minBetaEff).wEff,
+            maxWEff: physics.bounceProps(maxBetaEff).wEff,
+
+            // Double-bounce
+            doubleBounce: dbActive,
+            dbPhase: gpuDbPhase,
+            dbSecondHueShift: params.dbSecondHueShift,
+            dbSecondBriScale: params.dbSecondBriScale,
+
+            // Pair production
+            bounceCount,
+            ppHueShift: params.ppHueShift,
+            ppBriBoost: params.ppBriBoost,
+            ppSizeScale: params.ppSizeScale,
+            ppBaseDelay: params.ppBaseDelay,
+            ppScatterRange: params.ppScatterRange,
+            ppBrightnessCeil: PP_BRIGHTNESS_CEIL,
+            ppMinWEff,
+            ppMaxWEff,
+            ppGlobalMinAcc,
+            ppGlobalMaxAcc,
+          };
+          const packedCoeffs = ComputeEmitter.packCoeffs(bridge.getCoeffs());
+          const encoder = gpuDevice.createCommandEncoder();
+          computeEmitter.dispatch(encoder, emitCount, computeParams, packedCoeffs);
+          gpuDevice.queue.submit([encoder.finish()]);
+          arrivalCounter += emitCount;
+        }
+      } else {
+        // CPU worker path (existing behavior, unchanged)
+        bridge.tick(dt, simTime, effectiveRate, {
+          beta: params.beta,
+          kCurvature: Number(params.kCurvature),
+          perturbAmplitude: params.perturbAmplitude,
+          lMax: params.lMax,
+          nS: params.nS,
+          arrivalSpread: params.arrivalSpread,
+          fieldEvolution: params.fieldEvolution,
+          doubleBounce: params.doubleBounce,
+          betaPP: params.betaPP,
+          silkDamping: params.silkDamping,
+          hueMin: params.hueMin,
+          hueRange: params.hueRange,
+          brightnessFloor: params.brightnessFloor,
+          brightnessCeil: params.brightnessCeil,
+          dbSecondHueShift: params.dbSecondHueShift,
+          dbSecondBriScale: params.dbSecondBriScale,
+          ppHueShift: params.ppHueShift,
+          ppBriBoost: params.ppBriBoost,
+          ppSizeScale: params.ppSizeScale,
+          ppBaseDelay: params.ppBaseDelay,
+          ppScatterRange: params.ppScatterRange,
+          sizeVariation: params.sizeVariation,
+          ppFractionCap: budget.ppFractionCap,
+        }, budget.maxParticlesPerTick);
+      }
       const _tp1 = performance.now();
       profPhysicsMs += _tp1 - _tp0;
 
-      // Ingest particles from previous worker tick(s) — direct ring buffer writes.
+      // Ingest particles from previous CPU worker tick(s) — direct ring buffer writes.
       // No per-frame cap needed: ring buffer writes are just memcpy.
+      // (In GPU compute mode, workers produce nothing, so drain() returns empty.)
       const _td0 = performance.now();
       const batches = bridge.drain();
       for (let i = 0; i < batches.length; i++) {
@@ -802,6 +1012,19 @@ async function main() {
       const cpuColor = measuredCpuLoad > 0.9 ? ' ⚠️ HIGH' : measuredCpuLoad > 0.7 ? ' • BUSY' : '';
       hud.cpuLoad = `${cpuPct}%${cpuColor}`;
       hud.bufferFill = `${(renderer.ringBuffer.activeCount / 1000).toFixed(0)}K / ${(renderer.ringBuffer.capacity / 1000).toFixed(0)}K`;
+      // GPU compute status
+      if (params.gpuCompute && computeEmitter?.ready) {
+        if (gpuComputeRate > 0) {
+          const kPerFrame = Math.round(gpuComputeRate / Math.max(30, effectivePresentationHz()) / 1000);
+          hud.gpuCompute = `ON (${kPerFrame > 0 ? kPerFrame + 'K' : '<1K'}/frame)`;
+        } else {
+          hud.gpuCompute = "ON (benchmarking...)";
+        }
+      } else if (params.gpuCompute) {
+        hud.gpuCompute = "INIT...";
+      } else {
+        hud.gpuCompute = "OFF (CPU)";
+      }
       updateHUD();
     }
   }
