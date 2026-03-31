@@ -317,23 +317,30 @@ export class ParticleRingBuffer {
     if (newCap === this._capacity) return;
 
     const oldCap = this._capacity;
+    const oldHead = this._writeHead;
+    const hadWrapped = this._totalWritten >= oldCap;
+
     this._capacity = newCap;
 
-    this._growAttr(this._attrA, oldCap);
-    this._growAttr(this._attrB, oldCap);
+    if (hadWrapped) {
+      // Reorder: chronological = [oldHead..oldCap) + [0..oldHead)
+      this._growAttrReorder(this._attrA, oldCap, oldHead);
+      this._growAttrReorder(this._attrB, oldCap, oldHead);
+      // writeHead now points right after the old data
+      this._writeHead = oldCap;
+      // After linearizing, exactly oldCap particles occupy [0..oldCap)
+      this._totalWritten = oldCap;
+    } else {
+      // No wrap — data is already in order [0..totalWritten)
+      this._growAttr(this._attrA, oldCap);
+      this._growAttr(this._attrB, oldCap);
+      // writeHead stays at its current position (still valid)
+    }
 
-    // Fill new bornTime slots with sentinel
+    // Fill remaining slots with sentinel
     const a = this._attrA.array as Float32Array;
     for (let i = oldCap; i < newCap; i++) {
       a[i * 4 + 2] = BORN_SENTINEL;
-    }
-
-    // After grow, writeHead stays where it is (pointing at first empty slot
-    // in the new region, or at an old slot that's now safe to continue from).
-    // If we were at wrap-around, move writeHead to the old capacity
-    // since those are the newly available empty slots.
-    if (this._totalWritten >= oldCap) {
-      this._writeHead = oldCap;
     }
 
     // Invalidate cached GPU buffer references — the old GPUBuffers
@@ -366,6 +373,22 @@ export class ParticleRingBuffer {
     const oldArr = attr.array as Float32Array;
     const newArr = new Float32Array(this._capacity * 4);
     newArr.set(oldArr.subarray(0, oldCap * 4));
+    attr.array = newArr;
+    attr.needsUpdate = true;
+  }
+
+  private _growAttrReorder(
+    attr: THREE.InstancedBufferAttribute,
+    oldCap: number,
+    oldHead: number,
+  ): void {
+    const oldArr = attr.array as Float32Array;
+    const newArr = new Float32Array(this._capacity * 4);
+    // First segment: [oldHead..oldCap)
+    const firstLen = (oldCap - oldHead) * 4;
+    newArr.set(oldArr.subarray(oldHead * 4, oldCap * 4), 0);
+    // Second segment: [0..oldHead)
+    newArr.set(oldArr.subarray(0, oldHead * 4), firstLen);
     attr.array = newArr;
     attr.needsUpdate = true;
   }

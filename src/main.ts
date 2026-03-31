@@ -620,7 +620,9 @@ async function main() {
       // Ingest particles from previous worker tick(s) — direct ring buffer writes.
       // No per-frame cap needed: ring buffer writes are just memcpy.
       const batches = bridge.drain();
-      if (batches.length > 0) pendingBatches.push(...batches);
+      for (let i = 0; i < batches.length; i++) {
+        pendingBatches.push(batches[i]);
+      }
       const cutoff = params.persistence * CUTOFF_MARGIN;
       while (pendingBatches.length > 0) {
         const batch = pendingBatches.shift()!;

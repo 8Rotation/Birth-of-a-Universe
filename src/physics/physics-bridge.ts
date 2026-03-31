@@ -100,6 +100,8 @@ type TickMessage = {
 interface WorkerTickState {
   busy: boolean;
   pendingTick: TickMessage | null;
+  dead: boolean;
+  consecutiveErrors: number;
 }
 
 export class PhysicsBridge {
@@ -127,10 +129,11 @@ export class PhysicsBridge {
   private _lastAmplitude: number;
   private _lastNS: number;
   private _lastSilkDamping: number;
+  private _lastConfig: PhysicsBridgeConfig;
 
   private _postTick(index: number, msg: TickMessage): void {
     const state = this.workerStates[index];
-    if (!state) return;
+    if (!state || state.dead) return;
     if (state.busy) {
       state.pendingTick = msg;
       return;
@@ -145,6 +148,22 @@ export class PhysicsBridge {
       this.workerStates[i].busy = false;
       this.workerStates[i].pendingTick = null;
     }
+  }
+
+  private _restartWorker(index: number): void {
+    const state = this.workerStates[index];
+    try {
+      this.workers[index].terminate();
+    } catch { /* already dead */ }
+    const newWorker = this._createWorker(index, this._lastConfig);
+    this.workers[index] = newWorker;
+    if (state) {
+      state.busy = false;
+      state.pendingTick = null;
+      state.dead = false;
+      // Keep consecutiveErrors so backoff continues if the new worker also crashes
+    }
+    console.log(`[bridge] Worker ${index} restarted (attempt ${state?.consecutiveErrors ?? '?'})`);
   }
 
   private _createWorker(index: number, config: PhysicsBridgeConfig): Worker {
@@ -168,6 +187,7 @@ export class PhysicsBridge {
       const state = this.workerStates[index];
       if (!state) return;
       state.busy = false;
+      state.consecutiveErrors = 0;
 
       const pending = state.pendingTick;
       if (pending && pending.generation === this.generation) {
@@ -184,7 +204,12 @@ export class PhysicsBridge {
       if (state) {
         state.busy = false;
         state.pendingTick = null;
+        state.dead = true;
+        state.consecutiveErrors++;
       }
+      // Auto-restart with exponential backoff (cap at 5 s)
+      const delay = Math.min(5000, 500 * Math.pow(2, (state?.consecutiveErrors ?? 1) - 1));
+      setTimeout(() => this._restartWorker(index), delay);
     };
 
     worker.postMessage({
@@ -216,9 +241,11 @@ export class PhysicsBridge {
     this._lastNS = config.nS;
     this._lastSilkDamping = silkDamping;
 
+    this._lastConfig = config;
+
     // Create N workers, each with a unique seed derived from the session seed
     for (let i = 0; i < this.workerCount; i++) {
-      this.workerStates.push({ busy: false, pendingTick: null });
+      this.workerStates.push({ busy: false, pendingTick: null, dead: false, consecutiveErrors: 0 });
       this.workers.push(this._createWorker(i, config));
     }
 
@@ -299,8 +326,9 @@ export class PhysicsBridge {
     // Pack coefficients for broadcast
     const packedCoeffs = this._packCoeffs();
 
-    // Partition rate across workers (each gets an equal share)
-    const ratePerWorker = particleRate / this.workerCount;
+    // Partition rate across alive workers (each gets an equal share)
+    const aliveCount = this.workerStates.filter(s => !s.dead).length;
+    const ratePerWorker = particleRate / Math.max(1, aliveCount);
 
     const msg: TickMessage = {
       type: "tick" as const,
@@ -343,6 +371,7 @@ export class PhysicsBridge {
   reset(config: PhysicsBridgeConfig): void {
     this.generation++;
     this._clearWorkerTickState();
+    this._lastConfig = config;
 
     // Re-initialise central perturbation field
     const silkDamping = config.silkDamping ?? DEFAULT_SILK_DAMPING;
@@ -399,6 +428,7 @@ export class PhysicsBridge {
     this.workerStates = [];
     this.batches = [];
     this.generation++;
+    this._lastConfig = config;
 
     // Re-initialise central perturbation field
     const silkDamping = config.silkDamping ?? DEFAULT_SILK_DAMPING;
@@ -417,7 +447,7 @@ export class PhysicsBridge {
 
     // Create fresh workers
     for (let i = 0; i < this.workerCount; i++) {
-      this.workerStates.push({ busy: false, pendingTick: null });
+      this.workerStates.push({ busy: false, pendingTick: null, dead: false, consecutiveErrors: 0 });
       this.workers.push(this._createWorker(i, config));
     }
 

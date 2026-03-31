@@ -27,7 +27,7 @@
 import { ECSKPhysics } from "./ecsk-physics.js";
 import {
   generatePerturbCoeffs,
-  evaluatePerturbation,
+  evaluatePerturbationFast,
   evolveCoeffs,
   rescaleCoeffSigmas,
   splitmix32,
@@ -145,7 +145,7 @@ export function defaultEmitterConfig(partial: Partial<EmitterConfig> = {}): Emit
   };
 }
 
-/** A single particle ready to be added to the hit buffer. */
+/** A single particle ready to be added to the hit buffer (documentation-only). */
 export interface PendingParticle {
   lx: number;
   ly: number;
@@ -156,6 +156,18 @@ export interface PendingParticle {
   eps: number;
   hitSize: number;
   tailAngle: number;
+}
+
+/**
+ * Flat batch of particles packed into a stride-8 Float32Array.
+ *
+ * Layout per particle (8 floats):
+ *   [0] lx  [1] ly  [2] arrivalTime  [3] hue
+ *   [4] brightness  [5] eps  [6] hitSize  [7] tailAngle
+ */
+export interface ParticleBatch {
+  data: Float32Array;
+  count: number;
 }
 
 /**
@@ -308,7 +320,7 @@ export class StreamEmitter {
    * @param particleRate Target particles per second.
    * @returns Array of particles whose arrivalTime is in the future.
    */
-  tick(dt: number, now: number, particleRate: number): PendingParticle[] {
+  tick(dt: number, now: number, particleRate: number): ParticleBatch {
     const c = this.cfg;
     // Evolve the perturbation field (O-U random walk) before sampling.
     // When coefficients are centrally evolved by the bridge (multi-worker
@@ -369,10 +381,20 @@ export class StreamEmitter {
     const count = Math.floor(this.accumulator);
     this.accumulator -= count;
 
-    if (count === 0) return [];
+    // Compute production particle count upfront so we can allocate one buffer
+    const ppFraction = c.betaPP > 0
+      ? Math.min(PP_FRACTION_CAP, c.betaPP / ECSKPhysics.BETA_CR)
+      : 0;
+    const ppCount = c.betaPP > 0 ? Math.max(0, Math.floor(count * ppFraction)) : 0;
+    const totalCount = count + ppCount;
+
+    const STRIDE = 8;
+
+    if (totalCount === 0) return { data: new Float32Array(0), count: 0 };
+
+    const out = new Float32Array(totalCount * STRIDE);
 
     const sens = this.physics.sensitivity();
-    const result: PendingParticle[] = [];
 
     // Global acceleration bounds for stable per-particle size normalisation.
     // Precomputed from physics (β, amplitude) so every particle gets a
@@ -381,17 +403,13 @@ export class StreamEmitter {
       this.physics.bounceAccRange(c.perturbAmplitude);
     const globalAccR = globalMaxAcc - globalMinAcc || 1;
 
-    const lxBuf = new Float32Array(count);
-    const lyBuf = new Float32Array(count);
-    const tBuf  = new Float32Array(count);
-    const hueBuf = new Float32Array(count);
-    const briBuf = new Float32Array(count);
-    const epsBuf = new Float32Array(count);
-    const accBuf = new Float32Array(count);
-    const tailBuf = new Float32Array(count);
+    // Scratch arrays for intermediate values needed across two passes
+    const wScratch   = new Float32Array(count);
+    const accScratch = new Float32Array(count);
+    const briScratch = new Float32Array(count);
+    const epsScratch = new Float32Array(count);
 
     let minW = 0, maxW = -Infinity;
-    const wBuf = new Float32Array(count);
 
     for (let i = 0; i < count; i++) {
       const theta = Math.acos(1 - 2 * this.rng());
@@ -399,11 +417,12 @@ export class StreamEmitter {
       const cosT  = Math.cos(theta);
       const sinT  = Math.sin(theta);
 
-      lxBuf[i] = 2 * Math.sin(theta / 2) * Math.cos(phi);
-      lyBuf[i] = 2 * Math.sin(theta / 2) * Math.sin(phi);
-      tailBuf[i] = this.rng() * 6.2832;
+      const off = i * STRIDE;
+      out[off]     = 2 * Math.sin(theta / 2) * Math.cos(phi);  // lx
+      out[off + 1] = 2 * Math.sin(theta / 2) * Math.sin(phi);  // ly
+      out[off + 7] = this.rng() * 6.2832;                       // tailAngle
 
-      const delta   = evaluatePerturbation(this.coeffs, cosT, sinT, phi);
+      const delta   = evaluatePerturbationFast(this.coeffs, this.cfg.lMax, cosT, sinT, phi);
       const betaEff = this.physics.beta * (1 + delta);
       const props   = this.physics.bounceProps(betaEff);
 
@@ -415,13 +434,13 @@ export class StreamEmitter {
       const td = c.arrivalSpread / denom;
       const rawDelay = sens * (betaEff - this.physics.beta) * td;
       const MAX_DELAY = c.arrivalSpread * SPREAD_TAIL_MULT;
-      tBuf[i] = now + Math.max(-MAX_DELAY, Math.min(rawDelay, MAX_DELAY));
+      out[off + 2] = now + Math.max(-MAX_DELAY, Math.min(rawDelay, MAX_DELAY));  // arrivalTime
 
-      accBuf[i] = props.acc;
-      wBuf[i]   = props.wEff;
+      accScratch[i] = props.acc;
+      wScratch[i]   = props.wEff;
 
-      epsBuf[i] = props.eps;
-      briBuf[i] = Math.min(c.brightnessCeil, Math.max(c.brightnessFloor,
+      epsScratch[i] = props.eps;
+      briScratch[i] = Math.min(c.brightnessCeil, Math.max(c.brightnessFloor,
         Math.log(props.eps + 1) / EPS_LOG_REF,
       ));
 
@@ -432,25 +451,19 @@ export class StreamEmitter {
     const wR   = minW - maxW   || 1;
 
     for (let i = 0; i < count; i++) {
+      const off = i * STRIDE;
       // Apply double-bounce visual shift: second-bounce epoch has warmer
       // hue and slightly dimmer brightness (Cubero & Popławski 2019 §26).
       const hueMax = c.hueMin + c.hueRange;
-      hueBuf[i] = Math.min(hueMax, c.hueMin + ((wBuf[i] - maxW) / wR) * c.hueRange + dbHueShift);
-      const bri = briBuf[i] * dbBriScale;
-      result.push({
-        lx:          lxBuf[i],
-        ly:          lyBuf[i],
-        arrivalTime: tBuf[i],
-        hue:         hueBuf[i],
-        brightness:  bri,
-        eps:         epsBuf[i] * dbBriScale,
-        // Size: lerp between uniform (1.0) and physics-driven based on sizeVariation.
-        // normAcc clamped to [0,1] — actual perturbations can exceed the
-        // nominal amplitude when many spherical harmonics align.
-        hitSize:     1.0 - c.sizeVariation * 0.5
-                     + Math.max(0, Math.min(1, (accBuf[i] - globalMinAcc) / globalAccR)) * c.sizeVariation,
-        tailAngle:   tailBuf[i],
-      });
+      out[off + 3] = Math.min(hueMax, c.hueMin + ((wScratch[i] - maxW) / wR) * c.hueRange + dbHueShift);  // hue
+      const bri = briScratch[i] * dbBriScale;
+      out[off + 4] = bri;                          // brightness
+      out[off + 5] = epsScratch[i] * dbBriScale;   // eps
+      // Size: lerp between uniform (1.0) and physics-driven based on sizeVariation.
+      // normAcc clamped to [0,1] — actual perturbations can exceed the
+      // nominal amplitude when many spherical harmonics align.
+      out[off + 6] = 1.0 - c.sizeVariation * 0.5   // hitSize
+                     + Math.max(0, Math.min(1, (accScratch[i] - globalMinAcc) / globalAccR)) * c.sizeVariation;
     }
 
     // ── Particle production (Popławski 2014 eq. 40–46; 2021 eq. 8) ────
@@ -473,92 +486,78 @@ export class StreamEmitter {
     //   Hue:        +PP_HUE_SHIFT toward violet (higher creation T)
     //   Brightness: ×PP_BRI_BOOST (hot creation epoch)
     //   Size:       ×PP_SIZE_SCALE (individual fermion creation)
-    if (c.betaPP > 0) {
-      const ppStrength = c.betaPP / ECSKPhysics.BETA_CR;
-      const ppFraction = Math.min(PP_FRACTION_CAP, ppStrength);
-      const ppCount = Math.max(0, Math.floor(count * ppFraction));
+    if (ppCount > 0) {
+      // Wider MAX_DELAY for production (arrives later than bounce)
+      const ppMaxDelay = c.ppBaseDelay + c.ppScatterRange + 2.0;
 
-      if (ppCount > 0) {
-        // Wider MAX_DELAY for production (arrives later than bounce)
-        const ppMaxDelay = c.ppBaseDelay + c.ppScatterRange + 2.0;
+      // Global production acceleration bounds (stable across batches)
+      const { minAcc: ppGlobalMin, maxAcc: ppGlobalMax } =
+        this.physics.productionAccRange(c.perturbAmplitude, c.betaPP);
+      const ppGlobalR = ppGlobalMax - ppGlobalMin || 1;
 
-        // Per-particle buffers
-        const ppLxB   = new Float32Array(ppCount);
-        const ppLyB   = new Float32Array(ppCount);
-        const ppTB    = new Float32Array(ppCount);
-        const ppAccB  = new Float32Array(ppCount);
-        const ppWB    = new Float32Array(ppCount);
-        const ppEpsB  = new Float32Array(ppCount);
-        const ppBriB  = new Float32Array(ppCount);
-        const ppTailB = new Float32Array(ppCount);
+      // Scratch arrays for production particles
+      const ppWScratch   = new Float32Array(ppCount);
+      const ppAccScratch = new Float32Array(ppCount);
+      const ppEpsScratch = new Float32Array(ppCount);
+      const ppBriScratch = new Float32Array(ppCount);
 
-        // Global production acceleration bounds (stable across batches)
-        const { minAcc: ppGlobalMin, maxAcc: ppGlobalMax } =
-          this.physics.productionAccRange(c.perturbAmplitude, c.betaPP);
-        const ppGlobalR = ppGlobalMax - ppGlobalMin || 1;
+      let ppMinW = 0, ppMaxW = -Infinity;
 
-        let ppMinW = 0, ppMaxW = -Infinity;
+      for (let i = 0; i < ppCount; i++) {
+        const theta = Math.acos(1 - 2 * this.rng());
+        const phi   = 2 * Math.PI * this.rng();
+        const cosT  = Math.cos(theta);
+        const sinT  = Math.sin(theta);
 
-        for (let i = 0; i < ppCount; i++) {
-          const theta = Math.acos(1 - 2 * this.rng());
-          const phi   = 2 * Math.PI * this.rng();
-          const cosT  = Math.cos(theta);
-          const sinT  = Math.sin(theta);
+        const off = (count + i) * STRIDE;
+        out[off]     = 2 * Math.sin(theta / 2) * Math.cos(phi);  // lx
+        out[off + 1] = 2 * Math.sin(theta / 2) * Math.sin(phi);  // ly
+        out[off + 7] = this.rng() * 6.2832;                       // tailAngle
 
-          ppLxB[i]   = 2 * Math.sin(theta / 2) * Math.cos(phi);
-          ppLyB[i]   = 2 * Math.sin(theta / 2) * Math.sin(phi);
-          ppTailB[i] = this.rng() * 6.2832;
+        const delta   = evaluatePerturbationFast(this.coeffs, this.cfg.lMax, cosT, sinT, phi);
+        const betaEff = this.physics.beta * (1 + delta);
+        const ppProps = this.physics.productionProps(betaEff, c.betaPP);
 
-          const delta   = evaluatePerturbation(this.coeffs, cosT, sinT, phi);
-          const betaEff = this.physics.beta * (1 + delta);
-          const ppProps = this.physics.productionProps(betaEff, c.betaPP);
+        // Arrival = bounce perturbation delay + fixed production offset
+        // + small scatter.  The perturbation delay (rawDelay) preserves
+        // the spatial wavefront structure; the fixed offset separates
+        // the production wave visually from the bounce wave.
+        // TD is derived from arrivalSpread, same as the bounce path.
+        const ppDenom = Math.max(TD_DENOM_FLOOR, Math.abs(sens) * this.physics.beta * c.perturbAmplitude);
+        const ppTD = c.arrivalSpread / ppDenom;
+        const rawDelay = sens
+          * (betaEff - this.physics.beta) * ppTD;
+        const scatter  = c.ppScatterRange * (this.rng() * 2 + PP_SCATTER_BIAS);
+        const totalDelay = rawDelay + c.ppBaseDelay + scatter;
+        out[off + 2] = now
+          + Math.max(-ppMaxDelay, Math.min(totalDelay, ppMaxDelay));  // arrivalTime
 
-          // Arrival = bounce perturbation delay + fixed production offset
-          // + small scatter.  The perturbation delay (rawDelay) preserves
-          // the spatial wavefront structure; the fixed offset separates
-          // the production wave visually from the bounce wave.
-          // TD is derived from arrivalSpread, same as the bounce path.
-          const ppDenom = Math.max(TD_DENOM_FLOOR, Math.abs(sens) * this.physics.beta * c.perturbAmplitude);
-          const ppTD = c.arrivalSpread / ppDenom;
-          const rawDelay = sens
-            * (betaEff - this.physics.beta) * ppTD;
-          const scatter  = c.ppScatterRange * (this.rng() * 2 + PP_SCATTER_BIAS);
-          const totalDelay = rawDelay + c.ppBaseDelay + scatter;
-          ppTB[i] = now
-            + Math.max(-ppMaxDelay, Math.min(totalDelay, ppMaxDelay));
+        ppAccScratch[i] = ppProps.acc;
+        ppWScratch[i]   = ppProps.wEff;
+        ppEpsScratch[i] = ppProps.eps;
+        ppBriScratch[i] = Math.min(PP_BRIGHTNESS_CEIL, Math.max(c.brightnessFloor,
+          Math.log(ppProps.eps + 1) / EPS_LOG_REF,
+        ) * c.ppBriBoost);
 
-          ppAccB[i] = ppProps.acc;
-          ppWB[i]   = ppProps.wEff;
-          ppEpsB[i] = ppProps.eps;
-          ppBriB[i] = Math.min(PP_BRIGHTNESS_CEIL, Math.max(c.brightnessFloor,
-            Math.log(ppProps.eps + 1) / EPS_LOG_REF,
-          ) * c.ppBriBoost);
+        if (ppProps.wEff < ppMinW)  ppMinW  = ppProps.wEff;
+        if (ppProps.wEff > ppMaxW)  ppMaxW  = ppProps.wEff;
+      }
 
-          if (ppProps.wEff < ppMinW)  ppMinW  = ppProps.wEff;
-          if (ppProps.wEff > ppMaxW)  ppMaxW  = ppProps.wEff;
-        }
+      const ppWR   = ppMinW  - ppMaxW    || 1;
 
-        const ppWR   = ppMinW  - ppMaxW    || 1;
-
-        const ppHueMax = c.hueMin + c.hueRange;
-        for (let i = 0; i < ppCount; i++) {
-          const baseHue = c.hueMin + ((ppWB[i] - ppMaxW) / ppWR) * c.hueRange;
-          result.push({
-            lx:          ppLxB[i],
-            ly:          ppLyB[i],
-            arrivalTime: ppTB[i],
-            hue:         Math.min(ppHueMax, baseHue + c.ppHueShift + dbHueShift),
-            brightness:  ppBriB[i] * dbBriScale,
-            eps:         ppEpsB[i] * dbBriScale,
-            hitSize:     (1.0 - c.sizeVariation * 0.5
-                         + Math.max(0, Math.min(1, (ppAccB[i] - ppGlobalMin) / ppGlobalR)) * c.sizeVariation)
-                         * c.ppSizeScale,
-            tailAngle:   ppTailB[i],
-          });
-        }
+      const ppHueMax = c.hueMin + c.hueRange;
+      for (let i = 0; i < ppCount; i++) {
+        const off = (count + i) * STRIDE;
+        const baseHue = c.hueMin + ((ppWScratch[i] - ppMaxW) / ppWR) * c.hueRange;
+        out[off + 3] = Math.min(ppHueMax, baseHue + c.ppHueShift + dbHueShift);  // hue
+        out[off + 4] = ppBriScratch[i] * dbBriScale;                              // brightness
+        out[off + 5] = ppEpsScratch[i] * dbBriScale;                              // eps
+        out[off + 6] = (1.0 - c.sizeVariation * 0.5                               // hitSize
+                       + Math.max(0, Math.min(1, (ppAccScratch[i] - ppGlobalMin) / ppGlobalR)) * c.sizeVariation)
+                       * c.ppSizeScale;
       }
     }
 
-    return result;
+    return { data: out, count: totalCount };
   }
 }

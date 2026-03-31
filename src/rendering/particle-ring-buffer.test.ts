@@ -534,6 +534,57 @@ describe("ParticleRingBuffer", () => {
       expect(count).toBe(5); // all 5 written slots alive
     });
 
+    it("returns correct alive range after grow() reorders a wrapped buffer", () => {
+      const cap = 4;
+      const buf = new ParticleRingBuffer(cap);
+
+      // Fill buffer: born times 1,2,3,4 — writeHead wraps to 0
+      const batch1 = makeBatch([
+        { lx: 0, ly: 0, born: 1, hue: 0, bri: 0.5, eps: 10, size: 0.1 },
+        { lx: 0, ly: 0, born: 2, hue: 0, bri: 0.5, eps: 10, size: 0.1 },
+        { lx: 0, ly: 0, born: 3, hue: 0, bri: 0.5, eps: 10, size: 0.1 },
+        { lx: 0, ly: 0, born: 4, hue: 0, bri: 0.5, eps: 10, size: 0.1 },
+      ]);
+      buf.writeBatch(batch1, 4, STRIDE, 4.0, 30.0);
+
+      // Overwrite slots 0,1 (buffer wraps): born=5,6 — writeHead now at 2
+      const batch2 = makeBatch([
+        { lx: 0, ly: 0, born: 5, hue: 0, bri: 0.5, eps: 10, size: 0.1 },
+        { lx: 0, ly: 0, born: 6, hue: 0, bri: 0.5, eps: 10, size: 0.1 },
+      ]);
+      buf.writeBatch(batch2, 2, STRIDE, 6.0, 1.0);
+      // Physical layout: [born=5, born=6, born=3, born=4], writeHead=2
+      // Chronological from writeHead: 3, 4, 5, 6
+
+      // Force grow by writing a particle when oldest (slot 2, born=3) is still alive
+      const batch3 = makeBatch([
+        { lx: 0, ly: 0, born: 7, hue: 0, bri: 0.5, eps: 10, size: 0.1 },
+      ]);
+      buf.writeBatch(batch3, 1, STRIDE, 7.0, 30.0);
+      expect(buf.capacity).toBeGreaterThan(cap);
+
+      // After grow + reorder, bornTimes should be monotonically increasing
+      // from slot 0: 3, 4, 5, 6, 7, sentinel, sentinel, sentinel
+      for (let i = 0; i < 4; i++) {
+        expect(buf.getBornTime(i)).toBeCloseTo(3 + i);
+      }
+      expect(buf.getBornTime(4)).toBeCloseTo(7);
+      for (let i = 5; i < buf.capacity; i++) {
+        expect(buf.getBornTime(i)).toBe(BORN_SENTINEL);
+      }
+
+      // computeAliveRange should work correctly after growth
+      // now=7, cutoff=30: alive if born > 7-30=-23 → all 5 particles alive
+      const { start, count } = buf.computeAliveRange(7, 30);
+      expect(start).toBe(0);
+      expect(count).toBe(5);
+
+      // now=7, cutoff=3: alive if born > 7-3=4 → born=5,6,7 alive
+      const r2 = buf.computeAliveRange(7, 3);
+      expect(r2.start).toBe(2); // slot 2 has born=5
+      expect(r2.count).toBe(3);
+    });
+
     it("correctly identifies alive range with mixed dead/alive after wrap", () => {
       const cap = 8;
       const buf = new ParticleRingBuffer(cap);

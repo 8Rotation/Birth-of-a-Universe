@@ -25,8 +25,6 @@ import { ECSKPhysics } from "./ecsk-physics.js";
 import { StreamEmitter } from "./shell.js";
 import type { EmitterConfig } from "./shell.js";
 
-const STRIDE = 8;
-
 /**
  * Hard ceiling on particles produced per tick.
  * At high particle rates the accumulator can demand millions of particles
@@ -136,35 +134,19 @@ _self.onmessage = (e: MessageEvent) => {
 
       // Cap particle rate so the worker never chokes on a single tick
       const cappedRate = Math.min(msg.particleRate, MAX_PARTICLES_PER_TICK / Math.max(msg.dt, 1e-4));
-      const particles = emitter.tick(msg.dt, msg.simTime, cappedRate);
-      const count = particles.length;
+      const batch = emitter.tick(msg.dt, msg.simTime, cappedRate);
 
       const tickElapsedMs = performance.now() - tickStart;
 
-      if (count === 0) {
+      if (batch.count === 0) {
         _self.postMessage({ type: "particles", count: 0, data: null, generation, tickMs: tickElapsedMs });
         break;
       }
 
-      // Pack into Float32Array for zero-copy transfer
-      const buf = new Float32Array(count * STRIDE);
-      for (let i = 0; i < count; i++) {
-        const p = particles[i];
-        const off = i * STRIDE;
-        buf[off]     = p.lx;
-        buf[off + 1] = p.ly;
-        buf[off + 2] = p.arrivalTime;
-        buf[off + 3] = p.hue;
-        buf[off + 4] = p.brightness;
-        buf[off + 5] = p.eps;
-        buf[off + 6] = p.hitSize;
-        buf[off + 7] = p.tailAngle;
-      }
-
       // Transfer the ArrayBuffer (zero-copy handoff to main thread)
       _self.postMessage(
-        { type: "particles", count, data: buf, generation, tickMs: tickElapsedMs },
-        [buf.buffer],
+        { type: "particles", count: batch.count, data: batch.data, generation, tickMs: tickElapsedMs },
+        [batch.data.buffer],
       );
       break;
     }
