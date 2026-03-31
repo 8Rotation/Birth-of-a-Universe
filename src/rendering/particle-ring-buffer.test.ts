@@ -186,10 +186,13 @@ describe("ParticleRingBuffer", () => {
     expect(buf.getBornTime(7)).toBe(BORN_SENTINEL);
   });
 
-  it("grow() doubles capacity until >= minCapacity", () => {
+  it("grow() doubles capacity until >= minCapacity (capped at 4× per call)", () => {
     const buf = new ParticleRingBuffer(4);
     buf.grow(20);
-    expect(buf.capacity).toBe(32); // 4 → 8 → 16 → 32
+    // 4× cap: 4 → 16 (capped at 4×4=16, even though 20 requested)
+    expect(buf.capacity).toBe(16);
+    // A second grow() is cooldown-blocked (500ms), so capacity stays 16.
+    // In production, subsequent frames would eventually reach 32.
   });
 
   // ── Clear ─────────────────────────────────────────────────────────

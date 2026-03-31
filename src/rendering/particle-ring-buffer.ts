@@ -306,53 +306,91 @@ export class ParticleRingBuffer {
 
   // ── Grow ────────────────────────────────────────────────────────────
 
+  /** Timestamp of last successful grow — used for cooldown. */
+  private _lastGrowTime = -Infinity;
+  /** When true, a previous grow() OOM has occurred — further grows are blocked. */
+  private _growFailed = false;
+
   /**
-   * Double capacity until >= minCapacity. Copies existing data and replaces
-   * .array on existing attribute objects (no attribute recreation — avoids
-   * WebGPU shader recompilation).
+   * Double capacity until >= minCapacity (capped at 4× current per call).
+   * Copies existing data and replaces .array on existing attribute objects
+   * (no attribute recreation — avoids WebGPU shader recompilation).
+   *
+   * Safety guards:
+   *   - Caps single grow to 4× current capacity to prevent huge allocations.
+   *   - Minimum 500ms cooldown between grows to prevent rapid-fire reallocs
+   *     during slider drags that would hammer the GC and stale GPUBuffers.
+   *   - try/catch around allocation so an OOM doesn't kill the animation loop.
    */
   grow(minCapacity: number): void {
+    // Cooldown: at most one grow per 500ms to avoid hammering GC + GPU
+    const now = performance.now();
+    if (now - this._lastGrowTime < 500) return;
+    // If a previous grow OOM'd, don't attempt further grows
+    if (this._growFailed) return;
+
+    // Cap single grow step to 4× current capacity to prevent
+    // massive single-shot allocations (e.g. 100K rate × 60s persistence).
+    // Further grows will happen on subsequent frames if needed.
+    const maxTarget = this._capacity * 4;
+    const clampedMin = Math.min(minCapacity, maxTarget);
+
     let newCap = this._capacity;
-    while (newCap < minCapacity) newCap *= 2;
+    while (newCap < clampedMin) newCap *= 2;
     if (newCap === this._capacity) return;
 
     const oldCap = this._capacity;
     const oldHead = this._writeHead;
     const hadWrapped = this._totalWritten >= oldCap;
 
-    this._capacity = newCap;
+    try {
+      this._capacity = newCap;
 
-    if (hadWrapped) {
-      // Reorder: chronological = [oldHead..oldCap) + [0..oldHead)
-      this._growAttrReorder(this._attrA, oldCap, oldHead);
-      this._growAttrReorder(this._attrB, oldCap, oldHead);
-      // writeHead now points right after the old data
-      this._writeHead = oldCap;
-      // After linearizing, exactly oldCap particles occupy [0..oldCap)
-      this._totalWritten = oldCap;
-    } else {
-      // No wrap — data is already in order [0..totalWritten)
-      this._growAttr(this._attrA, oldCap);
-      this._growAttr(this._attrB, oldCap);
-      // writeHead stays at its current position (still valid)
+      if (hadWrapped) {
+        // Reorder: chronological = [oldHead..oldCap) + [0..oldHead)
+        this._growAttrReorder(this._attrA, oldCap, oldHead);
+        this._growAttrReorder(this._attrB, oldCap, oldHead);
+        // writeHead now points right after the old data
+        this._writeHead = oldCap;
+        // After linearizing, exactly oldCap particles occupy [0..oldCap)
+        this._totalWritten = oldCap;
+      } else {
+        // No wrap — data is already in order [0..totalWritten)
+        this._growAttr(this._attrA, oldCap);
+        this._growAttr(this._attrB, oldCap);
+        // writeHead stays at its current position (still valid)
+      }
+
+      // Fill remaining slots with sentinel
+      const a = this._attrA.array as Float32Array;
+      for (let i = oldCap; i < newCap; i++) {
+        a[i * 4 + 2] = BORN_SENTINEL;
+      }
+
+      // Invalidate cached GPU buffer references — the old GPUBuffers
+      // are now too small.  Next writeBatch() will either get the new
+      // GPUBuffer from the backend (after Three.js re-uploads via
+      // needsUpdate) or fall back to needsUpdate again.
+      this._gpuBufCacheValid = false;
+      this._lastGrowTime = now;
+
+      console.log(
+        `[ring-buffer] Grown → ${newCap} particles ` +
+        `(${(newCap * BYTES_PER_PARTICLE / 1024 / 1024).toFixed(1)} MB)`
+      );
+    } catch (e) {
+      // OOM: revert capacity so the ring buffer stays consistent.
+      // The buffer will overwrite old slots instead of growing.
+      this._capacity = oldCap;
+      this._writeHead = oldHead;
+      if (hadWrapped) this._totalWritten = oldCap; // was already capped
+      this._growFailed = true;
+      console.warn(
+        `[ring-buffer] Grow failed (OOM) at ${newCap} particles ` +
+        `(${(newCap * BYTES_PER_PARTICLE / 1024 / 1024).toFixed(1)} MB) — ` +
+        `overwriting old slots instead. Error:`, e
+      );
     }
-
-    // Fill remaining slots with sentinel
-    const a = this._attrA.array as Float32Array;
-    for (let i = oldCap; i < newCap; i++) {
-      a[i * 4 + 2] = BORN_SENTINEL;
-    }
-
-    // Invalidate cached GPU buffer references — the old GPUBuffers
-    // are now too small.  Next writeBatch() will either get the new
-    // GPUBuffer from the backend (after Three.js re-uploads via
-    // needsUpdate) or fall back to needsUpdate again.
-    this._gpuBufCacheValid = false;
-
-    console.log(
-      `[ring-buffer] Grown → ${newCap} particles ` +
-      `(${(newCap * BYTES_PER_PARTICLE / 1024 / 1024).toFixed(1)} MB)`
-    );
   }
 
   // ── Internal helpers ────────────────────────────────────────────────

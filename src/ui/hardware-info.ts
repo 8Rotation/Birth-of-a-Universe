@@ -128,6 +128,13 @@ export interface ComputeBudget {
    * A single worker thread can sustain ~5–10 M evals/s comfortably.
    */
   maxPhysicsCostPerSec: number;
+
+  /**
+   * Max pair-production fraction (caps production-particle count as
+   * a multiple of the base bounce rate).  Scales with hardware so
+   * low-end devices aren't overwhelmed by 4× particle multipliers.
+   */
+  ppFractionCap: number;
 }
 
 /**
@@ -264,31 +271,90 @@ function detectIntegratedGpu(vendor: string, device: string): boolean {
  * GPU sub-score ∈ [0, 1].
  *
  * WebGPU does not expose VRAM size, shader core count, or clock speed.
- * maxBufferSize and maxTextureDimension2D are API limits that are nearly
- * identical across all discrete GPUs (a 3060 and a 4090 report the same).
+ * However, `adapterInfo.device` often contains the GPU model name
+ * (e.g. "NVIDIA GeForce RTX 4090"), which lets us infer generation
+ * and tier.  We parse this for NVIDIA, AMD, Intel Arc, and Apple.
  *
- * The only reliable signal from the browser is the GPU class:
- *   - Software renderer (SwiftShader / llvmpipe): very slow
- *   - Integrated (Intel UHD, AMD Vega): limited
- *   - Apple integrated (M1+): strong for integrated
- *   - Discrete (NVIDIA, AMD, Intel Arc): capable
+ * Scoring tiers:
+ *   0.05  Software renderer (SwiftShader / llvmpipe)
+ *   0.25  Integrated (Intel UHD, AMD Vega)
+ *   0.55  Apple integrated (M1+)
+ *   0.65  Discrete low-end / old gen (GTX 1050, RX 580, Arc A380)
+ *   0.75  Discrete mid-range (RTX 3060, RX 6700, Arc A770)
+ *   0.85  Discrete high-end (RTX 3080/3090, RX 6800+, RTX 40-series)
+ *   0.95  Discrete flagship (RTX 4080/4090, RX 7900 XTX, RTX 50-series)
  *
- * We score conservatively within each class.  The user has sliders and
- * override mode for fine-tuning beyond what we can detect.
+ * Falls back to 0.80 for unrecognised discrete GPUs (optimistic default
+ * since the user chose a discrete GPU and has Override Mode available).
  */
 function computeGpuSub(
   vendor: string,
   _maxBufferSize: number,
   _maxTexDim: number,
   isIntegrated: boolean,
+  device: string,
 ): number {
   if (vendor === "software") return 0.05;
   if (isIntegrated && vendor === "apple") return 0.55;
   if (isIntegrated) return 0.25;
-  // Discrete GPU — we know it's capable but can't distinguish tiers.
-  // 0.75 is a conservative middle ground: strong enough to unlock high
-  // budgets, but not maxed out (users with extreme hardware can override).
-  return 0.75;
+
+  // Discrete GPU — parse device string for generation/tier info.
+  const d = device.toLowerCase();
+
+  // ── NVIDIA ────────────────────────────────────────────────────
+  if (vendor === "nvidia") {
+    // RTX 50-series (Blackwell)
+    if (/rtx\s*50[89]0/.test(d)) return 0.95;
+    if (/rtx\s*50[67]0/.test(d)) return 0.90;
+    if (/rtx\s*50[56]0/.test(d)) return 0.85;
+    // RTX 40-series (Ada Lovelace)
+    if (/rtx\s*40[89]0/.test(d)) return 0.95;
+    if (/rtx\s*40[67]0/.test(d)) return 0.90;
+    if (/rtx\s*40[56]0/.test(d)) return 0.85;
+    // RTX 30-series (Ampere)
+    if (/rtx\s*30[89]0/.test(d)) return 0.85;
+    if (/rtx\s*30[67]0/.test(d)) return 0.80;
+    if (/rtx\s*30[56]0/.test(d)) return 0.75;
+    // RTX 20-series (Turing)
+    if (/rtx\s*20[89]0/.test(d)) return 0.80;
+    if (/rtx\s*20[67]0/.test(d)) return 0.75;
+    if (/rtx\s*20[56]0/.test(d)) return 0.70;
+    // GTX 16-series
+    if (/gtx\s*16[68]0/.test(d)) return 0.70;
+    if (/gtx\s*16[50]0/.test(d)) return 0.65;
+    // GTX 10-series
+    if (/gtx\s*10[78]0/.test(d)) return 0.70;
+    if (/gtx\s*10[56]0/.test(d)) return 0.65;
+    // Anything else NVIDIA discrete
+    return 0.75;
+  }
+
+  // ── AMD ───────────────────────────────────────────────────────
+  if (vendor === "amd") {
+    // RX 7900 series
+    if (/7900/.test(d)) return 0.95;
+    if (/7800/.test(d)) return 0.85;
+    if (/7[67]00/.test(d)) return 0.80;
+    if (/7[56]00/.test(d)) return 0.75;
+    // RX 6000 series
+    if (/6[89]00/.test(d)) return 0.85;
+    if (/6[67]00/.test(d)) return 0.75;
+    if (/6[56]00/.test(d)) return 0.70;
+    // RX 5000 / older
+    if (/5[67]00/.test(d)) return 0.70;
+    return 0.75;
+  }
+
+  // ── Intel Arc ────────────────────────────────────────────────
+  if (vendor === "intel") {
+    if (/a7[78]0/.test(d)) return 0.75;
+    if (/a[56]80/.test(d)) return 0.70;
+    if (/a3[58]0/.test(d)) return 0.65;
+    return 0.70;
+  }
+
+  // Unrecognised discrete — optimistic default.
+  return 0.80;
 }
 
 async function detectGpu(existingAdapter?: GPUAdapter | null): Promise<GpuInfo> {
@@ -325,7 +391,7 @@ async function detectGpu(existingAdapter?: GPUAdapter | null): Promise<GpuInfo> 
     const maxTextureDimension2D = limits.maxTextureDimension2D ?? 8192;
     const isIntegrated = detectIntegratedGpu(vendor, device);
 
-    const gpuSub = computeGpuSub(vendor, maxBufferSize, maxTextureDimension2D, isIntegrated);
+    const gpuSub = computeGpuSub(vendor, maxBufferSize, maxTextureDimension2D, isIntegrated, device);
 
     return {
       webgpuAvailable: true,
@@ -440,7 +506,6 @@ function buildBudget(
   // When the user tells us their VRAM size, compute a hard cap from
   // that instead of the conservative h-based interpolation.
   let emergencyHitCap   = lerpInt(200_000,  20_000_000, h, 1.5);
-  let maxVisibleHits    = lerpInt(50_000,   800_000,    h, 1.3);
   let initialGpuCap     = lerpPow2(14, 20, h, 1.2);
 
   if (overrides.vramGB > 0) {
@@ -448,8 +513,6 @@ function buildBudget(
     const particleBudget = Math.floor(vramBytes * VRAM_BUDGET_FRACTION / BYTES_PER_PARTICLE);
     // Emergency cap: up to full VRAM budget, still capped at 20M absolute
     emergencyHitCap  = Math.min(particleBudget, 20_000_000);
-    // Visible-hits cap: a tenth of the VRAM-based budget, max 4M
-    maxVisibleHits   = Math.min(Math.floor(particleBudget * 0.4), 4_000_000);
     // Initial GPU buffer: nearest power-of-2 between 16K and VRAM cap
     const idealInit  = Math.min(particleBudget, 1 << 20);
     initialGpuCap    = 1 << Math.max(14, Math.min(20, Math.round(Math.log2(idealInit))));
@@ -490,13 +553,18 @@ function buildBudget(
     },
 
     // ── Compound budget limits ──────────────────────────────────
-    maxVisibleHits,
+    // maxVisibleHits: derived as 40% of emergencyHitCap so compound
+    // budget clamps (e.g. random-settings safety) use a consistent
+    // fraction of the VRAM budget rather than an independent curve.
+    maxVisibleHits: Math.floor(emergencyHitCap * 0.4),
 
     maxPhysicsCostPerSec:   lerpInt(
       2_000_000,
       Math.max(1, Math.min(lerpInt(2, cpuCores - 2, cpuT), cpuCores - 2)) * 8_000_000,
       hEffective, 1.2,
     ),
+
+    ppFractionCap:          lerp(1.5, 5.0, hEffective, 1.0),
   };
 }
 

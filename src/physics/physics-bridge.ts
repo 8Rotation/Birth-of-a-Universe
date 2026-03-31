@@ -61,6 +61,7 @@ export interface PhysicsBridgeConfig {
   ppBaseDelay?: number;
   ppScatterRange?: number;
   sizeVariation?: number;
+  ppFractionCap?: number;
 }
 
 type TickParams = {
@@ -86,6 +87,7 @@ type TickParams = {
   ppBaseDelay?: number;
   ppScatterRange?: number;
   sizeVariation?: number;
+  ppFractionCap?: number;
 };
 
 type TickMessage = {
@@ -95,6 +97,7 @@ type TickMessage = {
   particleRate: number;
   generation: number;
   coeffs: Float64Array;
+  maxParticlesPerTick?: number;
 } & TickParams;
 
 interface WorkerTickState {
@@ -135,7 +138,15 @@ export class PhysicsBridge {
     const state = this.workerStates[index];
     if (!state || state.dead) return;
     if (state.busy) {
-      state.pendingTick = msg;
+      // Accumulate dt from the dropped pending tick so the worker's
+      // accumulator sees all frames' worth of particles.  Without this,
+      // every overwritten pendingTick silently discards one frame of dt,
+      // producing far fewer particles than the requested rate.
+      if (state.pendingTick) {
+        state.pendingTick = { ...msg, dt: state.pendingTick.dt + msg.dt };
+      } else {
+        state.pendingTick = msg;
+      }
       return;
     }
     state.busy = true;
@@ -316,6 +327,7 @@ export class PhysicsBridge {
     simTime: number,
     particleRate: number,
     params: TickParams,
+    maxParticlesPerTick?: number,
   ): void {
     // Update centralised perturbation coefficients
     this._syncCoeffs(params);
@@ -337,6 +349,7 @@ export class PhysicsBridge {
       particleRate: ratePerWorker,
       generation: this.generation,
       coeffs: packedCoeffs,
+      maxParticlesPerTick,
       ...params,
     };
 

@@ -72,8 +72,9 @@ const DEF_DB_SECOND_BRI_SCALE = 0.82;
 
 // ── Particle production visual encoding (Popławski 2014; 2021) ────────
 
-/** Maximum ppStrength fraction (caps production-particle count). */
-const PP_FRACTION_CAP = 3.0;
+/** Default maximum ppStrength fraction (caps production-particle count).
+ *  Overridden at runtime by ComputeBudget.ppFractionCap. */
+const DEF_PP_FRACTION_CAP = 3.0;
 /** Maximum brightness for production particles (higher than bounce). */
 const PP_BRIGHTNESS_CEIL = 1.5;
 /** Scatter bias: shifts mean scatter slightly earlier (negative = earlier). */
@@ -117,6 +118,8 @@ export interface EmitterConfig {
   ppScatterRange: number;
   // Size variation (0=uniform, 1=full physics range)
   sizeVariation: number;
+  // Performance cap: max pair-production fraction (hardware-scaled)
+  ppFractionCap: number;
 }
 
 /** Build an EmitterConfig with defaults for any missing fields. */
@@ -142,6 +145,7 @@ export function defaultEmitterConfig(partial: Partial<EmitterConfig> = {}): Emit
     ppBaseDelay:      partial.ppBaseDelay ?? DEF_PP_BASE_DELAY,
     ppScatterRange:   partial.ppScatterRange ?? DEF_PP_SCATTER_RANGE,
     sizeVariation:    partial.sizeVariation ?? 0.5,
+    ppFractionCap:    partial.ppFractionCap ?? DEF_PP_FRACTION_CAP,
   };
 }
 
@@ -383,7 +387,7 @@ export class StreamEmitter {
 
     // Compute production particle count upfront so we can allocate one buffer
     const ppFraction = c.betaPP > 0
-      ? Math.min(PP_FRACTION_CAP, c.betaPP / ECSKPhysics.BETA_CR)
+      ? Math.min(c.ppFractionCap, c.betaPP / ECSKPhysics.BETA_CR)
       : 0;
     const ppCount = c.betaPP > 0 ? Math.max(0, Math.floor(count * ppFraction)) : 0;
     const totalCount = count + ppCount;
@@ -550,8 +554,10 @@ export class StreamEmitter {
         const off = (count + i) * STRIDE;
         const baseHue = c.hueMin + ((ppWScratch[i] - ppMaxW) / ppWR) * c.hueRange;
         out[off + 3] = Math.min(ppHueMax, baseHue + c.ppHueShift + dbHueShift);  // hue
-        out[off + 4] = ppBriScratch[i] * dbBriScale;                              // brightness
-        out[off + 5] = ppEpsScratch[i] * dbBriScale;                              // eps
+        // Production particles keep their own brightness — double-bounce
+        // cos² modulation is NOT applied, preventing rhythmic flicker.
+        out[off + 4] = ppBriScratch[i];                                            // brightness
+        out[off + 5] = ppEpsScratch[i];                                            // eps
         out[off + 6] = (1.0 - c.sizeVariation * 0.5                               // hitSize
                        + Math.max(0, Math.min(1, (ppAccScratch[i] - ppGlobalMin) / ppGlobalR)) * c.sizeVariation)
                        * c.ppSizeScale;

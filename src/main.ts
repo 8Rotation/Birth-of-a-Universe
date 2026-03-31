@@ -50,9 +50,9 @@ function fadeDurationToTau(duration: number, sharpness: number): number {
 /** FPS / HUD update interval in seconds. */
 const FPS_SAMPLE_INTERVAL = 0.8;
 /** EMA decay factor for arrival-rate smoothing. */
-const RATE_SMOOTH_DECAY = 0.6;
+const RATE_SMOOTH_DECAY = 0.3;
 /** EMA gain factor for arrival-rate smoothing (= 1 − decay). */
-const RATE_SMOOTH_GAIN = 0.4;
+const RATE_SMOOTH_GAIN = 0.7;
 // VRAM budget cap: prevents multi-hundred-MB allocations if persistence
 // and rate are both cranked to extreme values simultaneously.
 // (Overridden at runtime by hardware detection.)
@@ -170,6 +170,9 @@ async function main() {
   // but the debounce check fires later when physicsChanged is already false.
   let physicsDirty = false;
   let flowDirty = false;
+  // EMA-smoothed pair-production multiplier — avoids abrupt density
+  // changes when betaPP slider is dragged.
+  let smoothedPpMultiplier = 1;
 
   // ── 4. Controls (auto-configured from hardware budget) ────────────
   const tCtrl = performance.now();
@@ -515,11 +518,15 @@ async function main() {
           settingsChangeTimer = 0;
 
           // Physics change → discard far-future hits (baked at old settings).
-          // Keep particles arriving within 5s — they'll fade naturally via
-          // Weibull, avoiding the near-total wipe at high arrivalSpread where
-          // many particles are future-born.
+          // Cutoff accounts for pair-production delay window so PP
+          // particles (which arrive ppBaseDelay + scatter after bounce)
+          // aren't mass-killed on every slider adjustment.
           if (physicsDirty) {
-            renderer.ringBuffer.invalidateFuture(now + 5);
+            const ppHeadroom = params.betaPP > 0
+              ? params.ppBaseDelay + params.ppScatterRange + 2
+              : 0;
+            const cutoff = params.arrivalSpread * 1.5 + ppHeadroom + 1;
+            renderer.ringBuffer.invalidateFuture(now + cutoff);
             physicsDirty = false;
           }
 
@@ -534,6 +541,9 @@ async function main() {
     // When persistence is high, pre-grow the ring buffer so it doesn't
     // hit repeated grow() stalls during the fill-up phase.  Only grows
     // (never shrinks), cost amortized: each doubling happens at most once.
+    // Capped per frame to avoid massive single-shot allocations when
+    // sliders are dragged to extreme values (grow() also has its own
+    // 4× cap and OOM guard).
     {
       const neededCapacity = Math.ceil(params.particleRate * params.persistence * CUTOFF_MARGIN);
       const clampedNeed = Math.min(neededCapacity, VRAM_BUDGET_PARTICLES);
@@ -562,14 +572,21 @@ async function main() {
 
       // Account for pair-production multiplier: workers emit
       // (1 + ppFraction) particles per requested base particle.
+      // EMA-smoothed to prevent abrupt density changes during slider drags.
       const ppFraction = params.betaPP > 0
-        ? Math.min(3.0, params.betaPP * 929)   // PP_FRACTION_CAP=3, BETA_CR=1/929
+        ? Math.min(budget.ppFractionCap, params.betaPP * 929)   // hardware-scaled cap, BETA_CR=1/929
         : 0;
-      const totalMultiplier = 1 + ppFraction;
+      const targetMultiplier = 1 + ppFraction;
+      smoothedPpMultiplier += (targetMultiplier - smoothedPpMultiplier) * Math.min(1, 3 * dt);
+      const totalMultiplier = smoothedPpMultiplier;
 
       // (a) VRAM cap: cap total rate so totalRate × persistence ≤ vramBudgetParticles
       const maxByVRAM = VRAM_BUDGET_PARTICLES / (Math.max(params.persistence, 0.2) * totalMultiplier);
       if (effectiveRate > maxByVRAM) effectiveRate = maxByVRAM;
+
+      // (a2) Visible-particle cap: softer VRAM cap for steady-state ring buffer occupancy
+      const maxByVisible = budget.maxVisibleHits / (Math.max(params.persistence, 0.2) * totalMultiplier);
+      if (effectiveRate > maxByVisible) effectiveRate = maxByVisible;
 
       // (b) Physics cost: cap total rate so totalRate × numCoeffs ≤ maxPhysicsCostPerSec
       const numCoeffs = params.lMax * params.lMax + 2 * params.lMax; // Σ(2l+1) for l=1..lMax
@@ -579,8 +596,11 @@ async function main() {
       }
 
       // (c) Reactive back-pressure: reduce rate when ring buffer is near full
-      const aliveEstimate = Math.min(arrivalRateSmooth * params.persistence * CUTOFF_MARGIN, renderer.ringBuffer.activeCount);
-      const fillRatio = aliveEstimate / renderer.ringBuffer.capacity;
+      // Use computeAliveRange() for the true alive count — activeCount saturates
+      // at capacity once the ring wraps, which would lock fillRatio at 1.0.
+      const aliveCutoff = params.persistence * CUTOFF_MARGIN;
+      const aliveNow = renderer.ringBuffer.computeAliveRange(displayTime, aliveCutoff).count;
+      const fillRatio = aliveNow / renderer.ringBuffer.capacity;
       if (fillRatio > 0.8) {
         effectiveRate *= Math.exp(-0.5 * (fillRatio - 0.8));
       }
@@ -615,7 +635,8 @@ async function main() {
         ppBaseDelay: params.ppBaseDelay,
         ppScatterRange: params.ppScatterRange,
         sizeVariation: params.sizeVariation,
-      });
+        ppFractionCap: budget.ppFractionCap,
+      }, budget.maxParticlesPerTick);
 
       // Ingest particles from previous worker tick(s) — direct ring buffer writes.
       // No per-frame cap needed: ring buffer writes are just memcpy.
@@ -704,11 +725,9 @@ async function main() {
         ? (params.betaPP / ECSKPhysics.BETA_CR).toFixed(2)
         : "off";
       hud.flux = arrivalRateSmooth.toFixed(0);
-      const estAlive = Math.min(
-        Math.round(arrivalRateSmooth * params.persistence),
-        renderer.ringBuffer.activeCount
-      );
-      hud.visible = String(estAlive);
+      const cutoffForHud = params.persistence * CUTOFF_MARGIN;
+      const aliveRange = renderer.ringBuffer.computeAliveRange(displayTime, cutoffForHud);
+      hud.visible = String(aliveRange.count);
       hud.fps = String(fps);
       // Update screen info in HUD (may change if moved between monitors)
       const si = screenDetector.info;

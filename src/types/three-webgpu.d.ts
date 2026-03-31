@@ -38,6 +38,7 @@ declare module "three/webgpu" {
     toneMappingExposure: number;
     outputColorSpace: ColorSpace;
     setClearColor(color: number | string, alpha?: number): void;
+    autoClear: boolean;
     info: { render: { calls: number; triangles: number }; memory: { geometries: number } };
     getSize(target: { width: number; height: number }): { width: number; height: number };
   }

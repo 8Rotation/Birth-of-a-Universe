@@ -202,9 +202,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
   // Evaluate perturbation → local β_eff
   let delta = evalPerturbation(theta, phi);
+  // NOTE: Do NOT multiply delta by perturbAmplitude here — the coefficients
+  // already incorporate amplitude via generatePerturbCoeffs() and O-U sigma
+  // targets.  See shell.ts line ~432 for the authoritative formula.
   let betaEff = clamp(
-    params.beta * (1.0 + params.perturbAmplitude * delta),
-    0.001, 0.2499
+    params.beta * (1.0 + delta),
+    0.002, 0.2499
   );
 
   // Physics at this β_eff

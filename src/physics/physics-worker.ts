@@ -27,12 +27,11 @@ import type { EmitterConfig } from "./shell.js";
 
 /**
  * Hard ceiling on particles produced per tick.
- * At high particle rates the accumulator can demand millions of particles
- * per frame; generating them all would choke the worker and backlog the
- * message queue.  50 000 is enough to saturate the 150 000 hit budget in
- * a few seconds while remaining interactive.
+ * Dynamically set per-device via ComputeBudget.maxParticlesPerTick;
+ * this fallback is used only if the budget value is missing.
  */
-const MAX_PARTICLES_PER_TICK = 50_000;
+const DEFAULT_MAX_PARTICLES_PER_TICK = 50_000;
+let maxParticlesPerTick = DEFAULT_MAX_PARTICLES_PER_TICK;
 
 // Worker global scope — typed to expose onmessage/postMessage without full `any`.
 // DedicatedWorkerGlobalScope is in lib.webworker.d.ts (not included alongside DOM),
@@ -70,6 +69,8 @@ function configFromMsg(msg: any): Partial<EmitterConfig> {
     ppSizeScale: msg.ppSizeScale,
     ppBaseDelay: msg.ppBaseDelay,
     ppScatterRange: msg.ppScatterRange,
+    sizeVariation: msg.sizeVariation,
+    ppFractionCap: msg.ppFractionCap,
   };
 }
 
@@ -132,8 +133,11 @@ _self.onmessage = (e: MessageEvent) => {
       // evolution and uses these authoritative values instead.
       if (msg.coeffs) emitter.applyCoeffs(msg.coeffs as Float64Array);
 
+      // Apply dynamic per-tick cap from hardware budget (falls back to default)
+      if (msg.maxParticlesPerTick != null) maxParticlesPerTick = msg.maxParticlesPerTick;
+
       // Cap particle rate so the worker never chokes on a single tick
-      const cappedRate = Math.min(msg.particleRate, MAX_PARTICLES_PER_TICK / Math.max(msg.dt, 1e-4));
+      const cappedRate = Math.min(msg.particleRate, maxParticlesPerTick / Math.max(msg.dt, 1e-4));
       const batch = emitter.tick(msg.dt, msg.simTime, cappedRate);
 
       const tickElapsedMs = performance.now() - tickStart;
