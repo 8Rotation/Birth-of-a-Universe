@@ -368,6 +368,11 @@ async function main() {
           try {
             computeEmitter!.init();
             console.log("[main] GPU compute emitter ready");
+            // Auto-enable GPU compute on discrete GPUs (user can still toggle off)
+            if (!hwInfo.gpu.isIntegrated && !params.gpuCompute) {
+              params.gpuCompute = true;
+              console.log("[main] Auto-enabled GPU compute (discrete GPU detected)");
+            }
             // Run GPU compute benchmark (async, non-blocking)
             hwDetector.benchmarkGpuCompute(benchDevice).then((result) => {
               if (result) {

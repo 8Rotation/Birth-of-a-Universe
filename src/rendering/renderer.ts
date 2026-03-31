@@ -30,7 +30,7 @@ import {
 import {
   pass,
   uniform,
-  instancedDynamicBufferAttribute,
+  instancedBufferAttribute,
   uv,
   float,
   length,
@@ -844,8 +844,8 @@ export class SensorRenderer {
     this._uCapacity = uniform(float(this._capacity));
 
     // ── Read packed ring buffer attributes (2 vec4s instead of 6 attrs) ──
-    const packedA = instancedDynamicBufferAttribute(this._ringBuf.packedAttrA, "vec4");
-    const packedB = instancedDynamicBufferAttribute(this._ringBuf.packedAttrB, "vec4");
+    const packedA = instancedBufferAttribute(this._ringBuf.packedAttrA, "vec4");
+    const packedB = instancedBufferAttribute(this._ringBuf.packedAttrB, "vec4");
 
     // Unpack components
     const aLx       = packedA.x;
