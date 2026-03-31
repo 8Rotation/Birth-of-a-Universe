@@ -113,6 +113,10 @@ export class ParticleRingBuffer {
     return best;
   }
 
+  /** Count of consecutive fallbacks to needsUpdate — logged once for diagnosis. */
+  private _needsUpdateFallbackCount = 0;
+  private _directWriteSuccessLogged = false;
+
   // ── GPU direct-write setup ──────────────────────────────────────────
 
   /**
@@ -214,13 +218,29 @@ export class ParticleRingBuffer {
             this._gpuDevice.queue.writeBuffer(gpuBufA, 0, srcA, 0, wrapCount * 4);
             this._gpuDevice.queue.writeBuffer(gpuBufB, 0, srcB, 0, wrapCount * 4);
           }
+          if (!this._directWriteSuccessLogged) {
+            this._directWriteSuccessLogged = true;
+            console.log(`[ring-buffer] Direct GPU write active (bypassing needsUpdate)`);
+          }
+          this._needsUpdateFallbackCount = 0;
           return; // skip needsUpdate — we wrote directly to the GPU
+        }
+      } else {
+        // GPUBuffer not found — log diagnostic on first occurrence
+        if (this._needsUpdateFallbackCount === 3) {
+          const dataA = this._gpuBackend?.get(this._attrA);
+          console.warn(
+            `[ring-buffer] Direct GPU write FAILED — backend.get(attr) returned:`,
+            dataA,
+            `| Falling back to needsUpdate every frame (SLOW — full buffer re-upload)`
+          );
         }
       }
     }
 
     // Fallback: GPUBuffer not yet created (first frame), stale after grow, or no device.
     // After Three.js processes needsUpdate it creates correctly-sized GPUBuffers.
+    this._needsUpdateFallbackCount++;
     this._attrA.needsUpdate = true;
     this._attrB.needsUpdate = true;
     this._gpuBufCacheValid = true; // new GPUBuffers will match capacity after upload

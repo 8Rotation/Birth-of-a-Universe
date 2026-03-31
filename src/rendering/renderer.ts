@@ -385,7 +385,10 @@ export class SensorRenderer {
     this.bloomThreshold = config.bloomThreshold ?? 0.05;
 
     // ── WebGPU renderer ───────────────────────────────────────────────
-    this.renderer = new WebGPURenderer({ antialias: true });
+    // antialias disabled: at 4K bloom already softens edges, and MSAA
+    // adds significant memory + bandwidth overhead with no visual benefit
+    // for a particle-based renderer.
+    this.renderer = new WebGPURenderer({ antialias: false });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, this._pixelRatioCap));
     this.renderer.setSize(window.innerWidth, window.innerHeight);
     this.renderer.setClearColor(0x000000, 1);

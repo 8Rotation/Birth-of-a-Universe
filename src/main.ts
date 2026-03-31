@@ -398,6 +398,16 @@ async function main() {
 
   // ── GPU / render timing accumulators ────────────────────────────
 
+  // ── Frame profiler: tracks wall-clock time in each section ──────
+  const PROF_INTERVAL = 3.0; // seconds between profiler logs
+  let profAccum = 0;
+  let profFrames = 0;
+  let profPhysicsMs = 0;
+  let profDrainMs = 0;
+  let profWriteMs = 0;
+  let profUniformMs = 0;
+  let profRenderMs = 0;
+  let profTotalMs = 0;
 
   setInfo(""); // Clear loading message
 
@@ -431,6 +441,7 @@ async function main() {
       lastTimestamp > 0
         ? Math.min((timestamp - lastTimestamp) / 1000, 0.1)
         : 0.016;
+    const _tp0_frame = performance.now();  // profiler frame start
     // Raw inter-frame gap in ms (before capping dt) — used by watchdog below.
     const rawGapMs = lastTimestamp > 0 ? timestamp - lastTimestamp : 16;
     lastTimestamp = timestamp;
@@ -612,6 +623,7 @@ async function main() {
       effectiveRate = Math.max(100, effectiveRate);
 
       // Request particles from worker (results arrive next frame)
+      const _tp0 = performance.now();
       bridge.tick(dt, simTime, effectiveRate, {
         beta: params.beta,
         kCurvature: Number(params.kCurvature),
@@ -637,19 +649,27 @@ async function main() {
         sizeVariation: params.sizeVariation,
         ppFractionCap: budget.ppFractionCap,
       }, budget.maxParticlesPerTick);
+      const _tp1 = performance.now();
+      profPhysicsMs += _tp1 - _tp0;
 
       // Ingest particles from previous worker tick(s) — direct ring buffer writes.
       // No per-frame cap needed: ring buffer writes are just memcpy.
+      const _td0 = performance.now();
       const batches = bridge.drain();
       for (let i = 0; i < batches.length; i++) {
         pendingBatches.push(batches[i]);
       }
+      const _td1 = performance.now();
+      profDrainMs += _td1 - _td0;
       const cutoff = params.persistence * CUTOFF_MARGIN;
+      const _tw0 = performance.now();
       while (pendingBatches.length > 0) {
         const batch = pendingBatches.shift()!;
         renderer.ringBuffer.writeBatch(batch.data, batch.count, PARTICLE_STRIDE, displayTime, cutoff);
         arrivalCounter += batch.count;
       }
+      const _tw1 = performance.now();
+      profWriteMs += _tw1 - _tw0;
     }
 
     // ── Compute tau for GPU shader uniform ────────────────────────
@@ -699,8 +719,38 @@ async function main() {
     renderer.backgroundColor = parseInt(params.backgroundColor.replace('#', ''), 16);
     renderer.zoom = params.zoom;
     renderer.arrivalSpread = params.arrivalSpread;
+    const _tu0 = performance.now();
     renderer.updateUniforms(displayTime, tau);
+    const _tu1 = performance.now();
     renderer.render();
+    const _tr1 = performance.now();
+    profUniformMs += _tu1 - _tu0;
+    profRenderMs += _tr1 - _tu1;
+    profTotalMs += _tr1 - _tp0_frame;
+    profFrames++;
+    profAccum += dt;
+
+    if (profAccum >= PROF_INTERVAL) {
+      const n = Math.max(1, profFrames);
+      console.log(
+        `[perf] ${n} frames in ${profAccum.toFixed(1)}s (${(n / profAccum).toFixed(0)} fps) — ` +
+        `avg/frame: total ${(profTotalMs / n).toFixed(1)}ms, ` +
+        `physics ${(profPhysicsMs / n).toFixed(2)}ms, ` +
+        `drain ${(profDrainMs / n).toFixed(2)}ms, ` +
+        `write ${(profWriteMs / n).toFixed(2)}ms, ` +
+        `uniforms ${(profUniformMs / n).toFixed(2)}ms, ` +
+        `RENDER ${(profRenderMs / n).toFixed(1)}ms ` +
+        `| buf ${renderer.ringBuffer.activeCount}/${renderer.ringBuffer.capacity}`
+      );
+      profAccum = 0;
+      profFrames = 0;
+      profPhysicsMs = 0;
+      profDrainMs = 0;
+      profWriteMs = 0;
+      profUniformMs = 0;
+      profRenderMs = 0;
+      profTotalMs = 0;
+    }
 
     // ── FPS + HUD ─────────────────────────────────────────────────
     frameCount++;
