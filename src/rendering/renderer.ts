@@ -231,10 +231,7 @@ export class SensorRenderer {
   // ── Ring glow mesh (replaces bloom-scene-based ring bloom) ────────
   // A wider annular ring behind the main ring with gaussian alpha falloff,
   // rendered via additive blending. Controlled independently of particle bloom.
-  // Lives in its own scene (_glowRingScene) so it is never affected by the
-  // particle bloom post-processing pipeline.
   private _glowRing: THREE.Mesh | null = null;
-  private _glowRingScene: THREE.Scene | null = null;
   private _glowRingMaterial: THREE.ShaderMaterial | null = null;
   private _lastGlowWidth = -1;  // track for geometry rebuild
 
@@ -782,11 +779,7 @@ export class SensorRenderer {
     this._glowRing.renderOrder = -1;  // behind the main ring and particles
     this._glowRing.visible = this.ringBloomEnabled;
     this._lastGlowWidth = glowWidth;
-
-    // Separate scene so the glow ring is never processed by the
-    // particle bloom pipeline — keeps the two bloom systems independent.
-    this._glowRingScene = new THREE.Scene();
-    this._glowRingScene.add(this._glowRing);
+    this.scene.add(this._glowRing);
   }
 
   /**
@@ -1193,22 +1186,18 @@ export class SensorRenderer {
         this._particleBloomMul.value = 1.0;
       }
 
-      this.pipeline!.render();
+      try {
+        this.pipeline!.render();
+      } catch (e) {
+        // Pipeline render failed — fall back to direct rendering and
+        // disable bloom so subsequent frames don't repeatedly fail.
+        console.warn('[sensor] Bloom pipeline render failed, disabling:', e);
+        this.useBloom = false;
+        this.renderer.render(this.scene, this.camera);
+      }
     } else {
       // Bloom off or pipeline not yet compiled — direct scene render
       this.renderer.render(this.scene, this.camera);
-    }
-
-    // ── Ring glow: rendered independently after the main pass ────────
-    // The glow ring lives in its own scene so it is never affected by
-    // particle bloom settings (strength / radius / threshold).
-    if (this._glowRing && this._glowRing.visible && this._glowRingScene) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const r = this.renderer as any;
-      const prevAutoClear = r.autoClear;
-      r.autoClear = false;
-      this.renderer.render(this._glowRingScene, this.camera);
-      r.autoClear = prevAutoClear;
     }
   }
 
