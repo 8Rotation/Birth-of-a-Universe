@@ -33,6 +33,14 @@ describe("particle-emit.wgsl", () => {
     expect(shaderSource).toContain("fn evalPerturbation");
   });
 
+  it("uses log-factorial normalization instead of materialising (2m)!", () => {
+    expect(shaderSource).toContain("logFactorial2m");
+    expect(shaderSource).toContain("var norm2");
+    expect(shaderSource).toContain("log(f32(i))");
+    expect(shaderSource).toContain("sqrt(norm2)");
+    expect(shaderSource).not.toContain("fac *= f32(i)");
+  });
+
   it("contains ring buffer output bindings", () => {
     expect(shaderSource).toContain("outA");
     expect(shaderSource).toContain("outB");

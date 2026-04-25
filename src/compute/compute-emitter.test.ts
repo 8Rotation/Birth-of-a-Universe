@@ -229,6 +229,79 @@ describe("ComputeEmitter", () => {
     // Should produce 4 copy calls (2 chunks × 2 attributes)
     expect(copyBufferToBuffer).toHaveBeenCalledTimes(4);
   });
+
+  it("does not record a GPU write when render buffers are unavailable", () => {
+    const device = makeMockDevice();
+    const recordGpuWrite = vi.fn();
+    const rb = {
+      capacity: 1024,
+      get writeHead() { return 0; },
+      get totalWritten() { return 0; },
+      getGpuBuffers: vi.fn().mockReturnValue(null),
+      advanceWriteHead: vi.fn(),
+      recordGpuWrite,
+    };
+    const emitter = new ComputeEmitter(device, rb as any, "/* wgsl */");
+    emitter.init();
+
+    const beginComputePass = vi.fn();
+    const copyBufferToBuffer = vi.fn();
+    const encoder = {
+      beginComputePass,
+      copyBufferToBuffer,
+      finish: vi.fn(),
+    } as unknown as GPUCommandEncoder;
+
+    const copied = emitter.dispatch(encoder, 64, defaultParams(), new Float32Array(0));
+
+    expect(copied).toBe(false);
+    expect(beginComputePass).not.toHaveBeenCalled();
+    expect(copyBufferToBuffer).not.toHaveBeenCalled();
+    expect(recordGpuWrite).not.toHaveBeenCalled();
+  });
+
+  it("records GPU history bounds wide enough for production particles", () => {
+    const device = makeMockDevice();
+    const gpuBufA = makeMockBuffer(1024 * 16);
+    const gpuBufB = makeMockBuffer(1024 * 16);
+    const recordGpuWrite = vi.fn();
+    const rb = {
+      capacity: 1024,
+      get writeHead() { return 0; },
+      get totalWritten() { return 0; },
+      getGpuBuffers: vi.fn().mockReturnValue({ bufA: gpuBufA, bufB: gpuBufB }),
+      advanceWriteHead: vi.fn(),
+      recordGpuWrite,
+    };
+    const emitter = new ComputeEmitter(device, rb as any, "/* wgsl */");
+    emitter.init();
+
+    const encoder = {
+      beginComputePass: vi.fn().mockReturnValue({
+        setPipeline: vi.fn(),
+        setBindGroup: vi.fn(),
+        dispatchWorkgroups: vi.fn(),
+        end: vi.fn(),
+      }),
+      copyBufferToBuffer: vi.fn(),
+      finish: vi.fn(),
+    } as unknown as GPUCommandEncoder;
+
+    const params = {
+      ...defaultParams(),
+      simTime: 20,
+      arrivalSpread: 0.5,
+      bounceCount: 10,
+      ppBaseDelay: 4,
+      ppScatterRange: 3,
+    };
+
+    const copied = emitter.dispatch(encoder, 15, params, new Float32Array(0));
+
+    expect(copied).toBe(true);
+    // Bounce-only window would be 0.75s. Production clamp is 4+3+2=9s.
+    expect(recordGpuWrite).toHaveBeenCalledWith(15, 11, 29);
+  });
 });
 
 // ── Coefficient packing ─────────────────────────────────────────────────
@@ -293,5 +366,66 @@ describe("ComputeParams", () => {
     for (const key of requiredKeys) {
       expect(p).toHaveProperty(key);
     }
+  });
+});
+
+
+// -- GPU emission accumulator (PHYS-01 / Task A1) -------------------------
+import {
+  stepEmitAccumulator,
+  resetEmitAccumulator,
+  type EmitAccumulatorState,
+} from "./emit-accumulator";
+
+describe("stepEmitAccumulator (GPU emission rate conservation)", () => {
+  it("conserves the long-run rate at 60 Hz", () => {
+    const state: EmitAccumulatorState = { value: 0 };
+    const dt = 1 / 60;
+    const rate = 100;
+    let total = 0;
+    for (let i = 0; i < 60; i++) {
+      total += stepEmitAccumulator(state, rate, dt);
+    }
+    // 60 ticks � (100/60) = 100 exactly; accumulator floors per-frame
+    // so the running total tracks within �1 of the ideal.
+    expect(total).toBeGreaterThanOrEqual(99);
+    expect(total).toBeLessThanOrEqual(100);
+  });
+
+  it("conserves the long-run rate at 144 Hz (where rate*dt < 1)", () => {
+    const state: EmitAccumulatorState = { value: 0 };
+    const dt = 1 / 144;
+    const rate = 100;
+    let total = 0;
+    for (let i = 0; i < 144; i++) {
+      total += stepEmitAccumulator(state, rate, dt);
+    }
+    // Without the accumulator, Math.floor(100/144) = 0 ? total = 0.
+    expect(total).toBeGreaterThanOrEqual(99);
+    expect(total).toBeLessThanOrEqual(100);
+  });
+
+  it("emits zero and leaves state unchanged when rate is 0", () => {
+    const state: EmitAccumulatorState = { value: 0.7 };
+    const dt = 1 / 60;
+    let total = 0;
+    for (let i = 0; i < 60; i++) {
+      total += stepEmitAccumulator(state, 0, dt);
+    }
+    expect(total).toBe(0);
+    expect(state.value).toBe(0.7);
+  });
+
+  it("does not decay the accumulator for negative rates", () => {
+    const state: EmitAccumulatorState = { value: 0.5 };
+    const out = stepEmitAccumulator(state, -10, 1 / 60);
+    expect(out).toBe(0);
+    expect(state.value).toBe(0.5);
+  });
+
+  it("resetEmitAccumulator zeros the state", () => {
+    const state: EmitAccumulatorState = { value: 0.9 };
+    resetEmitAccumulator(state);
+    expect(state.value).toBe(0);
   });
 });

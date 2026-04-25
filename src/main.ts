@@ -28,6 +28,11 @@ import { HardwareDetector } from "./ui/hardware-info.js";
 import { ComputeEmitter } from "./compute/compute-emitter.js";
 import type { ComputeParams } from "./compute/compute-emitter.js";
 import shaderSource from "./compute/particle-emit.wgsl?raw";
+import {
+  stepEmitAccumulator,
+  resetEmitAccumulator,
+  type EmitAccumulatorState,
+} from "./compute/emit-accumulator.js";
 
 console.log("[main] Birth of a Universe — ECSK Bounce Sensor");
 
@@ -70,9 +75,64 @@ function setInfo(text: string) {
   info.textContent = text;
 }
 
+type AppControls = ReturnType<typeof createSensorControls>;
+
+let appAbort: AbortController | null = null;
+let animateRunning = false;
+let appBridge: PhysicsBridge | null = null;
+let appRenderer: SensorRenderer | null = null;
+let appComputeEmitter: ComputeEmitter | null = null;
+let appControls: AppControls | null = null;
+let appHwDetector: HardwareDetector | null = null;
+let appScreenDetector: ScreenDetector | null = null;
+
+function disposePart(label: string, fn: (() => void) | undefined): void {
+  if (!fn) return;
+  try {
+    fn();
+  } catch (e) {
+    console.error(`[main] Failed to dispose ${label}:`, e);
+  }
+}
+
+export function dispose(): void {
+  animateRunning = false;
+  appAbort?.abort();
+  appAbort = null;
+
+  disposePart("bridge", () => appBridge?.dispose?.());
+  disposePart("renderer", () => appRenderer?.dispose?.());
+  disposePart("compute emitter", () => appComputeEmitter?.dispose?.());
+  disposePart("controls", () => appControls?.dispose?.());
+  disposePart("hardware detector", () => appHwDetector?.dispose?.());
+  disposePart("screen detector", () => appScreenDetector?.dispose?.());
+
+  appBridge = null;
+  appRenderer = null;
+  appComputeEmitter = null;
+  appControls = null;
+  appHwDetector = null;
+  appScreenDetector = null;
+}
+
+declare global {
+  interface Window {
+    __disposeApp__?: () => void;
+  }
+}
+
+if (typeof window !== "undefined" && ["localhost", "127.0.0.1", ""].includes(window.location.hostname)) {
+  window.__disposeApp__ = dispose;
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────
 
 async function main() {
+  dispose();
+  appAbort = new AbortController();
+  const abortSignal = appAbort.signal;
+  animateRunning = true;
+
   setInfo("Initializing ECSK Bounce Sensor...");
   const t0 = performance.now();
 
@@ -80,11 +140,14 @@ async function main() {
   //   CPU bench + GPU adapter query don't need renderPixels, so they
   //   run in parallel with the rAF-based screen measurement below.
   const hwDetector = new HardwareDetector();
+  appHwDetector = hwDetector;
   hwDetector.startBenchmarks();
 
   // ── 0b. Detect screen characteristics ─────────────────────────────
   const screenDetector = new ScreenDetector();
+  appScreenDetector = screenDetector;
   const screenInfo = await screenDetector.init();
+  if (abortSignal.aborted) return;
   console.log(`[main] Screen detection: ${(performance.now() - t0).toFixed(0)} ms — ${screenInfo.summary}`);
 
   const renderPixels = screenInfo.renderWidth * screenInfo.renderHeight;
@@ -92,6 +155,7 @@ async function main() {
   // ── 0c. Finalize hardware detection (applies screen penalty) ──────
   const t1 = performance.now();
   const hwInfo = await hwDetector.finalize(renderPixels);
+  if (abortSignal.aborted) return;
   console.log(`[main] Hardware detection: ${(performance.now() - t1).toFixed(0)} ms — ${hwInfo.summary}`);
 
   // Budget already incorporates screen-resolution penalty
@@ -108,12 +172,14 @@ async function main() {
     bloomRadius: 0.3,
     bloomThreshold: 0.05,
   });
+  appRenderer = renderer;
 
   // Resolve 'auto' bloom quality based on hardware capability score
   renderer.bloomAutoResolvedQuality = hwInfo.capability >= 0.6 ? 'high' : 'low';
 
   try {
     await renderer.init(screenInfo);
+    if (abortSignal.aborted) return;
     console.log(`[main] Renderer init: ${(performance.now() - t2).toFixed(0)} ms`);
   } catch (e) {
     setInfo(`WebGPU init failed: ${e}`);
@@ -181,7 +247,7 @@ async function main() {
 
   // ── 4. Controls (auto-configured from hardware budget) ────────────
   const tCtrl = performance.now();
-  const { params, hud, updateHUD, setHDRMode, setForceHDRCallback, updateTargetFpsLabel, setOverridesCallback, manualOverrides, updateParticleRateMax } = createSensorControls(() => {
+  const controls = createSensorControls(() => {
     // Full reset: terminate and recreate all workers (recovers from
     // crashes), wipe all particle state, and re-sync timing.
     // Equivalent to browser reload but keeps current settings.
@@ -204,6 +270,10 @@ async function main() {
     flowDirty = false;
     settingsChangeTimer = 0;
     throttleMultiplier = 1.0;
+    // Mirror the CPU-side accumulator reset: workers are recreated below
+    // (fresh accumulators at 0), so the GPU accumulator must match.
+    resetEmitAccumulator(gpuEmitAccumulator);
+    gpuDbPhase = 0;
     // Recreate physics engine from current settings
     const currentK = Number(params.kCurvature);
     physics = new ECSKPhysics(params.beta, currentK);
@@ -252,6 +322,8 @@ async function main() {
     prevSilkDamping        = params.silkDamping;
     console.log("[main] Simulation reset (full worker restart)");
   }, budget, screenInfo.refreshRate, screenInfo.isMobile);
+  appControls = controls;
+  const { params, hud, updateHUD, setHDRMode, setForceHDRCallback, updateTargetFpsLabel, setOverridesCallback, manualOverrides, updateParticleRateMax } = controls;
 
   // Seed prev-snapshot so the first frame sees no change (NaN → real value)
   prevParticleRate      = params.particleRate;
@@ -283,19 +355,23 @@ async function main() {
   // When the user enters values the browser can't detect, recalculate
   // the full budget and update all runtime caps.
   setOverridesCallback((overrides) => {
-    const updated = hwDetector.recalculate(overrides);
-    if (!updated) return;
-    budget = updated.budget;
-    VRAM_BUDGET_PARTICLES = budget.emergencyHitCap;
-    // Push manual peak-nits override to the renderer so HDR brightness changes
-    if (overrides.peakNits > 0) {
-      renderer.peakNits = overrides.peakNits;
+    try {
+      const updated = hwDetector.recalculate(overrides);
+      if (!updated) return;
+      budget = updated.budget;
+      VRAM_BUDGET_PARTICLES = budget.emergencyHitCap;
+      // Push manual peak-nits override to the renderer so HDR brightness changes
+      if (overrides.peakNits > 0) {
+        renderer.peakNits = overrides.peakNits;
+      }
+      console.log(
+        `[main] Budget recalculated — hit cap: ${(VRAM_BUDGET_PARTICLES / 1e6).toFixed(1)}M, ` +
+        `visible max: ${(budget.maxVisibleHits / 1e3).toFixed(0)}K, ` +
+        `physics cap: ${(budget.maxPhysicsCostPerSec / 1e6).toFixed(1)}M evals/s`,
+      );
+    } catch (e) {
+      console.error("[main] Manual hardware override callback failed:", e);
     }
-    console.log(
-      `[main] Budget recalculated — hit cap: ${(VRAM_BUDGET_PARTICLES / 1e6).toFixed(1)}M, ` +
-      `visible max: ${(budget.maxVisibleHits / 1e3).toFixed(0)}K, ` +
-      `physics cap: ${(budget.maxPhysicsCostPerSec / 1e6).toFixed(1)}M evals/s`,
-    );
   });
 
   function effectiveDisplaySyncHz(): number {
@@ -346,52 +422,116 @@ async function main() {
     ppScatterRange: params.ppScatterRange,
     sizeVariation: params.sizeVariation,
   }, budget.recommendedWorkers);
+  appBridge = bridge;
 
   // ── 6. GPU compute emitter (optional, parallel to CPU workers) ───
   let computeEmitter: ComputeEmitter | null = null;
   let gpuDevice: GPUDevice | undefined;
   /** Phase accumulator for double-bounce rate modulation in GPU compute path. */
   let gpuDbPhase = 0;
+  /**
+   * Fractional-rate accumulator for the GPU emission path. Mirrors the
+   * CPU accumulator in `shell.ts` so sub-1 per-frame emission counts are
+   * preserved (critical at high refresh rates where `rate*dt < 1`).
+   */
+  const gpuEmitAccumulator: EmitAccumulatorState = { value: 0 };
   /** GPU compute benchmark result: particles/sec. 0 = not yet benchmarked. */
   let gpuComputeRate = 0;
+  let gpuComputeReadySettled = false;
+  let gpuComputeInitError: string | null = null;
+  let desiredGpuCompute = params.gpuCompute;
+  let lastGpuComputeParam = params.gpuCompute;
+  let gpuComputePreferenceTouched = false;
+
+  function nextAnimationFrame(): Promise<void> {
+    return new Promise((resolve) => requestAnimationFrame(() => resolve()));
+  }
+
+  function setGpuComputeParam(value: boolean): void {
+    desiredGpuCompute = value;
+    params.gpuCompute = value;
+    lastGpuComputeParam = value;
+  }
+
+  function queueGpuComputePreference(value: boolean): void {
+    desiredGpuCompute = value;
+    lastGpuComputeParam = value;
+    gpuComputePreferenceTouched = true;
+    if (!gpuComputeReadySettled) {
+      console.log(`[main] Queued GPU compute ${value ? "on" : "off"} until init completes`);
+      return;
+    }
+    params.gpuCompute = value;
+  }
+
+  function observeGpuComputePreference(): void {
+    if (params.gpuCompute !== lastGpuComputeParam) {
+      queueGpuComputePreference(params.gpuCompute);
+    }
+  }
+
+  let gpuComputeReady: Promise<boolean>;
   {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const backend = (renderer.renderer as any).backend;
     gpuDevice = backend?.device as GPUDevice | undefined;
     if (gpuDevice) {
       computeEmitter = new ComputeEmitter(gpuDevice, renderer.ringBuffer, shaderSource);
+      appComputeEmitter = computeEmitter;
+      const initEmitter = computeEmitter;
       // Defer init() to after first render (GPUBuffers exist).
-      // Use two rAF callbacks: first for the initial render, second to init compute.
-      const benchDevice = gpuDevice;
-      requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
-          try {
-            computeEmitter!.init();
-            console.log("[main] GPU compute emitter ready");
-            // Auto-enable GPU compute on discrete GPUs (user can still toggle off)
-            if (!hwInfo.gpu.isIntegrated && !params.gpuCompute) {
-              params.gpuCompute = true;
-              console.log("[main] Auto-enabled GPU compute (discrete GPU detected)");
-            }
-            // Run GPU compute benchmark (async, non-blocking)
-            hwDetector.benchmarkGpuCompute(benchDevice).then((result) => {
-              if (result) {
-                gpuComputeRate = result.particlesPerSec;
-                // Raise slider limit when GPU compute is available
-                const gpuSliderMax = Math.round(gpuComputeRate / 60); // particles/frame at 60fps
-                if (gpuSliderMax > budget.sliderLimits.particleRateMax) {
-                  updateParticleRateMax(gpuSliderMax);
-                }
-              }
-            });
-          } catch (e) {
-            console.warn("[main] GPU compute init failed, using CPU workers:", e);
-            computeEmitter = null;
-          }
-        });
-      });
+      // Use two rAF waits: first for the initial render, second to init compute.
+      gpuComputeReady = (async () => {
+        await nextAnimationFrame();
+        await nextAnimationFrame();
+        if (!animateRunning || abortSignal.aborted || computeEmitter !== initEmitter) return false;
+        initEmitter.init();
+        console.log("[main] GPU compute emitter ready");
+        return true;
+      })();
+    } else {
+      gpuComputeInitError = "WebGPU device unavailable";
+      gpuComputeReady = Promise.resolve(false);
     }
   }
+
+  void gpuComputeReady.then((ready) => {
+    gpuComputeReadySettled = true;
+    if (!ready) {
+      if (!gpuComputeInitError) gpuComputeInitError = "GPU compute init was cancelled";
+      return;
+    }
+
+    gpuComputeInitError = null;
+    if (!hwInfo.gpu.isIntegrated && !desiredGpuCompute && !gpuComputePreferenceTouched) {
+      setGpuComputeParam(true);
+      console.log("[main] Auto-enabled GPU compute (discrete GPU detected)");
+    } else {
+      setGpuComputeParam(desiredGpuCompute);
+    }
+
+    if (gpuDevice) {
+      void hwDetector.benchmarkGpuCompute(gpuDevice).then((result) => {
+        if (abortSignal.aborted) return;
+        if (result) {
+          gpuComputeRate = result.particlesPerSec;
+          // Raise slider limit when GPU compute is available
+          const gpuSliderMax = Math.round(gpuComputeRate / 60); // particles/frame at 60fps
+          if (gpuSliderMax > budget.sliderLimits.particleRateMax) {
+            updateParticleRateMax(gpuSliderMax);
+          }
+        }
+      }).catch((e) => {
+        console.error("[main] GPU compute benchmark failed:", e);
+      });
+    }
+  }).catch((e) => {
+    gpuComputeReadySettled = true;
+    gpuComputeInitError = e instanceof Error ? e.message : String(e);
+    console.error("[main] GPU compute init failed:", e);
+    computeEmitter = null;
+    appComputeEmitter = null;
+  });
 
   console.log(`[main] Worker spawn: ${(performance.now() - t3).toFixed(0)} ms`);
   console.log(`[main] Total init: ${(performance.now() - t0).toFixed(0)} ms`);
@@ -413,13 +553,14 @@ async function main() {
   /** Background throttle interval (ms). ~10 fps when window blurred. */
   const BG_THROTTLE_INTERVAL = 100;
 
-  document.addEventListener("visibilitychange", () => {
+  const onVisibilityChange = () => {
+    if (abortSignal.aborted) return;
     if (document.hidden) {
       tabHidden = true;
       // Snapshot the current wall-clock time so we can compute pause duration
       hiddenAtTime = performance.now() / 1000;
       // Flush any in-flight worker batches — they'd arrive with stale timestamps
-      bridge.flushPipeline();
+      if (appBridge) appBridge.flushPipeline();
       pendingBatches.length = 0;
     } else {
       if (tabHidden && hiddenAtTime > 0) {
@@ -432,11 +573,12 @@ async function main() {
       tabHidden = false;
       hiddenAtTime = 0;
     }
-  });
+  };
+  document.addEventListener("visibilitychange", onVisibilityChange, { signal: abortSignal });
 
   if (throttleWhenWindowBlurred) {
-    window.addEventListener("blur", () => { windowBlurred = true; });
-    window.addEventListener("focus", () => { windowBlurred = false; });
+    window.addEventListener("blur", () => { windowBlurred = true; }, { signal: abortSignal });
+    window.addEventListener("focus", () => { windowBlurred = false; }, { signal: abortSignal });
   }
 
   // ── Animation loop ────────────────────────────────────────────────
@@ -462,6 +604,7 @@ async function main() {
   setInfo(""); // Clear loading message
 
   function animate(timestamp: number) {
+    if (!animateRunning) return;
     requestAnimationFrame(animate);
 
     // ── Tab hidden: skip everything (zero CPU cost) ──────────────
@@ -652,11 +795,21 @@ async function main() {
       // (b) Physics cost: when GPU compute is active with a benchmark result,
       // use GPU throughput to cap rate instead of CPU physics cost.
       // Otherwise fall back to CPU-based physics cost cap.
-      const gpuActive = !!(params.gpuCompute && computeEmitter?.ready && gpuDevice);
+      observeGpuComputePreference();
+      const gpuActive = !!(
+        params.gpuCompute &&
+        gpuComputeReadySettled &&
+        !gpuComputeInitError &&
+        computeEmitter?.ready &&
+        gpuDevice
+      );
 
       // Update slider limits when GPU compute toggles on/off
       if (gpuActive !== prevGpuComputeActive) {
         prevGpuComputeActive = gpuActive;
+        // Drop any fractional remainder accumulated on the previous path
+        // so toggling GPU compute doesn't emit a leftover burst.
+        resetEmitAccumulator(gpuEmitAccumulator);
         if (gpuActive && gpuComputeRate > 0) {
           const gpuSliderMax = Math.round(gpuComputeRate / 60);
           if (gpuSliderMax > budget.sliderLimits.particleRateMax) {
@@ -765,8 +918,12 @@ async function main() {
         }
 
         // ── Compute bounce + production particle counts ───────────
+        // Use a fractional-rate accumulator (mirrors CPU path in shell.ts)
+        // so sub-1 per-frame counts accumulate instead of being floored
+        // away. Without this, at 144 Hz with rate=100/s, rate*dt ≈ 0.69
+        // floors to 0 and no particles emit. See emit-accumulator.ts.
         const bounceCount = Math.min(
-          Math.floor(gpuEffectiveRate * dt),
+          stepEmitAccumulator(gpuEmitAccumulator, gpuEffectiveRate, dt),
           budget.maxParticlesPerTick,
         );
         const gpuPpFraction = params.betaPP > 0
@@ -831,9 +988,9 @@ async function main() {
           };
           const packedCoeffs = ComputeEmitter.packCoeffs(bridge.getCoeffs());
           const encoder = gpuDevice.createCommandEncoder();
-          computeEmitter.dispatch(encoder, emitCount, computeParams, packedCoeffs);
+          const copiedToRenderBuffers = computeEmitter.dispatch(encoder, emitCount, computeParams, packedCoeffs);
           gpuDevice.queue.submit([encoder.finish()]);
-          arrivalCounter += emitCount;
+          if (copiedToRenderBuffers) arrivalCounter += emitCount;
         }
       } else {
         // CPU worker path (existing behavior, unchanged)
@@ -902,7 +1059,7 @@ async function main() {
     renderer.bloomThreshold = params.bloomThreshold;
     renderer.bloomQuality = params.bloomQuality;
     renderer.fadeSharpness = params.fadeSharpness;
-    renderer.fadeToBlack = params.fadeToBlack;
+    renderer.fadeToBackground = params.fadeToBackground;
     renderer.lightnessFloor = params.lightnessFloor;
     renderer.lightnessRange = params.lightnessRange;
     renderer.saturationFloor = params.saturationFloor;
@@ -1018,7 +1175,11 @@ async function main() {
       hud.cpuLoad = `${cpuPct}%${cpuColor}`;
       hud.bufferFill = `${(renderer.ringBuffer.activeCount / 1000).toFixed(0)}K / ${(renderer.ringBuffer.capacity / 1000).toFixed(0)}K`;
       // GPU compute status
-      if (params.gpuCompute && computeEmitter?.ready) {
+      if (params.gpuCompute && gpuComputeInitError) {
+        hud.gpuCompute = "UNAVAILABLE";
+      } else if (params.gpuCompute && !gpuComputeReadySettled) {
+        hud.gpuCompute = "INIT...";
+      } else if (params.gpuCompute && computeEmitter?.ready) {
         if (gpuComputeRate > 0) {
           const kPerFrame = Math.round(gpuComputeRate / Math.max(30, effectivePresentationHz()) / 1000);
           hud.gpuCompute = `ON (${kPerFrame > 0 ? kPerFrame + 'K' : '<1K'}/frame)`;
@@ -1034,7 +1195,7 @@ async function main() {
     }
   }
 
-  requestAnimationFrame(animate);
+  if (animateRunning) requestAnimationFrame(animate);
 }
 
 // ── Boot ──────────────────────────────────────────────────────────────────

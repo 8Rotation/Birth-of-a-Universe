@@ -258,7 +258,7 @@ export function evaluatePerturbationFast(
 
   let delta = 0;
   const SQRT2 = Math.SQRT2;
-  const INV_4PI = 0.07957747154594767; // 1 / (4π)
+  const LOG_4PI = Math.log(4 * Math.PI);
 
   // cos(φ) and sin(φ) for angle-addition recurrence
   const cosPhi = Math.cos(phi);
@@ -285,10 +285,12 @@ export function evaluatePerturbationFast(
       sinMPhi = s;
     }
 
-    // Initial normalization factorial: fac = (2m)! / 0! = (2m)!
-    // This equals (l+m)!/(l-m)! evaluated at l = m.
-    let fac = 1;
-    for (let i = 1; i <= 2 * m; i++) fac *= i;
+    // Initial squared normalization at l = m:
+    // N_m^m^2 = (2m+1) / (4π * (2m)!). Use log((2m)!) so the
+    // CPU path remains a stable oracle for the f32 WGSL mirror at high m.
+    let logFactorial2m = 0;
+    for (let i = 1; i <= 2 * m; i++) logFactorial2m += Math.log(i);
+    let norm2 = Math.exp(Math.log(2 * m + 1) - LOG_4PI - logFactorial2m);
 
     // ── Upward recurrence in l for fixed m ──
     let plm_prev = 0;     // P_{m-1}^m = 0 (doesn't exist)
@@ -304,15 +306,15 @@ export function evaluatePerturbationFast(
         plm_prev = plm_curr;
         plm_curr = plm_next;
 
-        // fac(l) = fac(l−1) × (l+m) / (l−m)
-        fac *= (l + m) / (l - m);
+        // N_l^m^2 / N_{l-1}^m^2 = ((2l+1)/(2l-1)) * ((l-m)/(l+m))
+        norm2 *= ((2 * l + 1) / (2 * l - 1)) * ((l - m) / (l + m));
       }
 
       // No l = 0 modes in the coefficient array
       if (l < 1) continue;
 
-      // N_l^m = √((2l+1) / (4π · fac))
-      const norm = Math.sqrt((2 * l + 1) * INV_4PI / fac);
+      // N_l^m = sqrt(norm2)
+      const norm = Math.sqrt(norm2);
 
       if (m === 0) {
         // Y_l^0 = N · P_l^0

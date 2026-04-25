@@ -154,15 +154,21 @@ export class ComputeEmitter {
     emitCount: number,
     params: ComputeParams,
     coeffs: Float32Array,
-  ): void {
-    if (!this._ready || !this._pipeline) return;
-    if (emitCount <= 0) return;
+  ): boolean {
+    if (!this._ready || !this._pipeline) return false;
+    if (emitCount <= 0) return false;
 
     const device = this._device;
     const rb = this._ringBuffer;
 
     // Ensure staging buffers match ring buffer capacity (may have grown)
     this._ensureStagingBuffers();
+
+    // If Three.js has not created or refreshed the render-side buffers yet
+    // (first frame or right after grow()), do not advance GPU history. A
+    // compute-only write into staging buffers would be invisible to render.
+    const gpuBufs = rb.getGpuBuffers();
+    if (!gpuBufs || !this._stagingBufA || !this._stagingBufB) return false;
 
     // Upload coefficients
     this._uploadCoeffs(coeffs);
@@ -188,36 +194,42 @@ export class ComputeEmitter {
     pass.end();
 
     // Copy staging buffers → Three.js vertex buffers
-    const gpuBufs = rb.getGpuBuffers();
-    if (gpuBufs && this._stagingBufA && this._stagingBufB) {
-      const bytesPerParticle = 16; // 4 floats × 4 bytes
-      if (writeOffset + emitCount <= bufferCapacity) {
-        // Contiguous region
-        const byteOffset = writeOffset * bytesPerParticle;
-        const byteSize = emitCount * bytesPerParticle;
-        commandEncoder.copyBufferToBuffer(this._stagingBufA, byteOffset, gpuBufs.bufA, byteOffset, byteSize);
-        commandEncoder.copyBufferToBuffer(this._stagingBufB, byteOffset, gpuBufs.bufB, byteOffset, byteSize);
-      } else {
-        // Wrap-around: two copy commands
-        const firstChunk = bufferCapacity - writeOffset;
-        const firstOffset = writeOffset * bytesPerParticle;
-        const firstSize = firstChunk * bytesPerParticle;
-        commandEncoder.copyBufferToBuffer(this._stagingBufA, firstOffset, gpuBufs.bufA, firstOffset, firstSize);
-        commandEncoder.copyBufferToBuffer(this._stagingBufB, firstOffset, gpuBufs.bufB, firstOffset, firstSize);
+    const bytesPerParticle = 16; // 4 floats × 4 bytes
+    if (writeOffset + emitCount <= bufferCapacity) {
+      // Contiguous region
+      const byteOffset = writeOffset * bytesPerParticle;
+      const byteSize = emitCount * bytesPerParticle;
+      commandEncoder.copyBufferToBuffer(this._stagingBufA, byteOffset, gpuBufs.bufA, byteOffset, byteSize);
+      commandEncoder.copyBufferToBuffer(this._stagingBufB, byteOffset, gpuBufs.bufB, byteOffset, byteSize);
+    } else {
+      // Wrap-around: two copy commands
+      const firstChunk = bufferCapacity - writeOffset;
+      const firstOffset = writeOffset * bytesPerParticle;
+      const firstSize = firstChunk * bytesPerParticle;
+      commandEncoder.copyBufferToBuffer(this._stagingBufA, firstOffset, gpuBufs.bufA, firstOffset, firstSize);
+      commandEncoder.copyBufferToBuffer(this._stagingBufB, firstOffset, gpuBufs.bufB, firstOffset, firstSize);
 
-        const wrapSize = (emitCount - firstChunk) * bytesPerParticle;
-        commandEncoder.copyBufferToBuffer(this._stagingBufA, 0, gpuBufs.bufA, 0, wrapSize);
-        commandEncoder.copyBufferToBuffer(this._stagingBufB, 0, gpuBufs.bufB, 0, wrapSize);
-      }
+      const wrapSize = (emitCount - firstChunk) * bytesPerParticle;
+      commandEncoder.copyBufferToBuffer(this._stagingBufA, 0, gpuBufs.bufA, 0, wrapSize);
+      commandEncoder.copyBufferToBuffer(this._stagingBufB, 0, gpuBufs.bufB, 0, wrapSize);
     }
 
     // Record GPU write with bornTime bounds for alive-range estimation.
-    // Arrival times fall within [simTime - 1.5*spread, simTime + 1.5*spread].
-    const maxDelay = params.arrivalSpread * 1.5;
+    // Bounce arrivals fall within ±1.5*spread. Production arrivals use the
+    // shader's wider pp clamp, so include it whenever this dispatch contains
+    // production particles. The history may overestimate, but must not cull
+    // delayed production particles early.
+    const bounceDelay = params.arrivalSpread * 1.5;
+    const productionCount = params.bounceCount > 0 ? Math.max(0, emitCount - params.bounceCount) : 0;
+    const productionDelay = productionCount > 0
+      ? Math.max(0, params.ppBaseDelay + params.ppScatterRange + 2.0)
+      : 0;
+    const maxDelay = Math.max(bounceDelay, productionDelay);
     rb.recordGpuWrite(emitCount, params.simTime - maxDelay, params.simTime + maxDelay);
 
     // Increment frame seed for next dispatch
     this._frameSeed = (this._frameSeed + 1) >>> 0;
+    return true;
   }
 
   /**

@@ -69,7 +69,7 @@ export interface SensorParams {
 
   // Fade
   fadeSharpness: number;    // Weibull shape: 1=exponential, >1=sharp cutoff, <1=long tail
-  fadeToBlack: boolean;    // true = fade to background colour (opaque), false = fade to transparent
+  fadeToBackground: boolean; // true = fade to background colour (opaque), false = transparent fade
 
   // Color tuning (renderer-side HSL mapping)
   lightnessFloor: number;   // minimum lightness (0–1)
@@ -851,6 +851,8 @@ const OLED_CSS = `
 }
 `;
 
+let activeControlsDispose: (() => void) | null = null;
+
 // ── Create controls ───────────────────────────────────────────────────────
 
 /**
@@ -862,14 +864,56 @@ const OLED_CSS = `
  *                 falls back to mid-tier defaults.
  */
 export function createSensorControls(onReset: () => void, budget?: ComputeBudget, refreshRate = 60, isMobile = false) {
+  if (activeControlsDispose) {
+    try {
+      activeControlsDispose();
+    } catch (e) {
+      console.warn("[controls] Failed to dispose previous controls instance", e);
+      activeControlsDispose = null;
+    }
+  }
+
+  const disposables: Array<() => void> = [];
+  let disposed = false;
+
+  function addDisposable(disposeFn: () => void): () => void {
+    let active = true;
+    const run = () => {
+      if (!active) return;
+      active = false;
+      const idx = disposables.indexOf(run);
+      if (idx >= 0) disposables.splice(idx, 1);
+      disposeFn();
+    };
+    if (disposed) {
+      run();
+    } else {
+      disposables.push(run);
+    }
+    return run;
+  }
+
+  function addListener(
+    target: EventTarget,
+    type: string,
+    listener: EventListenerOrEventListenerObject,
+    options?: boolean | AddEventListenerOptions,
+  ): () => void {
+    target.addEventListener(type, listener, options);
+    return addDisposable(() => target.removeEventListener(type, listener, options));
+  }
+
   // ── Inject OLED theme CSS ─────────────────────────────────────────
   const styleEl = document.createElement("style");
+  styleEl.dataset.oledTheme = "true";
   styleEl.textContent = OLED_CSS;
   document.head.appendChild(styleEl);
+  addDisposable(() => styleEl.remove());
 
   // ── Mobile mode: add class to body for CSS targeting ──────────────
   if (isMobile) {
     document.body.classList.add("ecsk-mobile");
+    addDisposable(() => document.body.classList.remove("ecsk-mobile"));
     console.log("[controls] Mobile layout active");
   }
 
@@ -879,9 +923,11 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
   const showFullscreenButton = !fullscreenSupport.iosBrowser;
   if (fullscreenSupport.iosBrowser) {
     document.body.classList.add("ecsk-ios-browser");
+    addDisposable(() => document.body.classList.remove("ecsk-ios-browser"));
   }
   if (standaloneMode) {
     document.body.classList.add("ecsk-standalone");
+    addDisposable(() => document.body.classList.remove("ecsk-standalone"));
   }
 
   // ── Slider limits from hardware detection (or sensible mid-tier fallback)
@@ -937,7 +983,7 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
     bloomThreshold: 0.05,
     bloomQuality: 'auto',
     fadeSharpness: 1.0,
-    fadeToBlack: false,
+    fadeToBackground: false,
     lightnessFloor: 0.20,
     lightnessRange: 0.65,
     saturationFloor: 0.70,
@@ -1121,7 +1167,7 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
   particles.add(params, "roundParticles").name("Round particles").onChange(() => {
     updateConditionalFolders();
   });
-  particles.add(params, "fadeToBlack").name("Fade to black");
+  particles.add(params, "fadeToBackground").name("Fade to background");
   particles.add(params, "autoBrightness").name("Auto brightness").onChange(() => {
     updateConditionalFolders();
   });
@@ -1244,7 +1290,7 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
       (params as unknown as Record<string, unknown>)[def.prop] = clampNumber(stepped, def.min, effectiveMax);
     }
     // Randomise boolean toggles (frozen excluded)
-    params.fadeToBlack = rand() > 0.5;
+    params.fadeToBackground = rand() > 0.5;
     params.roundParticles = rand() > 0.3;    // bias toward round
     params.bloomEnabled = rand() > 0.5;
     params.ringEnabled = rand() > 0.5;
@@ -1292,8 +1338,15 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
 
   // Track live controllers so we can destroy & recreate on mode switch
   let activeNumericControllers: Controller[] = [];
+  let activeNumericTooltipCleanups: Array<() => void> = [];
+
+  function clearNumericTooltipListeners(): void {
+    for (const cleanup of activeNumericTooltipCleanups) cleanup();
+    activeNumericTooltipCleanups = [];
+  }
 
   function rebuildNumericControllers(override: boolean): void {
+    clearNumericTooltipListeners();
     // Destroy existing numeric controllers
     for (const c of activeNumericControllers) c.destroy();
     activeNumericControllers = [];
@@ -1420,7 +1473,7 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
     readoutCloseBtn.className = "ecsk-readout-close";
     readoutCloseBtn.type = "button";
     readoutCloseBtn.textContent = "Readout";
-    readoutCloseBtn.addEventListener("click", (e) => {
+    addListener(readoutCloseBtn, "click", (e) => {
       e.preventDefault();
       e.stopPropagation();
       readoutGui.close();
@@ -1482,7 +1535,7 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
   // .lil-children.  Using non-animated open()/close() avoids the issue.
   function interceptLandscapeTitleClick(guiInstance: GUI): void {
     if (!isMobile) return;
-    guiInstance.domElement.addEventListener("click", (e) => {
+    addListener(guiInstance.domElement, "click", (e) => {
       if (!landscapeMQ.matches) return;  // portrait: let animated toggle work
 
       const titleEl = guiInstance.domElement.querySelector(":scope > .lil-title, :scope > .title");
@@ -1507,7 +1560,7 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
     if (!isMobile) return;
     const titleEl = guiInstance.domElement.querySelector(".lil-title, .title") as HTMLElement | null;
     if (!titleEl) return;
-    titleEl.addEventListener("click", () => {
+    addListener(titleEl, "click", () => {
       requestAnimationFrame(syncMobilePanelOverlay);
     });
   }
@@ -1526,9 +1579,10 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
       }
       syncMobilePanelOverlay();
     };
-    panelOverlayEl.addEventListener("touchstart", dismissPanels, { capture: true, passive: false });
-    panelOverlayEl.addEventListener("click", dismissPanels, { capture: true });
+    addListener(panelOverlayEl, "touchstart", dismissPanels, { capture: true, passive: false });
+    addListener(panelOverlayEl, "click", dismissPanels, { capture: true });
     document.body.appendChild(panelOverlayEl);
+    addDisposable(() => panelOverlayEl?.remove());
     interceptLandscapeTitleClick(gui);
     interceptLandscapeTitleClick(readoutGui);
     attachMobilePanelDismiss(gui);
@@ -1539,8 +1593,8 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
       cleanupLilGuiTransition(readoutGui);
       syncMobilePanelState();
     }
-    window.addEventListener("resize", onOrientationChange);
-    landscapeMQ.addEventListener("change", onOrientationChange);
+    addListener(window, "resize", onOrientationChange);
+    addListener(landscapeMQ, "change", onOrientationChange);
     syncMobilePanelState();
   }
 
@@ -1610,9 +1664,17 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
   }
 
   // ── Tooltip system ──────────────────────────────────────────────────
+  let tooltipTimer: ReturnType<typeof setTimeout> | null = null;
   const tooltipEl = document.createElement("div");
   tooltipEl.className = "ecsk-tooltip";
   document.body.appendChild(tooltipEl);
+  addDisposable(() => {
+    if (tooltipTimer) {
+      clearTimeout(tooltipTimer);
+      tooltipTimer = null;
+    }
+    tooltipEl.remove();
+  });
 
   // Mobile: overlay blocks all interaction behind the tooltip
   let overlayEl: HTMLDivElement | null = null;
@@ -1622,13 +1684,14 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
     overlayEl = document.createElement("div");
     overlayEl.className = "ecsk-tooltip-overlay";
     document.body.appendChild(overlayEl);
+    addDisposable(() => overlayEl?.remove());
     const dismissMobileTooltip = (e: Event) => {
       e.preventDefault();
       e.stopPropagation();
       hideMobileTooltip();
     };
-    overlayEl.addEventListener("touchstart", dismissMobileTooltip, { capture: true });
-    overlayEl.addEventListener("click", dismissMobileTooltip, { capture: true });
+    addListener(overlayEl, "touchstart", dismissMobileTooltip, { capture: true });
+    addListener(overlayEl, "click", dismissMobileTooltip, { capture: true });
   }
 
   /** Build structured tooltip HTML from a Tooltip object. */
@@ -1665,8 +1728,6 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
       .replace(/"/g, "&quot;")
       .replace(/\n/g, "<br>");
   }
-
-  let tooltipTimer: ReturnType<typeof setTimeout> | null = null;
 
   function showTooltip(el: HTMLElement, tip: Tooltip): void {
     tooltipEl.innerHTML = buildTooltipHTML(tip);
@@ -1723,19 +1784,19 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
     domElement: HTMLElement,
     key: string,
     tooltipMap: Record<string, Tooltip> = TOOLTIPS,
-  ): void {
+  ): (() => void) | null {
     const tip = tooltipMap[key];
-    if (!tip) return;
+    if (!tip) return null;
 
     if (isMobile) {
       // Mobile: add a leading (i) icon that toggles the tooltip via a blocking overlay.
       const nameEl = domElement.querySelector(".name, .lil-name") as HTMLElement | null;
-      if (!nameEl) return;
+      if (!nameEl) return null;
       // FunctionController moves .lil-name inside a <button> — skip info icon
       // (insertBefore requires nameEl to be a direct child of domElement)
-      if (nameEl.parentNode !== domElement) return;
+      if (nameEl.parentNode !== domElement) return null;
       // Don't add duplicate icons (e.g. after rebuild)
-      if (domElement.querySelector(".ecsk-info-btn")) return;
+      if (domElement.querySelector(".ecsk-info-btn")) return null;
 
       // Insert icon as a sibling BEFORE .lil-name inside .lil-controller
       // This leaves lil-gui's name element completely untouched (labels stay visible)
@@ -1753,19 +1814,29 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
         }
         showMobileTooltip(key, tip, infoBtn);
       };
-      infoBtn.addEventListener("click", toggleMobileTooltip);
-      infoBtn.addEventListener("touchend", toggleMobileTooltip);
+      const removeClick = addListener(infoBtn, "click", toggleMobileTooltip);
+      const removeTouch = addListener(infoBtn, "touchend", toggleMobileTooltip);
       // Insert as flex sibling before the name element in .lil-controller
       domElement.insertBefore(infoBtn, nameEl);
       domElement.classList.add("ecsk-has-info");
-      return;
+      return () => {
+        removeClick();
+        removeTouch();
+        if (activeMobileTooltipButton === infoBtn) hideMobileTooltip();
+        infoBtn.remove();
+        domElement.classList.remove("ecsk-has-info");
+      };
     }
 
     // Desktop: hover tooltip with delay
-    domElement.addEventListener("mouseenter", () => {
+    const removeEnter = addListener(domElement, "mouseenter", () => {
       tooltipTimer = setTimeout(() => showTooltip(domElement, tip), 380);
     });
-    domElement.addEventListener("mouseleave", hideTooltip);
+    const removeLeave = addListener(domElement, "mouseleave", hideTooltip);
+    return () => {
+      removeEnter();
+      removeLeave();
+    };
   }
 
   // ── Attach tooltips to non-numeric controllers ────────────────────
@@ -1790,6 +1861,7 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
   for (const ctrl of particles.controllersRecursive()) {
     const prop = (ctrl as unknown as { property: string }).property;
     if (prop === "roundParticles") attachTooltip(ctrl.domElement, "roundParticles");
+    if (prop === "fadeToBackground") attachTooltip(ctrl.domElement, "fadeToBackground");
     if (prop === "autoBrightness") attachTooltip(ctrl.domElement, "autoBrightness");
   }
   for (const ctrl of ring.controllersRecursive()) {
@@ -1809,9 +1881,13 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
 
   // ── Attach tooltips to numeric controllers (re-run after rebuild) ──
   function attachNumericTooltips(): void {
+    clearNumericTooltipListeners();
     for (let i = 0; i < numericDefs.length; i++) {
       const ctrl = activeNumericControllers[i];
-      if (ctrl) attachTooltip(ctrl.domElement, numericDefs[i].prop);
+      if (ctrl) {
+        const cleanup = attachTooltip(ctrl.domElement, numericDefs[i].prop);
+        if (cleanup) activeNumericTooltipCleanups.push(cleanup);
+      }
     }
   }
 
@@ -1844,6 +1920,7 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
   {
     const bar = document.createElement("div");
     bar.id = "bottom-bar";
+    addDisposable(() => bar.remove());
 
     let addToHomeSheetEl: HTMLDivElement | null = null;
 
@@ -1865,6 +1942,13 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
     let peekTimeout: ReturnType<typeof setTimeout> | null = null;
     let immersiveActive = false;
     let immersiveForcedHiddenUi = false;
+    addDisposable(() => {
+      if (peekTimeout) {
+        clearTimeout(peekTimeout);
+        peekTimeout = null;
+      }
+      document.body.classList.remove("ui-hidden", "ui-peek", "ecsk-immersive");
+    });
 
     function hideUI() {
       uiHidden = true;
@@ -1956,12 +2040,12 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
     }
 
     if (showFullscreenButton) {
-      fsBtn.addEventListener("click", () => {
+      addListener(fsBtn, "click", () => {
         void toggleFullscreenMode();
       });
-      document.addEventListener("fullscreenchange", updateFsIcon);
-      document.addEventListener("webkitfullscreenchange", updateFsIcon);
-      document.addEventListener("fullscreenerror", () => {
+      addListener(document, "fullscreenchange", updateFsIcon);
+      addListener(document, "webkitfullscreenchange", updateFsIcon);
+      addListener(document, "fullscreenerror", () => {
         if (isMobile || fullscreenSupport.iosBrowser) {
           enterImmersiveMode();
           updateFsIcon();
@@ -1989,18 +2073,18 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
       }, 3000);
     }
 
-    uiBtn.addEventListener("click", (e) => {
+    addListener(uiBtn, "click", (e) => {
       e.stopPropagation();
       if (uiHidden) showUI(); else hideUI();
     });
 
     // Desktop: mouse movement reveals the bar when UI is hidden
     if (!isMobile) {
-      document.addEventListener("mousemove", peekBar);
+      addListener(document, "mousemove", peekBar);
     }
     // Mobile: tap anywhere reveals the bar when UI is hidden
     if (isMobile) {
-      document.addEventListener("touchstart", (e) => {
+      addListener(document, "touchstart", (e) => {
         if (!uiHidden) return;
         if (bar.contains(e.target as Node)) return;
         peekBar();
@@ -2012,14 +2096,14 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
     diceBtn.className = "bar-btn";
     diceBtn.title = "Randomize settings";
     diceBtn.innerHTML = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8.5" cy="8.5" r="1.2" fill="currentColor" stroke="none"/><circle cx="15.5" cy="8.5" r="1.2" fill="currentColor" stroke="none"/><circle cx="8.5" cy="15.5" r="1.2" fill="currentColor" stroke="none"/><circle cx="15.5" cy="15.5" r="1.2" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.2" fill="currentColor" stroke="none"/></svg>`;
-    diceBtn.addEventListener("click", () => { params.randomSettings(); });
+    addListener(diceBtn, "click", () => { params.randomSettings(); });
 
     if (showAddToHomeScreen) {
       const addBtn = document.createElement("button");
       addBtn.className = "bar-btn";
       addBtn.title = "Add to Home Screen";
       addBtn.innerHTML = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4"/><path d="M8 8l4-4 4 4"/><path d="M5 14v5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-5"/></svg>`;
-      addBtn.addEventListener("click", openAddToHomeSheet);
+      addListener(addBtn, "click", openAddToHomeSheet);
       bar.appendChild(addBtn);
 
       addToHomeSheetEl = document.createElement("div");
@@ -2035,14 +2119,15 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
             <div>3. Launch the app from your home screen for the cleanest iPhone experience.</div>
           </div>
         </div>`;
-      addToHomeSheetEl.addEventListener("click", (event) => {
+      addListener(addToHomeSheetEl, "click", (event) => {
         if (event.target === addToHomeSheetEl) {
           closeAddToHomeSheet();
         }
       });
       const closeBtn = addToHomeSheetEl.querySelector(".ecsk-add-to-home-close") as HTMLButtonElement | null;
-      closeBtn?.addEventListener("click", closeAddToHomeSheet);
+      if (closeBtn) addListener(closeBtn, "click", closeAddToHomeSheet);
       document.body.appendChild(addToHomeSheetEl);
+      addDisposable(() => addToHomeSheetEl?.remove());
     }
 
     // — Force HDR button (mobile only) —
@@ -2053,7 +2138,7 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
       const hdrOffSVG = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><text x="12" y="14" text-anchor="middle" font-size="7" font-weight="bold" fill="currentColor" stroke="none">HDR</text></svg>`;
       const hdrOnSVG = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#6cf" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><text x="12" y="14" text-anchor="middle" font-size="7" font-weight="bold" fill="#6cf" stroke="none">HDR</text></svg>`;
       forceHDRBtn.innerHTML = hdrOffSVG;
-      forceHDRBtn.addEventListener("click", () => {
+      addListener(forceHDRBtn, "click", () => {
         params.forceHDR = !params.forceHDR;
         forceHDRBtn!.innerHTML = params.forceHDR ? hdrOnSVG : hdrOffSVG;
         onForceHDR?.(params.forceHDR);
@@ -2091,5 +2176,24 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
     }
   }
 
-  return { gui, readoutGui, params, hud, updateHUD, setHDRMode, setForceHDRCallback, updateTargetFpsLabel, manualOverrides, setOverridesCallback, updateParticleRateMax };
+  function dispose(): void {
+    if (disposed) return;
+    disposed = true;
+    if (activeControlsDispose === dispose) activeControlsDispose = null;
+    while (disposables.length > 0) {
+      const cleanup = disposables.pop()!;
+      try {
+        cleanup();
+      } catch (e) {
+        console.warn("[controls] Disposal callback failed", e);
+      }
+    }
+    clearNumericTooltipListeners();
+    gui.destroy();
+    readoutGui.destroy();
+  }
+
+  activeControlsDispose = dispose;
+
+  return { gui, readoutGui, params, hud, updateHUD, setHDRMode, setForceHDRCallback, updateTargetFpsLabel, manualOverrides, setOverridesCallback, updateParticleRateMax, dispose };
 }

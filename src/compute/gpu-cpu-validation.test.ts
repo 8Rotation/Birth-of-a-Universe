@@ -67,7 +67,7 @@ function evaluatePerturbationF32(
   const fCosT = f(cosT);
   const fSinT = f(sinT);
   const SQRT2 = f(1.4142135623730951);
-  const INV_4PI = f(0.07957747154594767);
+  const LOG_4PI = f(2.5310242469692907);
 
   const cosPhi = f(Math.cos(phi));
   const sinPhi = f(Math.sin(phi));
@@ -86,8 +86,11 @@ function evaluatePerturbationF32(
       sinMPhi = s;
     }
 
-    let fac = f(1.0);
-    for (let i = 1; i <= 2 * m; i++) fac = f(fac * i);
+    let logFactorial2m = f(0.0);
+    for (let i = 1; i <= 2 * m; i++) {
+      logFactorial2m = f(logFactorial2m + f(Math.log(f(i))));
+    }
+    let norm2 = f(Math.exp(f(f(Math.log(f(2 * m + 1))) - LOG_4PI - logFactorial2m)));
 
     let plm_prev = f(0);
     let plm_curr = f(pmm);
@@ -100,12 +103,12 @@ function evaluatePerturbationF32(
         );
         plm_prev = plm_curr;
         plm_curr = plm_next;
-        fac = f(fac * f(f(l + m) / f(l - m)));
+        norm2 = f(norm2 * f(f(f(f(2 * l + 1) / f(2 * l - 1))) * f(f(l - m) / f(l + m))));
       }
 
       if (l < 1) continue;
 
-      const norm = f(Math.sqrt(f(f(2 * l + 1) * INV_4PI / fac)));
+      const norm = f(Math.sqrt(norm2));
 
       if (m === 0) {
         const idx = l * l + l - 1;
@@ -411,17 +414,12 @@ describe("visual encoding f32 precision", () => {
 // ═════════════════════════════════════════════════════════════════════════
 
 describe("GPU integration", () => {
-  test.skip("dispatch 1000 particles and compare to CPU reference (requires WebGPU)", () => {
-    // This test requires a real GPUDevice (Chromium with WebGPU).
-    // Run via Playwright browser test: src/compute/gpu-integration.spec.ts
-    //
-    // When WebGPU is available, this test would:
-    //   1. Create a minimal compute pipeline with particle-emit.wgsl
-    //   2. Dispatch 1000 particles with known parameters
-    //   3. Read back the output buffer via mapAsync
-    //   4. Compare each particle's [lx, ly, arrivalTime, hue, brightness, eps, hitSize]
-    //      against CPU-computed values for the same PCG PRNG sequence
-    //   5. Assert all values match within f32 tolerances established above
+  // The real GPU dispatch + readback comparison runs under Playwright
+  // (see tests-e2e/gpu-validation.spec.ts and tests-e2e/harness.ts) —
+  // chromium with --use-vulkan=swiftshader provides a WebGPU device that
+  // Vitest under Node cannot. Run via `npm run test:e2e`.
+  test.skip("dispatch and compare to CPU reference (moved to Playwright)", () => {
+    /* see tests-e2e/gpu-validation.spec.ts */
   });
 });
 

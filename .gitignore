@@ -4,6 +4,10 @@ node_modules/
 # Build output
 dist/
 
+# Playwright (Task A3 / GPU-02)
+playwright-report/
+test-results/
+
 # Python (extraction tools, no longer needed)
 .venv/
 __pycache__/

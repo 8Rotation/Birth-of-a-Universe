@@ -8,8 +8,8 @@
  *   - Position: Lambert projection of (θ,φ) on S²
  *   - Hue:  effective equation of state w_eff (amber → violet)
  *   - Brightness: energy density at bounce (ε = 1/a_min⁴)
- *   - Alpha: exponential decay (persistence)
- *   - Bloom: physically-motivated glow from additive blending
+ *   - Fade: transparent by default, background-colour mask as opt-in
+ *   - Bloom: physically-motivated glow in the transparent/additive mode
  *
  * The disk radius is 2 (matching the Lambert projection radius),
  * viewed with an orthographic camera looking down -Z.
@@ -206,7 +206,9 @@ export class SensorRenderer {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private _uPixelToWorld!: any;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private _uFadeToBlack!: any;  // 0=transparent, 1=black
+  private _uFadeToBackground!: any;  // 0=transparent, 1=background colour
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private _uBackgroundColor!: any;
 
   // ── Alive-range uniforms (Task 4) ──────────────────────────────────
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -220,7 +222,9 @@ export class SensorRenderer {
   useBloom = true;
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private _bloomNode: any = null;
+  private _bloomPass: any = null;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private _scenePass: any = null;
 
   // TSL uniform multiplier — gate bloom in the composite.
   // Setting the bloom node's strength to 0 alone is not enough because
@@ -236,6 +240,7 @@ export class SensorRenderer {
   private _lastGlowWidth = -1;  // track for geometry rebuild
 
   private _ready = false;
+  private _disposed = false;
 
   // GPU buffer capacity — starts at initialCapacity and doubles when exceeded.
   // There is no fixed upper bound; the system adapts to however many hits
@@ -253,7 +258,7 @@ export class SensorRenderer {
   /** Hardware-tier resolved quality for 'auto' mode (set by main.ts). */
   bloomAutoResolvedQuality: 'high' | 'low' = 'high';
   fadeSharpness = 1.0;
-  fadeToBlack = false;
+  fadeToBackground = false;
 
   // Color tuning
   lightnessFloor = 0.20;
@@ -292,6 +297,7 @@ export class SensorRenderer {
   // ── Scene controls ─────────────────────────────────────────────────
   /** Background colour (CSS hex). Applied via setClearColor each frame. */
   backgroundColor = 0x000000;
+  private _backgroundColorUniform = new THREE.Color(0x000000);
   /** Orthographic zoom multiplier (1.0 = default framing). */
   zoom = 1.0;
   /** Arrival spread (seconds) — used to extend alive-range cutoff so the
@@ -594,6 +600,7 @@ export class SensorRenderer {
   async init(screenInfo?: ScreenInfo): Promise<void> {
     console.log("[sensor] Initializing WebGPU...");
     await this.renderer.init();
+    if (this._disposed) return;
     console.log("[sensor] WebGPU ready");
 
     // ── HDR pipeline setup (must happen BEFORE scene/pipeline creation
@@ -668,7 +675,9 @@ export class SensorRenderer {
     // Fire bloom compilation after the first frame renders.
     // requestAnimationFrame ensures the first paint happens without
     // bloom shader compilation blocking it.
-    requestAnimationFrame(() => this._initBloom());
+    requestAnimationFrame(() => {
+      if (!this._disposed) this._initBloom();
+    });
   }
 
   /**
@@ -682,11 +691,15 @@ export class SensorRenderer {
    * Ring glow is handled by a separate shader mesh (no bloom chain needed).
    */
   private _initBloom(): void {
+    if (this._disposed || !this._ready) return;
+
     try {
+      this._disposePostProcessing();
       this.pipeline = new RenderPipeline(this.renderer);
 
       // Single scene pass — particles + disk ring + glow ring all in one
       const scenePass = pass(this.scene, this.camera);
+      this._scenePass = scenePass;
       const scenePassColor = scenePass.getTextureNode("output");
 
       // Bloom computed from the single scene pass (particles dominate;
@@ -697,7 +710,7 @@ export class SensorRenderer {
         this.bloomRadius,
         this.bloomThreshold,
       );
-      this._bloomNode = bloomNode;
+      this._bloomPass = bloomNode;
 
       // ── Bloom resolution cap: always cap at 1080p equivalent ─────────
       const origSetSize = bloomNode.setSize.bind(bloomNode);
@@ -723,6 +736,7 @@ export class SensorRenderer {
       this.useBloom = true;
       console.log("[sensor] Bloom enabled (single scene pass + shader glow ring)");
     } catch (e) {
+      this._disposePostProcessing();
       console.warn("[sensor] Bloom compilation failed, falling back:", e);
       this.useBloom = false;
     }
@@ -836,7 +850,8 @@ export class SensorRenderer {
     this._uMinEps = uniform(10.0);
     this._uMaxEps = uniform(10000.0);
     this._uPixelToWorld = uniform(1.0); // updated each frame
-    this._uFadeToBlack = uniform(0.0);   // 0 = fade to transparent, 1 = fade to black
+    this._uFadeToBackground = uniform(0.0);   // 0 = transparent, 1 = background colour
+    this._uBackgroundColor = uniform(this._backgroundColorUniform);
 
     // Alive-range uniforms: skip dead particles early in the vertex shader
     this._uAliveStart = uniform(0.0);
@@ -900,7 +915,8 @@ export class SensorRenderer {
     const SDR_WHITE_F = float(SDR_REFERENCE_WHITE_NITS);
     const SDR_BRI_REF = float(SensorRenderer.SDR_BRIGHTNESS_REF);
 
-    const uFadeToBlack = this._uFadeToBlack;
+    const uFadeToBackground = this._uFadeToBackground;
+    const uBackgroundColor = this._uBackgroundColor;
 
     const colorNode = Fn(() => {
       // ── SDR path ──────────────────────────────────────────────────
@@ -924,12 +940,12 @@ export class SensorRenderer {
       const rgb = mix(sdrRgb, hdrRgb, isHdr);
       const scale = mix(sdrScale, hdrScale, isHdr);
 
-      // Apply auto-gain and peak clamp, gate by alive (dead → vec3(0))
+      // Apply auto-gain and peak clamp, gate by alive (dead -> vec3(0))
       const finalScale = min(scale.mul(uAutoGain), uPeakScale);
-      // fadeToBlack=1: fade baked into RGB (particles darken toward black).
-      // fadeToBlack=0: fade handled in alpha (particles become transparent).
-      const colorFade = mix(float(1.0), fade, uFadeToBlack);
-      return rgb.mul(finalScale).mul(alive).mul(colorFade);
+      const litRgb = rgb.mul(finalScale);
+      const backgroundFadeRgb = mix(uBackgroundColor, litRgb, fade);
+      const finalRgb = mix(litRgb, backgroundFadeRgb, uFadeToBackground);
+      return finalRgb.mul(alive);
     })();
 
     // ── Circular clipping (same as old material) ────────────────────
@@ -941,9 +957,9 @@ export class SensorRenderer {
       const innerR = float(CIRCLE_OUTER_R).sub(softEdgeU);
       const circle = smoothstep(float(CIRCLE_OUTER_R), innerR, dist);
       const shapeAlpha = mix(float(1.0), circle, roundU);
-      // fadeToBlack=0: fade via alpha so particles become transparent.
-      // fadeToBlack=1: alpha is shape-only (fade already in RGB).
-      const alphaFade = mix(fade, float(1.0), uFadeToBlack);
+      // Transparent mode fades via alpha. Background mode keeps the shape
+      // opaque while RGB fades to the clear colour, so overlaps can mask.
+      const alphaFade = mix(fade, float(1.0), uFadeToBackground);
       return shapeAlpha.mul(alphaFade).mul(alive);
     });
 
@@ -978,7 +994,14 @@ export class SensorRenderer {
     this._uLightnessRange.value = this.lightnessRange;
     this._uSaturationFloor.value = this.saturationFloor;
     this._uSaturationRange.value = this.saturationRange;
-    this._uFadeToBlack.value = this.fadeToBlack ? 1.0 : 0.0;
+    this._uFadeToBackground.value = this.fadeToBackground ? 1.0 : 0.0;
+    this._backgroundColorUniform.setHex(this.backgroundColor);
+
+    const particleBlending = this.fadeToBackground ? THREE.NormalBlending : THREE.AdditiveBlending;
+    if (this.material.blending !== particleBlending) {
+      this.material.blending = particleBlending;
+      this.material.needsUpdate = true;
+    }
 
     // HDR mode uniform
     const hdrModeNum = this._hdrMode === 'full' ? 2.0
@@ -1180,10 +1203,10 @@ export class SensorRenderer {
     const particleBloomActive = this.particleBloomEnabled && this.bloomStrength > 0;
 
     if (particleBloomActive && this.useBloom && this.pipeline) {
-      if (this._bloomNode) {
-        this._bloomNode.strength.value  = this.bloomStrength;
-        this._bloomNode.radius.value    = 1 - this.bloomRadius;
-        this._bloomNode.threshold.value = this.bloomThreshold;
+      if (this._bloomPass) {
+        this._bloomPass.strength.value  = this.bloomStrength;
+        this._bloomPass.radius.value    = 1 - this.bloomRadius;
+        this._bloomPass.threshold.value = this.bloomThreshold;
       }
       if (this._particleBloomMul) {
         this._particleBloomMul.value = 1.0;
@@ -1218,28 +1241,39 @@ export class SensorRenderer {
     try { this.pipeline?.setSize?.(w, h); } catch { /* noop */ }
   }
 
+  private _disposePostProcessing(): void {
+    const pipeline = this.pipeline as unknown as { dispose?: () => void } | null;
+    try { pipeline?.dispose?.(); } catch (e) { console.warn("[sensor] pipeline dispose failed:", e); }
+    try { this._bloomPass?.dispose?.(); } catch (e) { console.warn("[sensor] bloom dispose failed:", e); }
+    try { this._scenePass?.dispose?.(); } catch (e) { console.warn("[sensor] scene pass dispose failed:", e); }
+    this.pipeline = null;
+    this._bloomPass = null;
+    this._scenePass = null;
+    this._particleBloomMul = null;
+    this.useBloom = false;
+  }
+
   dispose(): void {
+    if (this._disposed) return;
+    this._disposed = true;
+    this._ready = false;
+
+    this._disposePostProcessing();
+
     // Remove canvas from DOM
     this.renderer.domElement.remove();
 
-    // Dispose GPU pipeline / bloom resources
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    if (this.pipeline && typeof (this.pipeline as any).dispose === 'function') {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (this.pipeline as any).dispose();
-    }
-
     // Dispose ring geometry + material
-    this.diskRing?.geometry.dispose();
+    this.diskRing?.geometry?.dispose?.();
     this._ringMaterial?.dispose();
 
     // Dispose glow ring
-    this._glowRing?.geometry.dispose();
+    this._glowRing?.geometry?.dispose?.();
     this._glowRingMaterial?.dispose();
 
     // Particle mesh + material
-    this._particleGeometry.dispose();
-    this.material.dispose();
+    this._particleGeometry?.dispose?.();
+    this.material?.dispose?.();
 
     // Renderer last (invalidates the GL/WebGPU context)
     this.renderer.dispose();

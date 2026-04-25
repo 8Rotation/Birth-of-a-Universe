@@ -76,7 +76,7 @@ struct Params {
 const PI: f32 = 3.141592653589793;
 const TWO_PI: f32 = 6.283185307179586;
 const SQRT2: f32 = 1.4142135623730951;
-const INV_4PI: f32 = 0.07957747154594767;
+const LOG_4PI: f32 = 2.5310242469692907;
 const EPS_LOG_REF: f32 = 9.210440366976517;  // ln(10001)
 const PP_SCATTER_BIAS: f32 = -0.6;
 
@@ -208,18 +208,21 @@ fn evalPerturbation(cosT: f32, sinT: f32, phi: f32) -> f32 {
       sinMPhi = s;
     }
 
-    // Initial normalization factorial: fac = (2m)!
-    var fac: f32 = 1.0;
+    // Initial squared normalization at l = m:
+    // N_m^m^2 = (2m+1) / (4π * (2m)!). Use log((2m)!) so the
+    // WGSL f32 path mirrors the CPU oracle without materialising (2m)!.
+    var logFactorial2m: f32 = 0.0;
     for (var i: u32 = 1u; i <= 2u * m; i = i + 1u) {
-      fac *= f32(i);
+      logFactorial2m += log(f32(i));
     }
+    var norm2 = exp(log(f32(2u * m + 1u)) - LOG_4PI - logFactorial2m);
 
     // Upward recurrence in l for fixed m
     var plm_prev: f32 = 0.0;
     var plm_curr: f32 = pmm;
 
     for (var l: u32 = m; l <= lMax; l = l + 1u) {
-      // Advance Legendre and fac for l > m
+      // Advance Legendre and norm2 for l > m
       if (l > m) {
         let plm_next =
           ((2.0 * f32(l) - 1.0) * cosT * plm_curr - (f32(l + m) - 1.0) * plm_prev) /
@@ -227,8 +230,9 @@ fn evalPerturbation(cosT: f32, sinT: f32, phi: f32) -> f32 {
         plm_prev = plm_curr;
         plm_curr = plm_next;
 
-        // fac(l) = fac(l−1) × (l+m) / (l−m)
-        fac *= f32(l + m) / f32(l - m);
+        // N_l^m^2 / N_{l-1}^m^2 = ((2l+1)/(2l-1)) * ((l-m)/(l+m))
+        norm2 *= ((2.0 * f32(l) + 1.0) / (2.0 * f32(l) - 1.0)) *
+          (f32(l - m) / f32(l + m));
       }
 
       // No l=0 modes in the coefficient array
@@ -236,8 +240,8 @@ fn evalPerturbation(cosT: f32, sinT: f32, phi: f32) -> f32 {
         continue;
       }
 
-      // N_l^m = √((2l+1) / (4π · fac))
-      let norm = sqrt((2.0 * f32(l) + 1.0) * INV_4PI / fac);
+      // N_l^m = sqrt(norm2)
+      let norm = sqrt(norm2);
 
       if (m == 0u) {
         // Y_l^0 = N · P_l^0

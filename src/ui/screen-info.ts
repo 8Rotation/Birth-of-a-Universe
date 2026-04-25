@@ -95,15 +95,15 @@ interface DetailedScreenLike {
   label?: string;
   isInternal?: boolean;
   isPrimary?: boolean;
-  addEventListener?: (type: string, listener: EventListenerOrEventListenerObject) => void;
-  removeEventListener?: (type: string, listener: EventListenerOrEventListenerObject) => void;
+  addEventListener?: (type: string, listener: EventListenerOrEventListenerObject, options?: boolean | AddEventListenerOptions) => void;
+  removeEventListener?: (type: string, listener: EventListenerOrEventListenerObject, options?: boolean | EventListenerOptions) => void;
 }
 
 interface ScreenDetailsLike {
   currentScreen?: DetailedScreenLike;
   screens?: DetailedScreenLike[];
-  addEventListener?: (type: string, listener: EventListenerOrEventListenerObject) => void;
-  removeEventListener?: (type: string, listener: EventListenerOrEventListenerObject) => void;
+  addEventListener?: (type: string, listener: EventListenerOrEventListenerObject, options?: boolean | AddEventListenerOptions) => void;
+  removeEventListener?: (type: string, listener: EventListenerOrEventListenerObject, options?: boolean | EventListenerOptions) => void;
 }
 
 interface NativeRefreshRateInfo {
@@ -324,7 +324,20 @@ interface RefreshMeasurement {
   intervalMs: number;
   vrrDetected: boolean;
   vrrRange: [number, number] | null;
+  degraded?: boolean;
 }
+
+interface RefreshSamples {
+  samples: number[];
+  degraded: boolean;
+}
+
+type ListenerLike = {
+  addEventListener?: (type: string, listener: EventListenerOrEventListenerObject, options?: boolean | AddEventListenerOptions) => void;
+  removeEventListener?: (type: string, listener: EventListenerOrEventListenerObject, options?: boolean | EventListenerOptions) => void;
+};
+
+const RAF_MIN_EXPECTED_HZ = 24;
 
 function isExtendedDesktop(screenLike?: ExtendedScreenLike | null): boolean {
   return Boolean(screenLike?.isExtended);
@@ -379,13 +392,45 @@ function nativeRefreshRate(currentScreen?: DetailedScreenLike | null): NativeRef
  * Single rAF measurement pass — collects frame intervals.
  * Uses a larger sample count (60) and skips warmup frames.
  */
-function singleMeasurementPass(sampleCount = 60, warmupFrames = 10): Promise<number[]> {
+function fallbackRefreshMeasurement(degraded = true): RefreshMeasurement {
+  return { hz: 60, intervalMs: 16.667, vrrDetected: false, vrrRange: null, degraded };
+}
+
+function singleMeasurementPass(
+  sampleCount = 60,
+  warmupFrames = 10,
+  isAborted: () => boolean = () => false,
+): Promise<RefreshSamples> {
   return new Promise((resolve) => {
     const samples: number[] = [];
     let prev = 0;
     let frame = 0;
+    let rafId = 0;
+    let done = false;
+    const start = performance.now();
+    const frameLimit = sampleCount + warmupFrames + 20;
+    // LIFE-08: cap rAF measurement at 2x the wall-clock budget implied by
+    // the slowest display rate we expect to support. This prevents init from
+    // hanging indefinitely in throttled tabs; callers receive partial samples
+    // with `degraded: true` and fall back to conservative defaults if needed.
+    const maxElapsedMs = Math.max(1000, (frameLimit * 1000 / RAF_MIN_EXPECTED_HZ) * 2);
+
+    function finish(degraded: boolean): void {
+      if (done) return;
+      done = true;
+      if (rafId) cancelAnimationFrame(rafId);
+      clearTimeout(timeoutId);
+      resolve({ samples, degraded });
+    }
+
+    const timeoutId = setTimeout(() => finish(true), maxElapsedMs);
 
     function tick(ts: number) {
+      if (isAborted()) {
+        finish(true);
+        return;
+      }
+
       if (prev > 0) {
         frame++;
         const dt = ts - prev;
@@ -396,14 +441,15 @@ function singleMeasurementPass(sampleCount = 60, warmupFrames = 10): Promise<num
       }
       prev = ts;
 
-      if (samples.length < sampleCount && frame < sampleCount + warmupFrames + 20) {
-        requestAnimationFrame(tick);
+      const elapsed = performance.now() - start;
+      if (samples.length < sampleCount && frame < frameLimit && elapsed < maxElapsedMs) {
+        rafId = requestAnimationFrame(tick);
       } else {
-        resolve(samples);
+        finish(samples.length < sampleCount || elapsed >= maxElapsedMs);
       }
     }
 
-    requestAnimationFrame(tick);
+    rafId = requestAnimationFrame(tick);
   });
 }
 
@@ -411,9 +457,9 @@ function singleMeasurementPass(sampleCount = 60, warmupFrames = 10): Promise<num
  * Analyse a set of frame-interval samples and return the Hz + VRR info.
  * Uses a trimmed mean (discarding top/bottom 10%) for robustness.
  */
-function analyseIntervals(samples: number[]): RefreshMeasurement {
+function analyseIntervals(samples: number[], degraded = false): RefreshMeasurement {
   if (samples.length < 8) {
-    return { hz: 60, intervalMs: 16.667, vrrDetected: false, vrrRange: null };
+    return fallbackRefreshMeasurement(true);
   }
 
   // Sort ascending
@@ -452,7 +498,7 @@ function analyseIntervals(samples: number[]): RefreshMeasurement {
     `CV=${cv.toFixed(3)}${vrrDetected ? ` → VRR detected (est. ${vrrRange![0]}-${vrrRange![1]} Hz)` : " → fixed rate"}`
   );
 
-  return { hz: snappedHz, intervalMs: median, vrrDetected, vrrRange };
+  return { hz: snappedHz, intervalMs: median, vrrDetected, vrrRange, degraded };
 }
 
 /**
@@ -464,30 +510,44 @@ function analyseIntervals(samples: number[]): RefreshMeasurement {
  *
  * Also analyses frame-time variance to detect VRR (variable refresh rate).
  */
-function measureRefreshRate(currentScreen?: DetailedScreenLike | null): Promise<RefreshMeasurement> {
+function measureRefreshRate(
+  currentScreen?: DetailedScreenLike | null,
+  isAborted: () => boolean = () => false,
+): Promise<RefreshMeasurement> {
   return new Promise(async (resolve) => {
+    if (isAborted()) {
+      resolve(fallbackRefreshMeasurement(true));
+      return;
+    }
+
     // ── Attempt 1: native API (instant, most reliable) ──────────
     const native = nativeRefreshRate(currentScreen);
     if (native !== null) {
       const snapped = snapToCommonRate(native.rate);
       // Still do a quick rAF pass for VRR detection
-      const samples = await singleMeasurementPass(40, 5);
-      const analysis = analyseIntervals(samples);
+      const pass = await singleMeasurementPass(40, 5, isAborted);
+      const analysis = analyseIntervals(pass.samples, pass.degraded);
       resolve({
         hz: snapped,
         intervalMs: 1000 / snapped,
         vrrDetected: analysis.vrrDetected,
         vrrRange: analysis.vrrRange,
+        degraded: pass.degraded,
       });
       return;
     }
 
     // ── Attempt 2: two rAF measurement passes with consensus ────
-    const samples1 = await singleMeasurementPass(60, 10);
-    const pass1 = analyseIntervals(samples1);
+    const samples1 = await singleMeasurementPass(60, 10, isAborted);
+    const pass1 = analyseIntervals(samples1.samples, samples1.degraded);
 
-    const samples2 = await singleMeasurementPass(60, 5);
-    const pass2 = analyseIntervals(samples2);
+    if (isAborted()) {
+      resolve({ ...pass1, degraded: true });
+      return;
+    }
+
+    const samples2 = await singleMeasurementPass(60, 5, isAborted);
+    const pass2 = analyseIntervals(samples2.samples, samples2.degraded);
 
     let finalHz: number;
     if (pass1.hz === pass2.hz) {
@@ -515,6 +575,7 @@ function measureRefreshRate(currentScreen?: DetailedScreenLike | null): Promise<
       intervalMs: bestPass.intervalMs,
       vrrDetected: bestPass.vrrDetected,
       vrrRange: bestPass.vrrRange,
+      degraded: pass1.degraded || pass2.degraded,
     });
   });
 }
@@ -711,9 +772,18 @@ export class ScreenDetector {
   private _screenDetails: ScreenDetailsLike | null = null;
   private _currentScreen: DetailedScreenLike | null = null;
   private _initialized = false;
+  private _aborted = false;
+  private _disposables: Array<() => void> = [];
   private _remeasureTimer: ReturnType<typeof setTimeout> | null = null;
+  private _displayChangeTimer: ReturnType<typeof setTimeout> | null = null;
   private _screenDetailsHandler = () => this._onDisplayChange();
   private _currentScreenHandler = () => this._onDisplayChange();
+  private _resizeHandler = () => this._onResize();
+  private _orientationHandler = () => this._onResize();
+  private _hdrHandler = () => this._onHdrChange();
+  private _dprCleanup: (() => void) | null = null;
+  private _screenDetailsCleanup: (() => void) | null = null;
+  private _currentScreenCleanup: (() => void) | null = null;
 
   /**
    * One-time async initialization.
@@ -721,37 +791,38 @@ export class ScreenDetector {
    * probes HDR / gamut / brightness in parallel.
    */
   async init(): Promise<ScreenInfo> {
+    this._aborted = false;
     this._screenDetails = await getScreenDetails();
+    if (this._aborted) return this.info;
     this._currentScreen = this._screenDetails?.currentScreen ?? null;
 
     // Run refresh measurement and static detection concurrently
     const [refresh] = await Promise.all([
-      measureRefreshRate(this._currentScreen),
+      measureRefreshRate(this._currentScreen, () => this._aborted),
       this._detectDisplayCapabilities(),
     ]);
+    if (this._aborted) return this.info;
 
     this._refresh = refresh;
     this._info = buildInfo(refresh, this._hdrCapable, this._colorGamut, this._peakNits, this._currentScreen);
     this._initialized = true;
 
     // Listen for resize / orientation changes
-    window.addEventListener("resize", () => this._onResize());
-    window.addEventListener("orientationchange", () => this._onResize());
+    this._addListener(window, "resize", this._resizeHandler);
+    this._addListener(window, "orientationchange", this._orientationHandler);
 
     // DPR changes (e.g. dragging to a different monitor)
     this._watchDpr();
 
     // Screen object changes are the most direct signal that the window moved
     // to a different monitor, even when the viewport size does not change.
-    (window.screen as Screen & {
-      addEventListener?: (type: string, listener: EventListenerOrEventListenerObject) => void;
-    }).addEventListener?.("change", this._screenDetailsHandler);
+    this._addListener(window.screen as Screen & ListenerLike, "change", this._screenDetailsHandler);
 
     this._watchScreenDetails();
 
     // HDR media query changes (e.g. user toggles HDR in display settings)
     const mqHdr = window.matchMedia("(dynamic-range: high)");
-    mqHdr.addEventListener("change", () => this._onHdrChange());
+    this._addListener(mqHdr, "change", this._hdrHandler);
 
     console.log(`[screen] ${this._info.summary}`);
     return this._info;
@@ -776,8 +847,10 @@ export class ScreenDetector {
 
   /** Force a re-measurement of refresh rate. */
   async remeasureRefreshRate(): Promise<void> {
+    if (this._aborted) return;
     this._currentScreen = this._screenDetails?.currentScreen ?? this._currentScreen;
-    const refresh = await measureRefreshRate(this._currentScreen);
+    const refresh = await measureRefreshRate(this._currentScreen, () => this._aborted);
+    if (this._aborted) return;
     const changed = refresh.hz !== this._refresh.hz ||
                     refresh.vrrDetected !== this._refresh.vrrDetected;
     if (changed) {
@@ -794,13 +867,16 @@ export class ScreenDetector {
   // ── Internal: detect static display features ─────────────────────
 
   private async _detectDisplayCapabilities(): Promise<void> {
+    if (this._aborted) return;
     this._hdrCapable = detectHDR();
     this._colorGamut = detectColorGamut();
     if (this._screenDetails === null) {
       this._screenDetails = await getScreenDetails();
     }
+    if (this._aborted) return;
     this._currentScreen = this._screenDetails?.currentScreen ?? this._currentScreen;
     this._peakNits = await detectPeakBrightness(this._hdrCapable);
+    if (this._aborted) return;
 
     if (this._hdrCapable) {
       console.log(
@@ -818,25 +894,50 @@ export class ScreenDetector {
   private _dprHandler = () => this._onDisplayChange();
 
   private _watchDpr(): void {
-    if (this._dprMq) {
-      this._dprMq.removeEventListener("change", this._dprHandler);
-    }
+    this._dprCleanup?.();
+    this._dprCleanup = null;
     this._dprMq = window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`);
-    this._dprMq.addEventListener("change", this._dprHandler);
+    this._dprCleanup = this._addListener(this._dprMq, "change", this._dprHandler);
   }
 
   private _watchScreenDetails(): void {
-    this._screenDetails?.removeEventListener?.("currentscreenchange", this._screenDetailsHandler);
-    this._screenDetails?.addEventListener?.("currentscreenchange", this._screenDetailsHandler);
+    this._screenDetailsCleanup?.();
+    this._screenDetailsCleanup = this._addListener(this._screenDetails, "currentscreenchange", this._screenDetailsHandler);
 
-    this._currentScreen?.removeEventListener?.("change", this._currentScreenHandler);
+    this._currentScreenCleanup?.();
     this._currentScreen = this._screenDetails?.currentScreen ?? this._currentScreen;
-    this._currentScreen?.addEventListener?.("change", this._currentScreenHandler);
+    this._currentScreenCleanup = this._addListener(this._currentScreen, "change", this._currentScreenHandler);
+  }
+
+  private _addDisposable(disposeFn: () => void): () => void {
+    let active = true;
+    const run = () => {
+      if (!active) return;
+      active = false;
+      const idx = this._disposables.indexOf(run);
+      if (idx >= 0) this._disposables.splice(idx, 1);
+      disposeFn();
+    };
+    this._disposables.push(run);
+    return run;
+  }
+
+  private _addListener(
+    target: ListenerLike | EventTarget | null | undefined,
+    type: string,
+    listener: EventListenerOrEventListenerObject,
+    options?: boolean | AddEventListenerOptions,
+  ): (() => void) | null {
+    const listenerTarget = target as ListenerLike | null | undefined;
+    if (typeof listenerTarget?.addEventListener !== "function") return null;
+    listenerTarget.addEventListener(type, listener, options);
+    return this._addDisposable(() => listenerTarget.removeEventListener?.(type, listener, options));
   }
 
   // ── Event handlers ────────────────────────────────────────────────
 
   private _onResize(): void {
+    if (this._aborted) return;
     this._update();
     // Re-measure refresh rate after resize settles (monitor switch)
     if (this._remeasureTimer) clearTimeout(this._remeasureTimer);
@@ -844,26 +945,34 @@ export class ScreenDetector {
   }
 
   private _onDisplayChange(): void {
+    if (this._aborted) return;
     console.log(`[screen] Display change detected → DPR ${window.devicePixelRatio}`);
     this._watchDpr(); // re-register for the new DPR value
     this._update();
     // Re-measure refresh rate + re-detect HDR (new monitor may differ)
-    setTimeout(async () => {
+    if (this._displayChangeTimer) clearTimeout(this._displayChangeTimer);
+    this._displayChangeTimer = setTimeout(async () => {
+      this._displayChangeTimer = null;
+      if (this._aborted) return;
       this._screenDetails = await getScreenDetails();
+      if (this._aborted) return;
       this._watchScreenDetails();
       await this._detectDisplayCapabilities();
       await this.remeasureRefreshRate();
+      if (this._aborted) return;
       this._update();
     }, 400);
   }
 
   private _onHdrChange(): void {
+    if (this._aborted) return;
     const wasHdr = this._hdrCapable;
     this._hdrCapable = detectHDR();
     this._colorGamut = detectColorGamut();
     if (wasHdr !== this._hdrCapable) {
       console.log(`[screen] HDR capability changed: ${wasHdr} → ${this._hdrCapable}`);
       detectPeakBrightness(this._hdrCapable).then((nits) => {
+        if (this._aborted) return;
         this._peakNits = nits;
         this._update();
       });
@@ -872,10 +981,31 @@ export class ScreenDetector {
   }
 
   private _update(): void {
+    if (this._aborted) return;
     this._currentScreen = this._screenDetails?.currentScreen ?? this._currentScreen;
     this._info = buildInfo(this._refresh, this._hdrCapable, this._colorGamut, this._peakNits, this._currentScreen);
     for (const cb of this._callbacks) {
       try { cb(this._info); } catch (e) { console.warn("[screen] callback error:", e); }
     }
+  }
+
+  dispose(): void {
+    this._aborted = true;
+    this._callbacks = [];
+    if (this._remeasureTimer) {
+      clearTimeout(this._remeasureTimer);
+      this._remeasureTimer = null;
+    }
+    if (this._displayChangeTimer) {
+      clearTimeout(this._displayChangeTimer);
+      this._displayChangeTimer = null;
+    }
+    while (this._disposables.length > 0) {
+      const cleanup = this._disposables.pop()!;
+      try { cleanup(); } catch (e) { console.warn("[screen] dispose callback error:", e); }
+    }
+    this._dprCleanup = null;
+    this._screenDetailsCleanup = null;
+    this._currentScreenCleanup = null;
   }
 }

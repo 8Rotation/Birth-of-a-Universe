@@ -413,12 +413,16 @@ export class ParticleRingBuffer {
    * Used by ComputeEmitter to set up copyBufferToBuffer targets.
    */
   getGpuBuffers(): { bufA: GPUBuffer; bufB: GPUBuffer } | null {
-    if (!this._gpuDevice || !this._gpuBackend || !this._gpuBufCacheValid) return null;
+    if (!this._gpuDevice || !this._gpuBackend) return null;
     const gpuBufA: GPUBuffer | undefined = this._gpuBackend.get(this._attrA)?.buffer;
     const gpuBufB: GPUBuffer | undefined = this._gpuBackend.get(this._attrB)?.buffer;
     if (!gpuBufA || !gpuBufB) return null;
     const expectedSize = this._capacity * 16;
-    if (gpuBufA.size < expectedSize || gpuBufB.size < expectedSize) return null;
+    if (gpuBufA.size < expectedSize || gpuBufB.size < expectedSize) {
+      this._gpuBufCacheValid = false;
+      return null;
+    }
+    this._gpuBufCacheValid = true;
     return { bufA: gpuBufA, bufB: gpuBufB };
   }
 

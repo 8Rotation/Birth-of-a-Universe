@@ -52,6 +52,8 @@ export interface CpuInfo {
   logicalCores: number;
   /** Single-thread benchmark score. ~1.0 on a mid-range 2020 CPU. */
   benchmarkScore: number;
+  /** True when the benchmark ended early due to abort or wall-clock cap. */
+  benchmarkDegraded: boolean;
   /** Continuous sub-score 0 → 1 for single-thread speed */
   benchSub: number;
   /** Continuous sub-score 0 → 1 for core count */
@@ -215,6 +217,7 @@ function lerpPow2(floorExp: number, ceilingExp: number, t: number, exponent = 1)
 
 /** Duration of the quick CPU benchmark loop (ms). */
 const CPU_BENCH_DURATION_MS = 20;
+const CPU_BENCH_MAX_DURATION_MS = CPU_BENCH_DURATION_MS * 2;
 /**
  * Baseline ops/ms calibrated to a mid-range 2020 CPU (i5-10400 / Ryzen 5 3600).
  * Score = measured ops/ms / BASELINE_OPS_PER_MS  (≈1.0 for that hardware).
@@ -225,31 +228,51 @@ function detectCpuCores(): number {
   return navigator.hardwareConcurrency || 4;
 }
 
+interface CpuBenchmarkResult {
+  score: number;
+  degraded: boolean;
+}
+
 /**
  * Quick single-thread benchmark: tight transcendental-math loop.
  * Calibrated so a mid-range 2020 CPU (i5-10400 / Ryzen 5 3600) ≈ 1.0×.
  * Runs for ~20 ms to avoid blocking the UI.
  */
-function cpuBenchmark(): number {
+function cpuBenchmark(isAborted: () => boolean = () => false): CpuBenchmarkResult {
   const start = performance.now();
   let iterations = 0;
   let x = 1.0;
+  let degraded = false;
 
-  while (performance.now() - start < CPU_BENCH_DURATION_MS) {
+  benchmarkLoop:
+  while (!isAborted() && performance.now() - start < CPU_BENCH_DURATION_MS) {
     for (let i = 0; i < 1000; i++) {
       x = Math.sin(x) + Math.cos(x * 0.7) + Math.sqrt(Math.abs(x) + 1);
       iterations++;
+      if ((i & 63) === 0) {
+        const elapsed = performance.now() - start;
+        // LIFE-08: cap at 2x the intended benchmark budget so a throttled
+        // browser cannot keep init stuck in the tight math loop. Return the
+        // partial score with `degraded: true`; budget calculation remains
+        // conservative because fewer iterations lower the score.
+        if (elapsed > CPU_BENCH_MAX_DURATION_MS || isAborted()) {
+          degraded = true;
+          break benchmarkLoop;
+        }
+      }
     }
   }
 
+  if (isAborted()) degraded = true;
+
   const elapsed = performance.now() - start;
-  const opsPerMs = iterations / elapsed;
+  const opsPerMs = elapsed > 0 ? iterations / elapsed : 0;
   const score = opsPerMs / BASELINE_OPS_PER_MS;
 
   // Prevent dead-code elimination
   if (x === -Infinity) console.log(x);
 
-  return Math.round(score * 100) / 100;
+  return { score: Math.round(score * 100) / 100, degraded };
 }
 
 // ── GPU Detection ─────────────────────────────────────────────────────────
@@ -617,7 +640,8 @@ function buildSummary(
 
 export class HardwareDetector {
   private _info: HardwareInfo | null = null;
-  private _benchPromise: Promise<[GpuInfo, number]> | null = null;
+  private _benchPromise: Promise<[GpuInfo, CpuBenchmarkResult]> | null = null;
+  private _aborted = false;
 
   /**
    * Kick off CPU benchmark + GPU adapter query immediately.
@@ -628,11 +652,12 @@ export class HardwareDetector {
    */
   startBenchmarks(gpuAdapter?: GPUAdapter | null): void {
     if (this._benchPromise) return; // already started
+    this._aborted = false;
     console.log("[hardware] Detecting hardware capabilities...");
     this._benchPromise = Promise.all([
       detectGpu(gpuAdapter),
-      new Promise<number>((resolve) => {
-        setTimeout(() => resolve(cpuBenchmark()), 0);
+      new Promise<CpuBenchmarkResult>((resolve) => {
+        setTimeout(() => resolve(cpuBenchmark(() => this._aborted)), 0);
       }),
     ]);
   }
@@ -654,8 +679,9 @@ export class HardwareDetector {
 
     const cpu: CpuInfo = {
       logicalCores: cores,
-      benchmarkScore: benchResult,
-      benchSub: computeBenchSub(benchResult),
+      benchmarkScore: benchResult.score,
+      benchmarkDegraded: benchResult.degraded,
+      benchSub: computeBenchSub(benchResult.score),
       coresSub: computeCoresSub(cores),
     };
 
@@ -687,6 +713,9 @@ export class HardwareDetector {
       `cores=${(cpu.coresSub * 100).toFixed(0)}% ` +
       `gpu=${gpu.isIntegrated ? 'integrated' : 'discrete'} (${(gpu.gpuSub * 100).toFixed(0)}%)`,
     );
+    if (benchResult.degraded) {
+      console.warn("[hardware] CPU benchmark ended early; using degraded partial score");
+    }
     console.log(
       `[hardware] Budget: default ${budget.particleRate}/s, ` +
       `slider max ${budget.sliderLimits.particleRateMax}/s, ` +
@@ -767,8 +796,10 @@ export class HardwareDetector {
    * @param device  The GPUDevice to benchmark on.
    */
   async benchmarkGpuCompute(device: GPUDevice): Promise<GpuComputeBenchmark | null> {
+    if (this._aborted) return null;
     try {
-      const result = await runGpuComputeBenchmark(device);
+      const result = await runGpuComputeBenchmark(device, () => this._aborted);
+      if (this._aborted) return null;
       if (this._info) {
         this._info = { ...this._info, gpuComputeBenchmark: result };
       }
@@ -781,6 +812,12 @@ export class HardwareDetector {
       console.warn("[hardware] GPU compute benchmark failed:", e);
       return null;
     }
+  }
+
+  dispose(): void {
+    this._aborted = true;
+    this._info = null;
+    this._benchPromise = null;
   }
 }
 
@@ -886,7 +923,10 @@ const BENCH_PARTICLE_COUNT = 10_000;
 const BENCH_ITERATIONS = 3;
 const BENCH_WORKGROUP_SIZES = [32, 64, 128, 256];
 
-async function runGpuComputeBenchmark(device: GPUDevice): Promise<GpuComputeBenchmark> {
+async function runGpuComputeBenchmark(
+  device: GPUDevice,
+  isAborted: () => boolean = () => false,
+): Promise<GpuComputeBenchmark> {
   const BUF_UNIFORM  = 0x0040;
   const BUF_STORAGE  = 0x0080;
   const BUF_COPY_DST = 0x0008;
@@ -914,6 +954,7 @@ async function runGpuComputeBenchmark(device: GPUDevice): Promise<GpuComputeBenc
   let bestSize = sizesToTest[0];
 
   for (const wgSize of sizesToTest) {
+    if (isAborted()) break;
     const module = device.createShaderModule({ code: makeBenchmarkShader(wgSize) });
     const pipeline = device.createComputePipeline({
       layout: 'auto',
@@ -933,6 +974,7 @@ async function runGpuComputeBenchmark(device: GPUDevice): Promise<GpuComputeBenc
 
     // Warm-up run
     {
+      if (isAborted()) break;
       const enc = device.createCommandEncoder();
       const pass = enc.beginComputePass();
       pass.setPipeline(pipeline);
@@ -945,6 +987,7 @@ async function runGpuComputeBenchmark(device: GPUDevice): Promise<GpuComputeBenc
 
     // Timed runs
     for (let i = 0; i < BENCH_ITERATIONS; i++) {
+      if (isAborted()) break;
       const t0 = performance.now();
       const enc = device.createCommandEncoder();
       const pass = enc.beginComputePass();
@@ -957,6 +1000,8 @@ async function runGpuComputeBenchmark(device: GPUDevice): Promise<GpuComputeBenc
       const t1 = performance.now();
       times.push(t1 - t0);
     }
+
+    if (times.length === 0) continue;
 
     // Take the median time
     times.sort((a, b) => a - b);

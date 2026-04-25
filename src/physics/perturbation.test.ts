@@ -141,7 +141,69 @@ describe("evolveCoeffs", () => {
 
 // ── evaluatePerturbationFast vs evaluatePerturbation ────────────────────
 
+function singleModeCoeffs(lMax: number, targetL: number, targetM: number) {
+  const coeffs = generatePerturbCoeffs(lMax, 0, splitmix32(1));
+  const idx = targetL * targetL + targetL + targetM - 1;
+  coeffs[idx].c = 1;
+  return coeffs;
+}
+
+function relativeDiff(a: number, b: number): number {
+  const scale = Math.max(Math.abs(a), Math.abs(b), 1e-15);
+  return Math.abs(a - b) / scale;
+}
+
 describe("evaluatePerturbationFast", () => {
+  it("matches the reference implementation for sectoral modes m=0..8", () => {
+    const theta = 1.137;
+    const phi = 2.719;
+    const cosT = Math.cos(theta);
+    const sinT = Math.sin(theta);
+
+    for (let m = 0; m <= 8; m++) {
+      const l = Math.max(1, m);
+      const coeffs = singleModeCoeffs(8, l, m);
+      const slow = evaluatePerturbation(coeffs, cosT, sinT, phi);
+      const fast = evaluatePerturbationFast(coeffs, 8, cosT, sinT, phi);
+      expect(relativeDiff(fast, slow), `m=${m}, l=${l}`).toBeLessThan(1e-10);
+    }
+  });
+
+  it("returns a finite value for high-m sectoral normalization", () => {
+    const lMax = 20;
+    const coeffs = singleModeCoeffs(lMax, 20, 20);
+    const theta = 1.1;
+    const phi = 5.6;
+    const val = evaluatePerturbationFast(coeffs, lMax, Math.cos(theta), Math.sin(theta), phi);
+    expect(Number.isFinite(val)).toBe(true);
+    expect(Number.isNaN(val)).toBe(false);
+  });
+
+  it("matches pinned spherical-harmonic golden vectors", () => {
+    const samples = [
+      { theta: 0.37, phi: 0.21, l: 1, m: -1, expected: -0.036831989307446994 },
+      { theta: 0.92, phi: 1.7, l: 2, m: 0, expected: 0.031871638082845696 },
+      { theta: 1.31, phi: 2.2, l: 3, m: 2, expected: -0.1069193874649707 },
+      { theta: 2.4, phi: 5.1, l: 4, m: -3, expected: 0.1595939565774277 },
+      { theta: 0.55, phi: 4.4, l: 5, m: 5, expected: 0.025606435753783893 },
+      { theta: 1.8, phi: 0.75, l: 6, m: -2, expected: 0.06917722256720472 },
+      { theta: 2.85, phi: 3.33, l: 8, m: 4, expected: 0.07588804566320373 },
+      { theta: 1.1, phi: 5.6, l: 20, m: 20, expected: 0.041201279613447335 },
+    ];
+
+    for (const sample of samples) {
+      const coeffs = singleModeCoeffs(sample.l, sample.l, sample.m);
+      const actual = evaluatePerturbationFast(
+        coeffs,
+        sample.l,
+        Math.cos(sample.theta),
+        Math.sin(sample.theta),
+        sample.phi,
+      );
+      expect(actual).toBeCloseTo(sample.expected, 6);
+    }
+  });
+
   it("matches evaluatePerturbation on 1000+ random points (lMax=8)", () => {
     const lMax = 8;
     const coeffs = generatePerturbCoeffs(lMax, 0.5, splitmix32(42));

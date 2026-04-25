@@ -1,0 +1,49 @@
+name: E2E (GPU validation)
+
+# Non-blocking GPU/CPU validation under real WebGPU (chromium + SwiftShader).
+# Runs on every push to main and every PR. Failures do NOT block deploy
+# until this stabilises (see plan-implementation.md Task A3).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    # Mark non-blocking: any failure surfaces in checks but does not fail
+    # the workflow status that gates deploy.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      - run: npm run build
+
+      # Headless chromium-headless-shell does not currently expose a
+      # WebGPU adapter, so we run the full chromium under xvfb. SwiftShader
+      # provides the software adapter.
+      - name: Run Playwright E2E under xvfb
+        run: xvfb-run --auto-servernum --server-args='-screen 0 1280x720x24' npm run test:e2e
+        env:
+          CI: "true"
+
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 14

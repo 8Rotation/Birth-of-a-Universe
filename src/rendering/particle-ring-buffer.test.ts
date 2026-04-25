@@ -440,6 +440,32 @@ describe("ParticleRingBuffer", () => {
     expect(writeBuffer).not.toHaveBeenCalled();
   });
 
+  it("revalidates GPU buffers after grow once backend buffers catch up", () => {
+    const buf = new ParticleRingBuffer(4);
+    const mockDevice = { queue: { writeBuffer: vi.fn() } } as unknown as GPUDevice;
+    const resources = new Map<object, { buffer: { size: number; label: string } }>();
+    resources.set(buf.packedAttrA, { buffer: { size: buf.capacity * 16, label: "a-old" } });
+    resources.set(buf.packedAttrB, { buffer: { size: buf.capacity * 16, label: "b-old" } });
+    const mockBackend = { get: (key: object) => resources.get(key) };
+    buf.setGpuBackend(mockDevice, mockBackend);
+
+    expect(buf.getGpuBuffers()).not.toBeNull();
+
+    buf.grow(8);
+
+    // Backend still points at pre-grow buffers, so compute must not copy.
+    expect(buf.getGpuBuffers()).toBeNull();
+
+    // Simulate Three.js processing needsUpdate and publishing new buffers.
+    resources.set(buf.packedAttrA, { buffer: { size: buf.capacity * 16, label: "a-new" } });
+    resources.set(buf.packedAttrB, { buffer: { size: buf.capacity * 16, label: "b-new" } });
+
+    const gpuBuffers = buf.getGpuBuffers();
+    expect(gpuBuffers).not.toBeNull();
+    expect(gpuBuffers?.bufA.size).toBe(buf.capacity * 16);
+    expect(gpuBuffers?.bufB.size).toBe(buf.capacity * 16);
+  });
+
   // ── computeAliveRange ─────────────────────────────────────────────
 
   describe("computeAliveRange", () => {
