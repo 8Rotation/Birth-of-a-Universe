@@ -422,12 +422,12 @@ export const TOOLTIPS: Record<string, Tooltip> = {
   },
 
   particleRate: {
-    simple: "How many new particles appear per second — the primary density control.",
+    simple: "Requested base particles per second — the primary density control.",
     visual:
       "Higher = denser, more filled-in image. Lower = sparse, individual dots visible.\n" +
-      "Visible particle count at equilibrium ≈ rate × fade duration.",
+      "Visible particle count at equilibrium ≈ effective rate × fade duration.",
     science:
-      "Particles are emitted as a continuous Poisson stream at this target rate. " +
+      "Bounce particles are emitted as a continuous stream at this requested base rate. " +
       "Each particle's arrival time is offset by the perturbation field δ(θ,φ) " +
       "to create the angular structure of the bounce pattern.",
     range:
@@ -441,13 +441,16 @@ export const TOOLTIPS: Record<string, Tooltip> = {
       "  • CPU: (ℓ_max + 1)² harmonic evaluations (physics worker)\n" +
       "  • GPU: one instanced sprite per visible particle\n" +
       "  • RAM: ~48 bytes per live particle\n\n" +
-      "Compound cost: rate × persistence = visible particles (GPU load).\n" +
+      "Runtime caps may reduce the effective rate to protect VRAM, visible-particle count, CPU physics cost, or GPU compute throughput.\n" +
+      "Pair production adds extra particles on top of the base bounce stream when βpp is enabled.\n" +
+      "Compound cost: effective_rate × persistence = visible particles (GPU load).\n" +
       "Compound cost: rate × (ℓ+1)² = physics evaluations/sec (CPU load).\n" +
       "The Compute Load readout shows the combined effect.",
     notes:
       "This is the strongest performance lever. Halving the rate roughly halves " +
       "both CPU and GPU load. Interacts with persistence (together they set particle count) " +
-      "and ℓ_max (together they set physics cost).",
+      "and ℓ_max (together they set physics cost). The HUD's Particles / sec readout shows " +
+      "the measured delivered rate after caps and multipliers.",
   },
 
   fieldEvolution: {
@@ -877,17 +880,17 @@ export const TOOLTIPS: Record<string, Tooltip> = {
   //  Color Tuning
   // ═══════════════════════════════════════════════════════════════════
   lightnessFloor: {
-    simple: "Minimum HSL lightness for all particles.",
+    simple: "Minimum SDR intensity for all particles.",
     visual:
-      "Higher floor = no truly dark particles (everything is at least this bright).\n" +
-      "0 = particles can be fully black.",
+      "Higher floor = no truly dark particles, without pushing bright colours toward white.\n" +
+      "0 = particles can fade to fully black.",
     range: "0 – 0.5. Default: 0.20.",
     performance: "None.",
-    notes: "Total max lightness = floor + range (should not exceed ~0.85 for natural colours).",
+    notes: "Total SDR intensity = floor + range. Final brightness is still affected by auto/manual brightness and bloom.",
   },
 
   lightnessRange: {
-    simple: "How much lightness varies across particles.",
+    simple: "How much SDR intensity varies across particles.",
     visual:
       "Small range = more uniform brightness. Large range = more contrast " +
       "between bright and dim regions.",
@@ -899,16 +902,16 @@ export const TOOLTIPS: Record<string, Tooltip> = {
   saturationFloor: {
     simple: "Minimum colour saturation — prevents grey/washed-out particles.",
     visual:
-      "Higher = all particles are vivid. 0 = some particles may appear grey.",
+      "Higher = all particles are vivid. 0 = dim particles may appear grey.",
     range: "0 – 1. Default: 0.70.",
     performance: "None.",
   },
 
   saturationRange: {
-    simple: "How much saturation varies across particles.",
+    simple: "How much saturation rises with particle brightness.",
     visual:
-      "Small range = uniformly vivid. Large range = some particles more muted than others.",
-    range: "0 – 0.5. Default: 0.25 (most particles in the 0.70–0.95 saturation band).",
+      "Small range = uniformly vivid. Large range = bright particles become more chromatic than dim particles.",
+    range: "0 – 0.5. Default: 0.25 (particles span roughly the 0.70–0.95 saturation band).",
     performance: "None.",
   },
 };

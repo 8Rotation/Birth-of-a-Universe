@@ -7,10 +7,34 @@
  * rather than `any` so call sites are at least self-documenting.
  */
 
-// eslint-disable-next-line @typescript-eslint/no-empty-interface
+type ShaderNodeInput = ShaderNodeObject | number | string | boolean;
+
 interface ShaderNodeObject {
   /** Brand — prevents accidental assignment from unrelated values. */
   readonly __brand?: "ShaderNodeObject";
+  readonly x: ShaderNodeObject;
+  readonly y: ShaderNodeObject;
+  readonly z: ShaderNodeObject;
+  readonly w: ShaderNodeObject;
+  readonly r: ShaderNodeObject;
+  readonly g: ShaderNodeObject;
+  readonly b: ShaderNodeObject;
+  readonly a: ShaderNodeObject;
+  readonly xy: ShaderNodeObject;
+  readonly xyz: ShaderNodeObject;
+  readonly rgb: ShaderNodeObject;
+  value: any;
+  add(...args: ShaderNodeInput[]): ShaderNodeObject;
+  sub(...args: ShaderNodeInput[]): ShaderNodeObject;
+  mul(...args: ShaderNodeInput[]): ShaderNodeObject;
+  div(...args: ShaderNodeInput[]): ShaderNodeObject;
+  oneMinus(): ShaderNodeObject;
+  negate(): ShaderNodeObject;
+  toFloat(): ShaderNodeObject;
+  getTextureNode(name: string): ShaderNodeObject;
+  setSize(width: number, height: number): void;
+  dispose(): void;
+  /** Three's TSL node surface is runtime-composed; keep an escape hatch for upstream gaps. */
   [key: string]: any;
 }
 
@@ -126,35 +150,35 @@ declare module "three/tsl" {
   type N = ShaderNodeObject;
   export function pass(scene: any, camera: any, options?: any): N;
   export function float(v: number): N;
-  export function vec2(x: N | number, y?: N | number): N;
-  export function vec3(x: N | number, y?: N | number, z?: N | number): N;
-  export function vec4(x: N | number, y?: N | number, z?: N | number, w?: N | number): N;
-  export function color(r: N | number | string, g?: N | number, b?: N | number): N;
+  export function vec2(x: ShaderNodeInput, y?: ShaderNodeInput): N;
+  export function vec3(x: ShaderNodeInput, y?: ShaderNodeInput, z?: ShaderNodeInput): N;
+  export function vec4(x: ShaderNodeInput, y?: ShaderNodeInput, z?: ShaderNodeInput, w?: ShaderNodeInput): N;
+  export function color(r: ShaderNodeInput, g?: ShaderNodeInput, b?: ShaderNodeInput): N;
   export function uniform(value: any): N;
   export function attribute(name: string, type?: string): N;
   export function texture(map: any, uv?: N): N;
   export function uv(): N;
-  export function add(...args: (N | number)[]): N;
-  export function mul(...args: (N | number)[]): N;
-  export function mix(a: N | number, b: N | number, t: N | number): N;
-  export function clamp(v: N | number, min: N | number, max: N | number): N;
-  export function smoothstep(edge0: N | number, edge1: N | number, x: N | number): N;
-  export function max(a: N | number, b: N | number): N;
-  export function min(a: N | number, b: N | number): N;
-  export function pow(base: N | number, exp: N | number): N;
-  export function sqrt(v: N | number): N;
-  export function abs(v: N | number): N;
-  export function log(v: N | number): N;
-  export function exp(v: N | number): N;
-  export function sin(v: N | number): N;
-  export function cos(v: N | number): N;
+  export function add(...args: ShaderNodeInput[]): N;
+  export function mul(...args: ShaderNodeInput[]): N;
+  export function mix(a: ShaderNodeInput, b: ShaderNodeInput, t: ShaderNodeInput): N;
+  export function clamp(v: ShaderNodeInput, min: ShaderNodeInput, max: ShaderNodeInput): N;
+  export function smoothstep(edge0: ShaderNodeInput, edge1: ShaderNodeInput, x: ShaderNodeInput): N;
+  export function max(a: ShaderNodeInput, b: ShaderNodeInput): N;
+  export function min(a: ShaderNodeInput, b: ShaderNodeInput): N;
+  export function pow(base: ShaderNodeInput, exp: ShaderNodeInput): N;
+  export function sqrt(v: ShaderNodeInput): N;
+  export function abs(v: ShaderNodeInput): N;
+  export function log(v: ShaderNodeInput): N;
+  export function exp(v: ShaderNodeInput): N;
+  export function sin(v: ShaderNodeInput): N;
+  export function cos(v: ShaderNodeInput): N;
   export function normalize(v: N): N;
   export function length(v: N): N;
   export function dot(a: N, b: N): N;
   export function cross(a: N, b: N): N;
-  export function select(condition: N, a: N | number, b: N | number): N;
-  export function step(edge: N | number, x: N | number): N;
-  export function mod(x: N | number, y: N | number): N;
+  export function select(condition: N, a: ShaderNodeInput, b: ShaderNodeInput): N;
+  export function step(edge: ShaderNodeInput, x: ShaderNodeInput): N;
+  export function mod(x: ShaderNodeInput, y: ShaderNodeInput): N;
   export function instancedBufferAttribute(attr: any, type?: string, stride?: number, offset?: number): N;
   export function instancedDynamicBufferAttribute(attr: any, type?: string, stride?: number, offset?: number): N;
   export function Discard(conditional?: N): N;

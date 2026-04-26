@@ -53,7 +53,8 @@ import {
 } from "three/tsl";
 import { bloom } from "three/addons/tsl/display/BloomNode.js";
 import type { ScreenInfo } from "../ui/screen-info.js";
-import { ParticleRingBuffer } from "./particle-ring-buffer.js";
+import { ARRIVAL_SEARCH_PADDING_MULTIPLIER, ParticleRingBuffer } from "./particle-ring-buffer.js";
+import { getThreeBackend, getWebGPUDevice, probeThreeBackend } from "./three-backend.js";
 import {
   recommendedPixelRatioCap,
   hitSizeScale,
@@ -156,6 +157,7 @@ export class SensorRenderer {
 
   // GPU ring buffer for write-once per-particle birth data
   private _ringBuf!: ParticleRingBuffer;
+  private _ringBufferResizeVersion = -1;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private material!: any; // PointsNodeMaterial (GPU-side path)
   private diskRing!: THREE.Mesh;
@@ -236,7 +238,14 @@ export class SensorRenderer {
   // A wider annular ring behind the main ring with gaussian alpha falloff,
   // rendered via additive blending. Controlled independently of particle bloom.
   private _glowRing: THREE.Mesh | null = null;
-  private _glowRingMaterial: THREE.ShaderMaterial | null = null;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private _glowRingMaterial: any = null;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private _uGlowColor: any = null;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private _uGlowOpacity: any = null;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private _uGlowWidth: any = null;
   private _lastGlowWidth = -1;  // track for geometry rebuild
 
   private _ready = false;
@@ -301,7 +310,7 @@ export class SensorRenderer {
   /** Orthographic zoom multiplier (1.0 = default framing). */
   zoom = 1.0;
   /** Arrival spread (seconds) — used to extend alive-range cutoff so the
-   *  binary search handles non-monotonic bornTimes correctly. */
+   *  fallback lower bound handles non-monotonic arrivalTimes correctly. */
   arrivalSpread = 0;
 
   // ── Auto-brightness ────────────────────────────────────────────────
@@ -325,13 +334,6 @@ export class SensorRenderer {
    */
   minEps = 10;
 
-  /**
-   * Smoothed observed max eps among alive particles. Fast-attack,
-   * slow-decay so the display responds instantly to new bright
-   * particles but doesn't flicker when they fade.
-   */
-  private _observedMaxEps = 0;
-
   /** Current hit-size scale factor derived from screen density. */
   hitSizeScaleFactor = 1.0;
   /** Current pixel ratio cap from screen detection. */
@@ -339,6 +341,9 @@ export class SensorRenderer {
   // ── HDR state ─────────────────────────────────────────────────────────
   private _hdrMode: HDRMode = 'none';
   private _peakNits = SDR_REFERENCE_WHITE_NITS;   // 203 until overridden
+  private _detectedPeakNits: number | null = null;
+  private _manualPeakNits: number | null = null;
+  private _lastBloomQuality: 'high' | 'low' | null = null;
   /**
    * Reference value for the brightness slider in SDR mode.
    * In HDR, the slider is normalised against this so that the default
@@ -351,7 +356,39 @@ export class SensorRenderer {
   get hdrMode(): HDRMode { return this._hdrMode; }
 
   /** Override peak display brightness (nits). 0 = use auto-detection. */
-  set peakNits(nits: number) { if (nits > 0) this._peakNits = nits; }
+  set peakNits(nits: number) {
+    this._manualPeakNits = nits > 0 ? nits : null;
+    this._syncPeakNits();
+  }
+
+  private _syncPeakNits(): void {
+    if (this._manualPeakNits !== null) {
+      this._peakNits = this._manualPeakNits;
+    } else if (this._hdrMode !== 'none') {
+      this._peakNits = this._detectedPeakNits ?? DEFAULT_HDR_PEAK_NITS;
+    } else {
+      this._peakNits = SDR_REFERENCE_WHITE_NITS;
+    }
+  }
+
+  private _resolvedBloomQuality(): 'high' | 'low' {
+    return this.bloomQuality === 'auto' ? this.bloomAutoResolvedQuality : this.bloomQuality;
+  }
+
+  private _maxBloomPixels(): number {
+    return this._resolvedBloomQuality() === 'low'
+      ? 1280 * 720
+      : 1920 * 1080;
+  }
+
+  private _syncBloomQuality(): void {
+    const quality = this._resolvedBloomQuality();
+    if (quality === this._lastBloomQuality) return;
+    this._lastBloomQuality = quality;
+    try {
+      this.pipeline?.setSize?.(window.innerWidth, window.innerHeight);
+    } catch { /* noop */ }
+  }
 
   /** GPU ring buffer for write-once per-particle birth data. */
   get ringBuffer(): ParticleRingBuffer { return this._ringBuf; }
@@ -362,10 +399,11 @@ export class SensorRenderer {
    */
   forceSoftHDR(peakNits = DEFAULT_HDR_PEAK_NITS): void {
     if (this._hdrMode === 'full') return; // already in a better mode
-    this._peakNits = peakNits;
+    this._detectedPeakNits = peakNits;
     this.renderer.toneMapping = THREE.LinearToneMapping;
     this.renderer.toneMappingExposure = this.softHdrExposure;
     this._hdrMode = 'soft';
+    this._syncPeakNits();
     console.log(
       `[sensor] HDR SOFT (forced): standard canvas + linear TM, ` +
       `peak ~${this._peakNits} nits`
@@ -380,7 +418,7 @@ export class SensorRenderer {
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.0;
     this._hdrMode = 'none';
-    this._peakNits = SDR_REFERENCE_WHITE_NITS;
+    this._syncPeakNits();
     console.log('[sensor] HDR disabled — back to SDR (ACES)');
   }
 
@@ -426,6 +464,7 @@ export class SensorRenderer {
    * Called once after init and whenever the screen changes (monitor switch).
    */
   applyScreenInfo(info: ScreenInfo): void {
+    this._detectedPeakNits = info.peakBrightnessNits;
     this._pixelRatioCap = recommendedPixelRatioCap(info);
     this.hitSizeScaleFactor = hitSizeScale(info);
 
@@ -444,7 +483,7 @@ export class SensorRenderer {
 
     // Update peak nits if the display changed and we’re in an HDR mode
     if (this._hdrMode !== 'none') {
-      this._peakNits = info.peakBrightnessNits ?? DEFAULT_HDR_PEAK_NITS;
+      this._syncPeakNits();
     }
 
     // Update camera aspect — size disk by the *shorter* axis
@@ -490,7 +529,7 @@ export class SensorRenderer {
    * still looks wider-range than SDR ACES.
    */
   private _setupHDR(info: ScreenInfo): void {
-    this._peakNits = info.peakBrightnessNits ?? DEFAULT_HDR_PEAK_NITS;
+    this._detectedPeakNits = info.peakBrightnessNits;
 
     // ── Tier 1: True HDR canvas (rgba16float + extended tone mapping) ──
     // FRAGILE: The monkey-patches below depend on Three.js WebGPU internals:
@@ -504,10 +543,8 @@ export class SensorRenderer {
       const ctx = canvas.getContext('webgpu') as GPUCanvasContext | null;
       if (!ctx) throw new Error('No WebGPU context on canvas');
 
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const backend = (this.renderer as any).backend;
-      const device: GPUDevice | undefined = backend?.device;
-      if (!device) throw new Error('WebGPU device not available on backend');
+      const backend = getThreeBackend(this.renderer);
+      const device = getWebGPUDevice(this.renderer);
 
       // Warn if Three.js version has changed since these patches were verified
       if (THREE.REVISION !== '183') {
@@ -547,8 +584,9 @@ export class SensorRenderer {
         const origConfigure = backend._configureContext.bind(backend);
         backend._configureContext = function () {
           try {
-            this.context.configure({
-              device: this.device,
+            if (!backend.context || !backend.device) throw new Error('HDR backend context unavailable');
+            backend.context.configure({
+              device: backend.device,
               format: 'rgba16float',
               colorSpace: 'srgb',
               toneMapping: { mode: 'extended' },
@@ -569,6 +607,7 @@ export class SensorRenderer {
       this.renderer.toneMappingExposure = 1.0;
 
       this._hdrMode = 'full';
+      this._syncPeakNits();
       console.log(
         `[sensor] HDR FULL: rgba16float / srgb / extended, ` +
         `peak ~${this._peakNits} nits`
@@ -586,6 +625,7 @@ export class SensorRenderer {
     this.renderer.toneMapping = THREE.LinearToneMapping;
     this.renderer.toneMappingExposure = this.softHdrExposure;
     this._hdrMode = 'soft';
+    this._syncPeakNits();
     console.log(
       `[sensor] HDR SOFT: standard canvas + linear TM, ` +
       `peak ~${this._peakNits} nits`
@@ -602,6 +642,14 @@ export class SensorRenderer {
     await this.renderer.init();
     if (this._disposed) return;
     console.log("[sensor] WebGPU ready");
+
+    const backendProbe = probeThreeBackend(this.renderer);
+    if (!backendProbe.compatible) {
+      throw new Error(
+        `Three.js WebGPU backend private API is incompatible with this build ` +
+        `(Three r${backendProbe.version}). Missing: ${backendProbe.missing.join(", ")}`,
+      );
+    }
 
     // ── HDR pipeline setup (must happen BEFORE scene/pipeline creation
     //    so that GPU pipelines are compiled against the correct canvas
@@ -654,12 +702,8 @@ export class SensorRenderer {
     // Pass GPU device + backend to ring buffer for direct partial uploads.
     // GPUBuffers for the attributes are created lazily on first render,
     // so the initial writeBatch() will use the needsUpdate fallback.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const backend = (this.renderer as any).backend;
-    const gpuDevice: GPUDevice | undefined = backend?.device;
-    if (gpuDevice && backend) {
-      this._ringBuf.setGpuBackend(gpuDevice, backend);
-    }
+    const gpuDevice = getWebGPUDevice(this.renderer);
+    this._ringBuf.setGpuBackend(gpuDevice, this.renderer);
 
     // ── Ring glow mesh (shader-based gaussian falloff, additive blend) ──
     // Replaces the expensive bloom-scene-based ring bloom with a simple
@@ -712,13 +756,13 @@ export class SensorRenderer {
       );
       this._bloomPass = bloomNode;
 
-      // ── Bloom resolution cap: always cap at 1080p equivalent ─────────
+      // ── Bloom resolution cap: high=1080p equivalent, low=720p equivalent ──
       const origSetSize = bloomNode.setSize.bind(bloomNode);
-      const MAX_BLOOM_PIXELS = 1920 * 1080;
       bloomNode.setSize = (w: number, h: number) => {
         const pixels = w * h;
-        if (pixels > MAX_BLOOM_PIXELS) {
-          const scale = Math.sqrt(MAX_BLOOM_PIXELS / pixels);
+        const maxBloomPixels = this._maxBloomPixels();
+        if (pixels > maxBloomPixels) {
+          const scale = Math.sqrt(maxBloomPixels / pixels);
           origSetSize(Math.round(w * scale), Math.round(h * scale));
         } else {
           origSetSize(w, h);
@@ -734,6 +778,8 @@ export class SensorRenderer {
         .add(bloomNode.mul(this._particleBloomMul));
 
       this.useBloom = true;
+      this._lastBloomQuality = null;
+      this._syncBloomQuality();
       console.log("[sensor] Bloom enabled (single scene pass + shader glow ring)");
     } catch (e) {
       this._disposePostProcessing();
@@ -748,42 +794,25 @@ export class SensorRenderer {
    * Replaces the expensive bloom-scene-based ring bloom.
    */
   private _initGlowRing(): void {
-    const glowMat = new THREE.ShaderMaterial({
+    this._uGlowColor = uniform(new THREE.Color(this.ringColor));
+    this._uGlowOpacity = uniform(this.ringBloomStrength);
+    this._uGlowWidth = uniform(0.15);
+
+    const dist = length(positionLocal.xy);
+    const glowDistance = abs(dist.sub(float(2.0)));
+    const sigma = max(this._uGlowWidth.div(float(3.0)), float(0.0001));
+    const glow = exp(float(-0.5).mul(glowDistance.mul(glowDistance)).div(sigma.mul(sigma)));
+    const glowAlpha = this._uGlowOpacity.mul(glow);
+
+    const glowMat = new NodeMaterial({
       transparent: true,
       depthWrite: false,
       blending: THREE.AdditiveBlending,
       side: THREE.DoubleSide,
-      uniforms: {
-        uColor: { value: new THREE.Color(this.ringColor) },
-        uOpacity: { value: this.ringBloomStrength },
-        uInnerRadius: { value: 2.0 },
-        uGlowWidth: { value: 0.15 },
-      },
-      vertexShader: /* glsl */ `
-        varying vec2 vWorldPos;
-        void main() {
-          vec4 worldPos = modelMatrix * vec4(position, 1.0);
-          vWorldPos = worldPos.xy;
-          gl_Position = projectionMatrix * viewMatrix * worldPos;
-        }
-      `,
-      fragmentShader: /* glsl */ `
-        uniform vec3 uColor;
-        uniform float uOpacity;
-        uniform float uInnerRadius;
-        uniform float uGlowWidth;
-        varying vec2 vWorldPos;
-        void main() {
-          float dist = length(vWorldPos);
-          // Distance from the ring center line (r = innerRadius)
-          float d = abs(dist - uInnerRadius);
-          // Gaussian falloff: sigma = glowWidth / 3 so edges are ~0
-          float sigma = uGlowWidth / 3.0;
-          float glow = exp(-0.5 * (d * d) / (sigma * sigma));
-          gl_FragColor = vec4(uColor * uOpacity * glow, uOpacity * glow);
-        }
-      `,
     });
+    glowMat.colorNode = this._uGlowColor.mul(glowAlpha);
+    glowMat.opacityNode = glowAlpha;
+    glowMat.alphaTest = 0.001;
 
     this._glowRingMaterial = glowMat;
 
@@ -792,7 +821,7 @@ export class SensorRenderer {
     const geo = new THREE.RingGeometry(
       Math.max(0.01, 2.0 - glowWidth), 2.0 + glowWidth, RING_SEGMENTS,
     );
-    this._glowRing = new THREE.Mesh(geo, glowMat);
+    this._glowRing = new THREE.Mesh(geo, glowMat as unknown as THREE.Material);
     this._glowRing.renderOrder = -1;  // behind the main ring and particles
     this._glowRing.visible = this.ringBloomEnabled;
     this._lastGlowWidth = glowWidth;
@@ -813,25 +842,8 @@ export class SensorRenderer {
    * Computes fade, color, size, and visibility entirely in TSL shaders.
    */
   private _initGpuMaterial(): void {
-    // ── Quad template geometry (unit quad: ±0.5) ────────────────────
-    const quadGeo = new THREE.InstancedBufferGeometry();
-    const verts = new Float32Array([
-      -0.5, -0.5, 0,   0.5, -0.5, 0,   0.5,  0.5, 0,
-      -0.5, -0.5, 0,   0.5,  0.5, 0,  -0.5,  0.5, 0,
-    ]);
-    const uvs = new Float32Array([
-      0, 0,  1, 0,  1, 1,
-      0, 0,  1, 1,  0, 1,
-    ]);
-    quadGeo.setAttribute('position', new THREE.BufferAttribute(verts, 3));
-    quadGeo.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
-
-    // Attach per-instance packed attributes to the geometry
-    quadGeo.setAttribute('aPackedA', this._ringBuf.packedAttrA);
-    quadGeo.setAttribute('aPackedB', this._ringBuf.packedAttrB);
-    quadGeo.instanceCount = 0;  // no visible instances yet
-
-    this._particleGeometry = quadGeo;
+    this._particleGeometry = this._createParticleGeometry();
+    this._ringBufferResizeVersion = this._ringBuf.resizeVersion;
 
     // ── TSL uniforms ────────────────────────────────────────────────
     this._uTime = uniform(0.0);
@@ -865,7 +877,7 @@ export class SensorRenderer {
     // Unpack components
     const aLx       = packedA.x;
     const aLy       = packedA.y;
-    const aBornTime = packedA.z;
+    const aArrivalTime = packedA.z;
     const aHue      = packedA.w;
     const aBrightness = packedB.x;
     const aEps      = packedB.y;
@@ -886,7 +898,7 @@ export class SensorRenderer {
     const uPixelToWorld = this._uPixelToWorld;
 
     // ── Shared per-vertex fade (computed once, used by size + color) ──
-    const rawAge = uTime.sub(aBornTime);
+    const rawAge = uTime.sub(aArrivalTime);
     const age = max(float(0.0), rawAge);
     const fade = exp(pow(age.div(uTau), uFadeSharpness).negate());
     const alive = inRange.mul(step(float(0.0), rawAge)).mul(step(float(FADE_THRESHOLD), fade));
@@ -920,10 +932,10 @@ export class SensorRenderer {
 
     const colorNode = Fn(() => {
       // ── SDR path ──────────────────────────────────────────────────
-      const sdrLightness = uLFloor.add(aBrightness.mul(uLRange));
-      const sdrSaturation = uSFloor.add(aBrightness.oneMinus().mul(uSRange));
-      const sdrRgb = tslHslToRgb(aHue, sdrSaturation, sdrLightness);
-      const sdrScale = uBri;
+      const sdrIntensity = uLFloor.add(aBrightness.mul(uLRange));
+      const sdrSaturation = min(float(1.0), uSFloor.add(aBrightness.mul(uSRange)));
+      const sdrRgb = tslHslToRgb(aHue, sdrSaturation, float(0.5));
+      const sdrScale = uBri.mul(sdrIntensity);
 
       // ── HDR path ──────────────────────────────────────────────────
       const hdrSat = min(float(1.0), uSFloor.add(uSRange));
@@ -975,6 +987,37 @@ export class SensorRenderer {
     this.material.alphaTest = 0.01;
   }
 
+  private _createParticleGeometry(): THREE.InstancedBufferGeometry {
+    const quadGeo = new THREE.InstancedBufferGeometry();
+    const verts = new Float32Array([
+      -0.5, -0.5, 0,   0.5, -0.5, 0,   0.5,  0.5, 0,
+      -0.5, -0.5, 0,   0.5,  0.5, 0,  -0.5,  0.5, 0,
+    ]);
+    const uvs = new Float32Array([
+      0, 0,  1, 0,  1, 1,
+      0, 0,  1, 1,  0, 1,
+    ]);
+    quadGeo.setAttribute('position', new THREE.BufferAttribute(verts, 3));
+    quadGeo.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+    quadGeo.setAttribute('aPackedA', this._ringBuf.packedAttrA);
+    quadGeo.setAttribute('aPackedB', this._ringBuf.packedAttrB);
+    quadGeo.instanceCount = 0;
+    return quadGeo;
+  }
+
+  private _syncParticleGeometryCapacity(): void {
+    if (this._ringBufferResizeVersion === this._ringBuf.resizeVersion) return;
+
+    const oldGeometry = this._particleGeometry;
+    const nextGeometry = this._createParticleGeometry();
+    nextGeometry.instanceCount = Math.min(oldGeometry.instanceCount ?? 0, this._ringBuf.activeCount);
+
+    oldGeometry.dispose();
+    this._particleGeometry = nextGeometry;
+    if (this.particleMesh) this.particleMesh.geometry = nextGeometry;
+    this._ringBufferResizeVersion = this._ringBuf.resizeVersion;
+  }
+
   /**
    * Update GPU-side uniforms. Zero per-particle JS work — just scalar uniform writes.
    *
@@ -983,6 +1026,7 @@ export class SensorRenderer {
    */
   updateUniforms(now: number, tau: number): void {
     if (!this._ready) return;
+    this._syncParticleGeometryCapacity();
 
     // ── Push scalar uniforms ──────────────────────────────────────
     this._uTime.value = now;
@@ -1019,13 +1063,10 @@ export class SensorRenderer {
     // ── Alive-range optimization: skip dead particles ─────────────
     // Compute the Weibull cutoff duration (age beyond which fade < threshold)
     const k = Math.max(0.01, this.fadeSharpness);
-    // Extend cutoff by 3× arrivalSpread to account for non-monotonic bornTimes.
-    // arrivalSpread offsets each bornTime by up to ±1.5× spread, so adjacent
-    // slots can differ by up to 3× spread. Without this margin the binary
-    // search in computeAliveRange lands on random positions each frame,
-    // producing visible flicker as chunks of alive particles are clipped.
+    // Extend cutoff by the full +/- arrival window so raw-slot lower bounds
+    // cannot clip delayed particles before the batch history widens the range.
     const cutoffDuration = tau * Math.pow(-Math.log(FADE_THRESHOLD), 1 / k) * 1.2
-      + this.arrivalSpread * 3;
+      + this.arrivalSpread * ARRIVAL_SEARCH_PADDING_MULTIPLIER * 2;
     const { start, count } = this._ringBuf.computeAliveRange(now, cutoffDuration);
     this._uAliveStart.value = start;
     this._uAliveCount.value = count;
@@ -1035,18 +1076,7 @@ export class SensorRenderer {
     let autoGain = 1;
     if (this.autoBrightness) {
       if (this._hdrMode !== 'none') {
-        // Sample alive particles for the actual max eps on screen.
-        // Fast-attack / slow-decay smoothing avoids flicker while
-        // ensuring the brightest visible particle reaches peak nits.
-        const sampledMax = this._ringBuf.sampleMaxEps(start, count);
-        if (sampledMax >= this._observedMaxEps) {
-          this._observedMaxEps = sampledMax;           // instant jump up
-        } else {
-          this._observedMaxEps *= 0.97;                // slow decay
-          if (this._observedMaxEps < sampledMax) this._observedMaxEps = sampledMax;
-        }
-        const effectiveMaxEps = Math.max(this.minEps + 1, this._observedMaxEps);
-
+        const effectiveMaxEps = Math.max(this.minEps + 1, this.maxEps);
         const sMax = Math.min(1.0, this.saturationFloor + this.saturationRange);
         const maxNits = epsToNits(effectiveMaxEps, this._peakNits, 20, this.minEps, this.maxEps);
         const maxLinear = maxNits / SDR_REFERENCE_WHITE_NITS;
@@ -1060,15 +1090,13 @@ export class SensorRenderer {
           this.brightnessCeil,
           Math.max(this.brightnessFloor, Math.log(this.maxEps + 1) / EPS_LOG_REF),
         );
-        const maxL = this.lightnessFloor + maxBri * this.lightnessRange;
-        const maxSat = this.saturationFloor + (1 - maxBri) * this.saturationRange;
-        const maxC = (1 - Math.abs(2 * maxL - 1)) * maxSat;
-        const peakRGB = Math.min(1.0, maxL + maxC * 0.5);
+        const maxIntensity = this.lightnessFloor + maxBri * this.lightnessRange;
+        const maxSat = Math.min(1.0, this.saturationFloor + maxBri * this.saturationRange);
+        const peakRGB = (0.5 + maxSat * 0.5) * maxIntensity;
 
-        const refL = this.lightnessFloor + AUTO_BRI_REF * this.lightnessRange;
-        const refSat = this.saturationFloor + (1 - AUTO_BRI_REF) * this.saturationRange;
-        const refC = (1 - Math.abs(2 * refL - 1)) * refSat;
-        const refRGB = Math.min(1.0, refL + refC * 0.5);
+        const refIntensity = this.lightnessFloor + AUTO_BRI_REF * this.lightnessRange;
+        const refSat = Math.min(1.0, this.saturationFloor + AUTO_BRI_REF * this.saturationRange);
+        const refRGB = (0.5 + refSat * 0.5) * refIntensity;
 
         if (peakRGB > 0.001) {
           autoGain = refRGB / peakRGB;
@@ -1143,10 +1171,10 @@ export class SensorRenderer {
     if (this._glowRing && this._glowRingMaterial) {
       this._glowRing.visible = this.ringBloomEnabled && this.ringOpacity > 0;
       const ringCol = new THREE.Color(this.effectiveRingColor);
-      this._glowRingMaterial.uniforms.uColor.value.copy(ringCol);
-      this._glowRingMaterial.uniforms.uOpacity.value = this.ringBloomStrength;
+      this._uGlowColor.value.copy(ringCol);
+      this._uGlowOpacity.value = this.ringBloomStrength;
       const glowWidth = this._ringBloomRadiusToGlowWidth(this.ringBloomRadius);
-      this._glowRingMaterial.uniforms.uGlowWidth.value = glowWidth;
+      this._uGlowWidth.value = glowWidth;
       // Rebuild glow geometry when width changes significantly
       if (Math.abs(glowWidth - this._lastGlowWidth) > 0.005) {
         this._lastGlowWidth = glowWidth;
@@ -1203,6 +1231,7 @@ export class SensorRenderer {
     const particleBloomActive = this.particleBloomEnabled && this.bloomStrength > 0;
 
     if (particleBloomActive && this.useBloom && this.pipeline) {
+      this._syncBloomQuality();
       if (this._bloomPass) {
         this._bloomPass.strength.value  = this.bloomStrength;
         this._bloomPass.radius.value    = 1 - this.bloomRadius;

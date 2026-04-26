@@ -7,3 +7,4 @@ echo   Keep this window open -- closing it will stop the server.
 echo   Press Ctrl+C to shut down.
 echo.
 npx vite --open
+pause

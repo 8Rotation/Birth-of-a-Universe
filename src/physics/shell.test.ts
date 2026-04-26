@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { StreamEmitter, defaultEmitterConfig } from "./shell";
+import { StreamEmitter, defaultEmitterConfig, estimateMaxEmissionMultiplier } from "./shell";
 import type { ParticleBatch } from "./shell";
 import { ECSKPhysics } from "./ecsk-physics";
 
@@ -44,15 +44,14 @@ describe("StreamEmitter", () => {
     expect(batch.count).toBe(0);
   });
 
-  it("tick with positive dt produces particles", () => {
+  it("conserves requested rate over one second", () => {
     const emitter = new StreamEmitter(physics, {}, 42);
-    // Run several ticks to accumulate enough for at least 1 particle
     let total = 0;
     for (let i = 0; i < 60; i++) {
       const batch = emitter.tick(1 / 60, i / 60, 500);
       total += batch.count;
     }
-    expect(total).toBeGreaterThan(0);
+    expect(Math.abs(total - 500)).toBeLessThanOrEqual(2);
   });
 
   it("particles have required fields", () => {
@@ -83,5 +82,25 @@ describe("StreamEmitter", () => {
     // Should not throw and may produce particles
     expect(batch.data).toBeInstanceOf(Float32Array);
     expect(typeof batch.count).toBe("number");
+  });
+
+  it("update() applies live pair-production fraction cap changes", () => {
+    const betaPP = ECSKPhysics.BETA_CR * 2;
+    const emitter = new StreamEmitter(physics, { betaPP, ppFractionCap: 1 }, 42);
+
+    const capped = emitter.tick(1, 0, 10);
+    expect(capped.count).toBe(20);
+
+    emitter.update(physics, { betaPP, ppFractionCap: 3 });
+    const uncapped = emitter.tick(1, 1, 10);
+    expect(uncapped.count).toBe(30);
+  });
+
+  it("estimates worst-case emission multiplier for double-bounce plus pair production", () => {
+    const betaPP = ECSKPhysics.BETA_CR * 2;
+    const multiplier = estimateMaxEmissionMultiplier({ doubleBounce: true, betaPP, ppFractionCap: 3 }, 1);
+
+    expect(multiplier).toBeCloseTo((1 / 0.375) * 3, 8);
+    expect(estimateMaxEmissionMultiplier({ doubleBounce: true, betaPP, ppFractionCap: 3 }, 0)).toBeCloseTo(3, 8);
   });
 });

@@ -14,27 +14,41 @@
  */
 
 import * as THREE from "three";
+import { getAttributeBuffer } from "./three-backend.js";
 
-/** Sentinel value for unborn/dead slots — yields huge rawAge so fade → 0. */
-const BORN_SENTINEL = -1e9;
+export const MIN_VALID_ARRIVAL_TIME = -1e8;
+export const MAX_VALID_ARRIVAL_TIME = 1e8;
+/** Sentinel value for unwritten/dead slots — yields huge rawAge so fade -> 0. */
+export const DEAD_ARRIVAL_TIME = MIN_VALID_ARRIVAL_TIME * 10;
+
+/**
+ * Arrival offsets are clamped to +/-1.5x arrivalSpread in CPU and GPU emitters;
+ * callers that use arrival-time lower bounds must include at least this padding.
+ */
+export const ARRIVAL_SEARCH_PADDING_MULTIPLIER = 1.5;
+
+const DEV = (import.meta as ImportMeta & { env?: { DEV?: boolean } }).env?.DEV !== false;
+
+function assertDev(condition: boolean, message: string): asserts condition {
+  if (DEV && !condition) throw new RangeError(message);
+}
 
 /** Bytes per particle: 2 vec4s × 4 floats × 4 bytes = 32 bytes. */
 const BYTES_PER_PARTICLE = 32;
 
-/** Maximum number of GPU write records to keep (≈10 seconds at 60fps). */
-const GPU_HISTORY_MAX = 600;
+/** Maximum write records to keep for stable alive-range estimates. */
+const WRITE_HISTORY_MAX = 65_536;
 
-/**
- * Tracks metadata for a batch of particles written by the GPU compute shader.
- * Used by computeAliveRange() when CPU-side bornTime data is stale.
- */
-interface GpuWriteRecord {
+/** Tracks metadata for a CPU or GPU batch written into the ring buffer. */
+interface WriteRecord {
   /** Ring buffer position at the START of this write batch. */
   writeHead: number;
-  /** Earliest possible bornTime in this batch. */
-  minBorn: number;
-  /** Latest possible bornTime in this batch. */
-  maxBorn: number;
+  /** Number of particles written by this batch. */
+  count: number;
+  /** Earliest possible arrivalTime in this batch. */
+  minArrival: number;
+  /** Latest possible arrivalTime in this batch. */
+  maxArrival: number;
 }
 
 export class ParticleRingBuffer {
@@ -42,15 +56,15 @@ export class ParticleRingBuffer {
   private _writeHead = 0;
   private _totalWritten = 0;
 
-  // Packed: [lx, ly, bornTime, hue] per particle
+  // Packed: [lx, ly, arrivalTime, hue] per particle
   private _attrA: THREE.InstancedBufferAttribute;
   // Packed: [brightness, eps, hitSize, 0] per particle
   private _attrB: THREE.InstancedBufferAttribute;
+  private _resizeVersion = 0;
 
   // GPU direct-write references (set after first render via setGpuBackend)
   private _gpuDevice: GPUDevice | null = null;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private _gpuBackend: any = null;
+  private _gpuBackendOwner: unknown = null;
   /** False after grow() until the next needsUpdate cycle re-creates GPUBuffers. */
   private _gpuBufCacheValid = false;
 
@@ -60,8 +74,10 @@ export class ParticleRingBuffer {
    * particles are emitted by the GPU compute shader).
    */
   private _gpuComputeMode = false;
-  /** Circular history of GPU write batches for alive-range estimation. */
-  private _gpuHistory: GpuWriteRecord[] = [];
+  /** Chronological history of write batches for stable alive-range estimation. */
+  private _writeHistory: WriteRecord[] = [];
+  private _writeHistoryCount = 0;
+  private _hasGpuWrites = false;
 
   constructor(initialCapacity: number) {
     this._capacity = initialCapacity;
@@ -69,10 +85,10 @@ export class ParticleRingBuffer {
     this._attrA = this._makeAttr(new Float32Array(initialCapacity * 4), 4);
     this._attrB = this._makeAttr(new Float32Array(initialCapacity * 4), 4);
 
-    // Fill bornTime slot (attrA[i*4+2]) with sentinel so unwritten slots are always dead
+    // Fill arrivalTime slot (attrA[i*4+2]) so unwritten slots are always dead.
     const a = this._attrA.array as Float32Array;
     for (let i = 0; i < initialCapacity; i++) {
-      a[i * 4 + 2] = BORN_SENTINEL;
+      a[i * 4 + 2] = DEAD_ARRIVAL_TIME;
     }
   }
 
@@ -84,39 +100,47 @@ export class ParticleRingBuffer {
 
   get packedAttrA(): THREE.InstancedBufferAttribute { return this._attrA; }
   get packedAttrB(): THREE.InstancedBufferAttribute { return this._attrB; }
+  get resizeVersion(): number { return this._resizeVersion; }
 
   /** Read hue (degrees) for a given slot — stride-aware into packed attrA.w. */
   getHue(index: number): number {
+    this._assertIndex(index);
     return (this._attrA.array as Float32Array)[index * 4 + 3];
   }
 
   /** Read brightness [0,1] for a given slot — stride-aware into packed attrB.x. */
   getBrightness(index: number): number {
+    this._assertIndex(index);
     return (this._attrB.array as Float32Array)[index * 4];
   }
 
-  /** Read bornTime for a given slot — stride-aware into packed attrA.z. */
-  getBornTime(index: number): number {
+  /** Read arrivalTime for a given slot — stride-aware into packed attrA.z. */
+  getArrivalTime(index: number): number {
+    this._assertIndex(index);
     return (this._attrA.array as Float32Array)[index * 4 + 2];
   }
 
   /** Read position (lx) for a given slot — packed attrA.x. */
   getLx(index: number): number {
+    this._assertIndex(index);
     return (this._attrA.array as Float32Array)[index * 4];
   }
 
   /** Read position (ly) for a given slot — packed attrA.y. */
   getLy(index: number): number {
+    this._assertIndex(index);
     return (this._attrA.array as Float32Array)[index * 4 + 1];
   }
 
   /** Read eps for a given slot — packed attrB.y. */
   getEps(index: number): number {
+    this._assertIndex(index);
     return (this._attrB.array as Float32Array)[index * 4 + 1];
   }
 
   /** Read hitSize for a given slot — packed attrB.z. */
   getHitSize(index: number): number {
+    this._assertIndex(index);
     return (this._attrB.array as Float32Array)[index * 4 + 2];
   }
 
@@ -145,14 +169,13 @@ export class ParticleRingBuffer {
   // ── GPU direct-write setup ──────────────────────────────────────────
 
   /**
-   * Provide GPU device and Three.js backend references for direct partial
+   * Provide GPU device and Three.js renderer/backend references for direct partial
    * buffer uploads. Call after `renderer.init()` and first render so the
    * backend has created GPUBuffers for the attributes.
    */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  setGpuBackend(device: GPUDevice, backend: any): void {
+  setGpuBackend(device: GPUDevice, backendOwner: unknown): void {
     this._gpuDevice = device;
-    this._gpuBackend = backend;
+    this._gpuBackendOwner = backendOwner;
   }
 
   // ── Write batch ─────────────────────────────────────────────────────
@@ -162,10 +185,10 @@ export class ParticleRingBuffer {
    *
    * @param data   Packed particle data (stride floats per particle)
    * @param count  Number of particles in this batch
-   * @param stride Number of floats per particle in the packed format (typically 8)
-   * @param now    Current wall-clock time (seconds)
-   * @param cutoffDuration  Maximum lifetime — if the slot being overwritten
-   *               has bornTime > now - cutoffDuration, grow instead of overwrite
+  * @param stride Number of floats per particle in the packed format (typically 8)
+  * @param now    Current wall-clock time (seconds)
+  * @param cutoffDuration  Maximum lifetime — if the slot being overwritten
+  *               has arrivalTime > now - cutoffDuration, grow instead of overwrite
    */
   writeBatch(
     data: Float32Array,
@@ -181,7 +204,7 @@ export class ParticleRingBuffer {
     if (this._totalWritten >= this._capacity) {
       const nextHead = this._writeHead;
       const a = this._attrA.array as Float32Array;
-      const oldest = a[nextHead * 4 + 2]; // bornTime
+      const oldest = a[nextHead * 4 + 2]; // arrivalTime
       if (oldest > now - cutoffDuration) {
         this.grow(this._capacity + needed);
         grew = true;
@@ -192,13 +215,18 @@ export class ParticleRingBuffer {
     const a = this._attrA.array as Float32Array;
     const b = this._attrB.array as Float32Array;
 
+    let minArrival = Infinity;
+    let maxArrival = -Infinity;
+
     for (let i = 0; i < count; i++) {
       const src = i * stride;
       const dst = this._writeHead * 4;
+      const arrivalTime = data[src + 2];
+      this._assertValidArrivalTime(arrivalTime);
 
       a[dst]     = data[src];      // lx
       a[dst + 1] = data[src + 1];  // ly
-      a[dst + 2] = data[src + 2];  // bornTime
+      a[dst + 2] = arrivalTime;    // arrivalTime
       a[dst + 3] = data[src + 3];  // hue
 
       b[dst]     = data[src + 4];  // brightness
@@ -208,15 +236,20 @@ export class ParticleRingBuffer {
 
       this._writeHead = (this._writeHead + 1) % this._capacity;
       this._totalWritten++;
+
+      if (arrivalTime < minArrival) minArrival = arrivalTime;
+      if (arrivalTime > maxArrival) maxArrival = arrivalTime;
     }
+
+    this._recordWrite(writeStart, count, minArrival, maxArrival, false);
 
     // grow() already set needsUpdate = true for the full re-upload
     if (grew) return;
 
     // Try direct partial GPU write (bypasses full-buffer re-upload)
-    if (this._gpuDevice && this._gpuBackend && this._gpuBufCacheValid) {
-      const gpuBufA: GPUBuffer | undefined = this._gpuBackend.get(this._attrA)?.buffer;
-      const gpuBufB: GPUBuffer | undefined = this._gpuBackend.get(this._attrB)?.buffer;
+    if (this._gpuDevice && this._gpuBackendOwner && this._gpuBufCacheValid) {
+      const gpuBufA = getAttributeBuffer(this._gpuBackendOwner, this._attrA);
+      const gpuBufB = getAttributeBuffer(this._gpuBackendOwner, this._attrB);
 
       if (gpuBufA && gpuBufB) {
         // Verify buffer sizes match current capacity (stale after grow)
@@ -253,10 +286,9 @@ export class ParticleRingBuffer {
       } else {
         // GPUBuffer not found — log diagnostic on first occurrence
         if (this._needsUpdateFallbackCount === 3) {
-          const dataA = this._gpuBackend?.get(this._attrA);
           console.warn(
-            `[ring-buffer] Direct GPU write FAILED — backend.get(attr) returned:`,
-            dataA,
+            `[ring-buffer] Direct GPU write FAILED — attribute buffer unavailable:`,
+            getAttributeBuffer(this._gpuBackendOwner, this._attrA),
             `| Falling back to needsUpdate every frame (SLOW — full buffer re-upload)`
           );
         }
@@ -276,120 +308,208 @@ export class ParticleRingBuffer {
   /**
    * Enable or disable GPU compute mode. When enabled, computeAliveRange()
    * uses recorded GPU write history instead of binary-searching the
-   * CPU-side Float32Array (which is stale in GPU compute mode).
+  * CPU-side Float32Array (which is stale in GPU compute mode).
    */
   set gpuComputeMode(enabled: boolean) {
     this._gpuComputeMode = enabled;
-    if (!enabled) this._gpuHistory.length = 0;
   }
   get gpuComputeMode(): boolean { return this._gpuComputeMode; }
 
   /**
    * Record that `count` particles were written by the GPU compute shader
-   * starting at the current writeHead, with bornTimes approximately in
-   * [minBorn, maxBorn]. Advances the write head by `count`.
+  * starting at the current writeHead, with arrivalTimes approximately in
+  * [minArrival, maxArrival]. Advances the write head by `count`.
    *
    * Used instead of advanceWriteHead() when GPU compute is active so that
    * computeAliveRange() can estimate alive particles from the history
-   * instead of reading stale CPU-side bornTime data.
+   * instead of reading stale CPU-side arrivalTime data.
    */
-  recordGpuWrite(count: number, minBorn: number, maxBorn: number): void {
+  recordGpuWrite(count: number, minArrival: number, maxArrival: number): void {
     if (count <= 0) return;
+    this._assertValidArrivalTime(minArrival);
+    this._assertValidArrivalTime(maxArrival);
 
-    // Record before advancing (writeHead = start of this batch)
-    this._gpuHistory.push({ writeHead: this._writeHead, minBorn, maxBorn });
-
-    // Trim to circular cap
-    if (this._gpuHistory.length > GPU_HISTORY_MAX) {
-      this._gpuHistory.splice(0, this._gpuHistory.length - GPU_HISTORY_MAX);
-    }
-
-    // Advance write head (same as advanceWriteHead)
+    const writeStart = this._writeHead;
     this._writeHead = (this._writeHead + count) % this._capacity;
     this._totalWritten += count;
+    this._recordWrite(writeStart, count, minArrival, maxArrival, true);
   }
 
   // ── Alive-range tracking ─────────────────────────────────────────────
 
   /**
    * Returns {start, count} — the contiguous range of potentially-alive slots.
-   * Particles outside this range are guaranteed dead (bornTime + cutoff < now).
+  * Particles outside this range are guaranteed dead (arrivalTime + cutoff < now).
    * May overestimate (include some dead particles at the edges) but never
    * underestimates (never skips a particle that could be alive).
    */
   computeAliveRange(now: number, cutoffDuration: number): { start: number; count: number } {
     if (this._totalWritten === 0) return { start: 0, count: 0 };
 
-    // GPU compute mode: CPU-side bornTime data is stale, use recorded
-    // write history to estimate the alive range instead of binary-searching
-    // the Float32Array. Each history entry stores the write-head position
-    // and the min/max bornTime bounds for that batch. We binary-search the
-    // history for the oldest batch whose maxBorn > deadline.
-    if (this._gpuComputeMode && this._gpuHistory.length > 0) {
+    // Write-order arrival times are not strictly sorted when arrivalSpread is
+    // nonzero. Use batch history instead of binary-searching noisy particles;
+    // this keeps the draw window stable during high-rate slider changes.
+    if (this._writeHistory.length > 0) {
       return this._computeAliveRangeFromHistory(now, cutoffDuration);
+    }
+
+    if (this._hasGpuWrites) {
+      return this._fullActiveRange();
     }
 
     return this._binarySearchAliveRange(now, cutoffDuration);
   }
 
+  /** Count particles that are actually visible now (not merely queued/future). */
+  countVisible(now: number, visibleDuration: number): number {
+    if (this._totalWritten === 0) return 0;
+    const deadline = now - visibleDuration;
+
+    if (this._hasGpuWrites || this._gpuComputeMode) {
+      let total = 0;
+      for (const record of this._writeHistory) {
+        const overlap = Math.min(record.maxArrival, now) - Math.max(record.minArrival, deadline);
+        if (overlap <= 0) continue;
+
+        const span = record.maxArrival - record.minArrival;
+        total += span > 1e-6 ? record.count * Math.min(1, overlap / span) : record.count;
+      }
+      return Math.round(Math.min(total, this.activeCount));
+    }
+
+    const a = this._attrA.array as Float32Array;
+    const { start, count } = this._fullActiveRange();
+    let visible = 0;
+    for (let i = 0; i < count; i++) {
+      const idx = (start + i) % this._capacity;
+      const arrivalTime = a[idx * 4 + 2];
+      if (arrivalTime > deadline && arrivalTime <= now) visible++;
+    }
+    return visible;
+  }
+
   /**
-   * GPU compute alive-range: binary-search the frame-level write history
-   * instead of per-particle bornTime data.
+   * History alive-range: linear-scan batch bounds instead of binary-searching
+  * per-particle arrivalTimes that can jitter within the arrival-spread window.
    */
   private _computeAliveRangeFromHistory(
     now: number,
     cutoffDuration: number,
   ): { start: number; count: number } {
-    const deadline = now - cutoffDuration;
-    const hist = this._gpuHistory;
-    const cap = this._capacity;
-
-    // Binary search for the first entry where maxBorn > deadline
-    let lo = 0, hi = hist.length;
-    while (lo < hi) {
-      const mid = (lo + hi) >>> 1;
-      if (hist[mid].maxBorn <= deadline) lo = mid + 1;
-      else hi = mid;
+    if (this._writeHistoryCount < this.activeCount) {
+      return this._fullActiveRange();
     }
 
-    if (lo >= hist.length) {
+    const deadline = now - cutoffDuration;
+    const hist = this._writeHistory;
+    const cap = this._capacity;
+
+    let firstAlive = -1;
+    for (let i = 0; i < hist.length; i++) {
+      if (hist[i].maxArrival > deadline) {
+        firstAlive = i;
+        break;
+      }
+    }
+
+    if (firstAlive < 0) {
       // All recorded batches are dead
       return { start: this._writeHead, count: 0 };
     }
 
-    const start = hist[lo].writeHead;
+    const start = hist[firstAlive].writeHead;
     const count = (this._writeHead - start + cap) % cap;
     return { start, count: count === 0 && this._totalWritten > 0 ? cap : count };
   }
 
+  private _fullActiveRange(): { start: number; count: number } {
+    if (this._totalWritten <= this._capacity) {
+      return { start: 0, count: this._totalWritten };
+    }
+    return { start: this._writeHead, count: this._capacity };
+  }
+
+  private _recordWrite(
+    writeHead: number,
+    count: number,
+    minArrival: number,
+    maxArrival: number,
+    gpuWrite: boolean,
+  ): void {
+    if (count <= 0) return;
+    this._writeHistory.push({ writeHead, count, minArrival, maxArrival });
+    this._writeHistoryCount += count;
+    if (gpuWrite) this._hasGpuWrites = true;
+    this._trimWriteHistory();
+  }
+
+  private _trimWriteHistory(): void {
+    const activeCount = this.activeCount;
+    let overwritten = this._writeHistoryCount - activeCount;
+    while (overwritten > 0 && this._writeHistory.length > 0) {
+      const first = this._writeHistory[0];
+      if (overwritten >= first.count) {
+        this._writeHistoryCount -= first.count;
+        overwritten -= first.count;
+        this._writeHistory.shift();
+      } else {
+        first.writeHead = (first.writeHead + overwritten) % this._capacity;
+        first.count -= overwritten;
+        this._writeHistoryCount -= overwritten;
+        overwritten = 0;
+      }
+    }
+
+    while (this._writeHistory.length > WRITE_HISTORY_MAX) {
+      this._writeHistoryCount -= this._writeHistory.shift()!.count;
+    }
+  }
+
+  private _resetWriteHistory(): void {
+    this._writeHistory.length = 0;
+    this._writeHistoryCount = 0;
+    this._hasGpuWrites = false;
+  }
+
   /**
-   * CPU path: binary-search the per-particle bornTime array.
+   * CPU path: binary-search the per-particle arrivalTime array.
    * Used when GPU compute mode is off.
    */
   private _binarySearchAliveRange(
     now: number,
     cutoffDuration: number,
   ): { start: number; count: number } {
-    const a = this._attrA.array as Float32Array;
     const cutoff = now - cutoffDuration;
 
     if (this._totalWritten <= this._capacity) {
-      // Buffer hasn't wrapped — particles are at slots [0, totalWritten).
-      // Binary search for the first alive particle (bornTime > cutoff).
-      // bornTime is monotonically increasing in write order.
+      const lo = this._arrivalTimeLowerBound(cutoff);
+      return { start: lo, count: this._totalWritten - lo };
+    }
+
+    const lo = this._arrivalTimeLowerBound(cutoff);
+    const cap = this._capacity;
+    const wh = this._writeHead;
+    const start = (wh + lo) % cap;
+    return { start, count: cap - lo };
+  }
+
+  /**
+   * Returns the first logical write-order offset whose arrivalTime is greater
+   * than the padded cutoff. Callers guarantee cutoffDuration includes at least
+   * ARRIVAL_SEARCH_PADDING_MULTIPLIER * arrivalSpread when relying on raw slots.
+   */
+  private _arrivalTimeLowerBound(cutoff: number): number {
+    const a = this._attrA.array as Float32Array;
+    if (this._totalWritten <= this._capacity) {
       let lo = 0, hi = this._totalWritten;
       while (lo < hi) {
         const mid = (lo + hi) >>> 1;
         if (a[mid * 4 + 2] <= cutoff) lo = mid + 1;
         else hi = mid;
       }
-      return { start: lo, count: this._totalWritten - lo };
+      return lo;
     }
 
-    // Buffer has wrapped — oldest slot is at writeHead.
-    // Particles were written in chronological order, so bornTime is
-    // monotonically increasing from writeHead around the ring.
-    // Binary search over the logical (chronological) index space [0, capacity).
     const cap = this._capacity;
     const wh = this._writeHead;
     let lo = 0, hi = cap;
@@ -399,10 +519,7 @@ export class ParticleRingBuffer {
       if (a[physIdx * 4 + 2] <= cutoff) lo = mid + 1;
       else hi = mid;
     }
-    // lo = number of dead particles from oldest
-    const start = (wh + lo) % cap;
-    const count = cap - lo;
-    return { start, count };
+    return lo;
   }
 
   // ── GPU compute helpers ──────────────────────────────────────────────
@@ -413,9 +530,9 @@ export class ParticleRingBuffer {
    * Used by ComputeEmitter to set up copyBufferToBuffer targets.
    */
   getGpuBuffers(): { bufA: GPUBuffer; bufB: GPUBuffer } | null {
-    if (!this._gpuDevice || !this._gpuBackend) return null;
-    const gpuBufA: GPUBuffer | undefined = this._gpuBackend.get(this._attrA)?.buffer;
-    const gpuBufB: GPUBuffer | undefined = this._gpuBackend.get(this._attrB)?.buffer;
+    if (!this._gpuDevice || !this._gpuBackendOwner) return null;
+    const gpuBufA = getAttributeBuffer(this._gpuBackendOwner, this._attrA);
+    const gpuBufB = getAttributeBuffer(this._gpuBackendOwner, this._attrB);
     if (!gpuBufA || !gpuBufB) return null;
     const expectedSize = this._capacity * 16;
     if (gpuBufA.size < expectedSize || gpuBufB.size < expectedSize) {
@@ -438,7 +555,7 @@ export class ParticleRingBuffer {
 
     // Check for wrap-around overwriting alive slots (same guard as writeBatch)
     if (this._totalWritten >= this._capacity) {
-      // Can't easily check bornTime since CPU data is stale in GPU-compute mode.
+      // Can't easily check arrivalTime since CPU data is stale in GPU-compute mode.
       // The caller (ComputeEmitter) is responsible for not exceeding capacity
       // faster than particles die. We just advance.
     }
@@ -452,14 +569,14 @@ export class ParticleRingBuffer {
 
   // ── Clear ───────────────────────────────────────────────────────────
 
-  /** Reset the ring buffer — fills bornTime with sentinel, resets writeHead. */
+  /** Reset the ring buffer — fills arrivalTime with sentinel, resets writeHead. */
   clear(): void {
     this._writeHead = 0;
     this._totalWritten = 0;
-    this._gpuHistory.length = 0;
+    this._resetWriteHistory();
     const a = this._attrA.array as Float32Array;
     for (let i = 0; i < this._capacity; i++) {
-      a[i * 4 + 2] = BORN_SENTINEL;
+      a[i * 4 + 2] = DEAD_ARRIVAL_TIME;
     }
     this._attrA.needsUpdate = true;
     this._attrB.needsUpdate = true;
@@ -468,16 +585,18 @@ export class ParticleRingBuffer {
   // ── Invalidate future ───────────────────────────────────────────────
 
   /**
-   * Kill particles born after cutoffTime (e.g. after a settings change).
-   * Sets their bornTime to sentinel so the shader treats them as dead.
+   * Kill particles scheduled after cutoffTime (e.g. after a settings change).
+   * Sets their arrivalTime to sentinel so the shader treats them as dead.
    */
   invalidateFuture(cutoffTime: number): void {
     const a = this._attrA.array as Float32Array;
-    const len = this._capacity;
-    for (let i = 0; i < len; i++) {
-      const bornIdx = i * 4 + 2;
-      if (a[bornIdx] > cutoffTime) {
-        a[bornIdx] = BORN_SENTINEL;
+    const count = this.activeCount;
+    const start = this._totalWritten <= this._capacity ? 0 : this._writeHead;
+    for (let i = 0; i < count; i++) {
+      const index = (start + i) % this._capacity;
+      const arrivalIdx = index * 4 + 2;
+      if (a[arrivalIdx] > cutoffTime) {
+        a[arrivalIdx] = DEAD_ARRIVAL_TIME;
       }
     }
     this._attrA.needsUpdate = true;
@@ -527,23 +646,26 @@ export class ParticleRingBuffer {
 
       if (hadWrapped) {
         // Reorder: chronological = [oldHead..oldCap) + [0..oldHead)
-        this._growAttrReorder(this._attrA, oldCap, oldHead);
-        this._growAttrReorder(this._attrB, oldCap, oldHead);
+        this._growAttrReorder(this._attrA, oldCap, oldHead, "packedAttrA");
+        this._growAttrReorder(this._attrB, oldCap, oldHead, "packedAttrB");
+        for (const record of this._writeHistory) {
+          record.writeHead = (record.writeHead - oldHead + oldCap) % oldCap;
+        }
         // writeHead now points right after the old data
         this._writeHead = oldCap;
         // After linearizing, exactly oldCap particles occupy [0..oldCap)
         this._totalWritten = oldCap;
       } else {
         // No wrap — data is already in order [0..totalWritten)
-        this._growAttr(this._attrA, oldCap);
-        this._growAttr(this._attrB, oldCap);
+        this._growAttr(this._attrA, oldCap, "packedAttrA");
+        this._growAttr(this._attrB, oldCap, "packedAttrB");
         // writeHead stays at its current position (still valid)
       }
 
       // Fill remaining slots with sentinel
       const a = this._attrA.array as Float32Array;
       for (let i = oldCap; i < newCap; i++) {
-        a[i * 4 + 2] = BORN_SENTINEL;
+        a[i * 4 + 2] = DEAD_ARRIVAL_TIME;
       }
 
       // Invalidate cached GPU buffer references — the old GPUBuffers
@@ -551,7 +673,9 @@ export class ParticleRingBuffer {
       // GPUBuffer from the backend (after Three.js re-uploads via
       // needsUpdate) or fall back to needsUpdate again.
       this._gpuBufCacheValid = false;
+      this._resizeVersion++;
       this._lastGrowTime = now;
+      this._trimWriteHistory();
 
       console.log(
         `[ring-buffer] Grown → ${newCap} particles ` +
@@ -583,14 +707,41 @@ export class ParticleRingBuffer {
     return attr;
   }
 
+  private _assertIndex(index: number): void {
+    if (!Number.isInteger(index) || index < 0 || index >= this._capacity) {
+      throw new RangeError(`ParticleRingBuffer index ${index} out of bounds for capacity ${this._capacity}`);
+    }
+  }
+
+  private _assertValidArrivalTime(arrivalTime: number): void {
+    assertDev(
+      arrivalTime > MIN_VALID_ARRIVAL_TIME && arrivalTime < MAX_VALID_ARRIVAL_TIME,
+      `arrivalTime ${arrivalTime} outside valid range (${MIN_VALID_ARRIVAL_TIME}, ${MAX_VALID_ARRIVAL_TIME})`,
+    );
+  }
+
+  private _destroyAttributeGpuBuffer(attr: THREE.InstancedBufferAttribute, label: string): void {
+    if (!this._gpuBackendOwner) return;
+    const buffer = getAttributeBuffer(this._gpuBackendOwner, attr);
+    if (!buffer) return;
+    try {
+      buffer.destroy();
+    } catch (e) {
+      console.warn(`[ring-buffer] Failed to destroy old GPUBuffer for ${label}:`, e);
+    }
+  }
+
   private _growAttr(
     attr: THREE.InstancedBufferAttribute,
     oldCap: number,
+    label: string,
   ): void {
     const oldArr = attr.array as Float32Array;
     const newArr = new Float32Array(this._capacity * 4);
     newArr.set(oldArr.subarray(0, oldCap * 4));
+    this._destroyAttributeGpuBuffer(attr, label);
     attr.array = newArr;
+    (attr as unknown as { count: number }).count = this._capacity;
     attr.needsUpdate = true;
   }
 
@@ -598,6 +749,7 @@ export class ParticleRingBuffer {
     attr: THREE.InstancedBufferAttribute,
     oldCap: number,
     oldHead: number,
+    label: string,
   ): void {
     const oldArr = attr.array as Float32Array;
     const newArr = new Float32Array(this._capacity * 4);
@@ -606,7 +758,9 @@ export class ParticleRingBuffer {
     newArr.set(oldArr.subarray(oldHead * 4, oldCap * 4), 0);
     // Second segment: [0..oldHead)
     newArr.set(oldArr.subarray(0, oldHead * 4), firstLen);
+    this._destroyAttributeGpuBuffer(attr, label);
     attr.array = newArr;
+    (attr as unknown as { count: number }).count = this._capacity;
     attr.needsUpdate = true;
   }
 }

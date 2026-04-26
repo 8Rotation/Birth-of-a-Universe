@@ -174,5 +174,16 @@ describe("sensitivity", () => {
     const s1 = p.sensitivity();
     const s2 = p.sensitivity();
     expect(s1).toBe(s2);
+    expect(s1).toBeLessThan(0);
+  });
+
+  it("has negative dT/dβ for a closed bounce across beta perturbations", () => {
+    const beta = 0.10;
+    const closed = new ECSKPhysics(beta, 1);
+
+    for (const delta of [1e-4, 1e-3, 5e-3]) {
+      const dTDb = (closed.halfPeriod(beta + delta) - closed.halfPeriod(beta - delta)) / (2 * delta);
+      expect(dTDb).toBeLessThan(0);
+    }
   });
 });

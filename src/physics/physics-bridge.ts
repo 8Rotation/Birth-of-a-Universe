@@ -23,6 +23,12 @@ import {
   DEFAULT_SILK_DAMPING,
 } from "./perturbation.js";
 import type { PerturbMode } from "./perturbation.js";
+import type {
+  WorkerConfigFields,
+  WorkerOutMsg,
+  WorkerPhysicsParams,
+  WorkerTickMsg,
+} from "./worker-protocol.js";
 
 /** A raw particle batch from the worker — avoids per-particle object creation. */
 export interface RawParticleBatch {
@@ -37,79 +43,23 @@ export interface RawParticleBatch {
  */
 export const PARTICLE_STRIDE = 8;
 
-export interface PhysicsBridgeConfig {
-  beta: number;
-  kCurvature: number;
-  perturbAmplitude: number;
-  lMax: number;
-  nS: number;
-  arrivalSpread: number;
-  seed: number;
-  fieldEvolution: number;
-  doubleBounce: boolean;
-  betaPP: number;
-  silkDamping?: number;
-  hueMin?: number;
-  hueRange?: number;
-  brightnessFloor?: number;
-  brightnessCeil?: number;
-  dbSecondHueShift?: number;
-  dbSecondBriScale?: number;
-  ppHueShift?: number;
-  ppBriBoost?: number;
-  ppSizeScale?: number;
-  ppBaseDelay?: number;
-  ppScatterRange?: number;
-  sizeVariation?: number;
-  ppFractionCap?: number;
-}
+export interface PhysicsBridgeConfig extends WorkerConfigFields {}
+type TickParams = WorkerPhysicsParams;
 
-type TickParams = {
-  beta: number;
-  kCurvature: number;
-  perturbAmplitude: number;
-  lMax: number;
-  nS: number;
-  arrivalSpread: number;
-  fieldEvolution: number;
-  doubleBounce: boolean;
-  betaPP: number;
-  silkDamping?: number;
-  hueMin?: number;
-  hueRange?: number;
-  brightnessFloor?: number;
-  brightnessCeil?: number;
-  dbSecondHueShift?: number;
-  dbSecondBriScale?: number;
-  ppHueShift?: number;
-  ppBriBoost?: number;
-  ppSizeScale?: number;
-  ppBaseDelay?: number;
-  ppScatterRange?: number;
-  sizeVariation?: number;
-  ppFractionCap?: number;
-};
-
-type TickMessage = {
-  type: "tick";
-  dt: number;
-  simTime: number;
-  particleRate: number;
-  generation: number;
-  coeffs: Float64Array;
-  maxParticlesPerTick?: number;
-} & TickParams;
+const MAX_WORKER_ATTEMPTS = 5;
 
 interface WorkerTickState {
   busy: boolean;
-  pendingTick: TickMessage | null;
-  dead: boolean;
-  consecutiveErrors: number;
+  pendingTick: WorkerTickMsg | null;
 }
 
 export class PhysicsBridge {
-  private workers: Worker[] = [];
+  private workers: (Worker | null)[] = [];
   private workerStates: WorkerTickState[] = [];
+  private _workerAttempts: number[] = [];
+  private _workerDead: boolean[] = [];
+  private _workerFailureLogged: boolean[] = [];
+  private _workerRestartTimers: (ReturnType<typeof setTimeout> | null)[] = [];
   private batches: RawParticleBatch[] = [];
   private generation = 0;
   readonly workerCount: number;
@@ -132,11 +82,13 @@ export class PhysicsBridge {
   private _lastAmplitude: number;
   private _lastNS: number;
   private _lastSilkDamping: number;
+  private _sessionSeed: number;
   private _lastConfig: PhysicsBridgeConfig;
 
-  private _postTick(index: number, msg: TickMessage): void {
+  private _postTick(index: number, msg: WorkerTickMsg): void {
     const state = this.workerStates[index];
-    if (!state || state.dead) return;
+    const worker = this.workers[index];
+    if (!state || !worker || this._workerDead[index]) return;
     if (state.busy) {
       // Accumulate dt from the dropped pending tick so the worker's
       // accumulator sees all frames' worth of particles.  Without this,
@@ -151,7 +103,7 @@ export class PhysicsBridge {
     }
     state.busy = true;
     state.pendingTick = null;
-    this.workers[index].postMessage(msg);
+    worker.postMessage(msg);
   }
 
   private _clearWorkerTickState(): void {
@@ -161,20 +113,66 @@ export class PhysicsBridge {
     }
   }
 
-  private _restartWorker(index: number): void {
+  private _clearWorkerRestartTimer(index: number): void {
+    const timer = this._workerRestartTimers[index];
+    if (timer !== null && timer !== undefined) clearTimeout(timer);
+    this._workerRestartTimers[index] = null;
+  }
+
+  private _handleWorkerFailure(index: number, reason: string): void {
+    if (this._workerDead[index]) return;
+
     const state = this.workerStates[index];
-    try {
-      this.workers[index].terminate();
-    } catch { /* already dead */ }
-    const newWorker = this._createWorker(index, this._lastConfig);
-    this.workers[index] = newWorker;
     if (state) {
       state.busy = false;
       state.pendingTick = null;
-      state.dead = false;
-      // Keep consecutiveErrors so backoff continues if the new worker also crashes
     }
-    console.log(`[bridge] Worker ${index} restarted (attempt ${state?.consecutiveErrors ?? '?'})`);
+
+    try {
+      this.workers[index]?.terminate();
+    } catch { /* already dead */ }
+    this.workers[index] = null;
+
+    const attempts = (this._workerAttempts[index] ?? 0) + 1;
+    this._workerAttempts[index] = attempts;
+
+    if (attempts >= MAX_WORKER_ATTEMPTS) {
+      this._workerDead[index] = true;
+      this._clearWorkerRestartTimer(index);
+      if (!this._workerFailureLogged[index]) {
+        console.error(`[bridge] Worker ${index} permanently disabled after ${attempts} failed restart attempts: ${reason}`);
+        this._workerFailureLogged[index] = true;
+      }
+      return;
+    }
+
+    const delay = Math.min(5000, 500 * Math.pow(2, attempts - 1));
+    this._clearWorkerRestartTimer(index);
+    this._workerRestartTimers[index] = setTimeout(() => this._restartWorker(index), delay);
+  }
+
+  private _restartWorker(index: number, logRestart = true): void {
+    if (this._workerDead[index]) return;
+
+    this._clearWorkerRestartTimer(index);
+    try {
+      this.workers[index]?.terminate();
+    } catch { /* already dead */ }
+    this.workers[index] = null;
+
+    try {
+      const newWorker = this._createWorker(index, this._lastConfig);
+      this.workers[index] = newWorker;
+      const state = this.workerStates[index];
+      if (state) {
+        state.busy = false;
+        state.pendingTick = null;
+      }
+      if (logRestart) console.log(`[bridge] Worker ${index} restarted (attempt ${this._workerAttempts[index] ?? 0})`);
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      this._handleWorkerFailure(index, reason);
+    }
   }
 
   private _createWorker(index: number, config: PhysicsBridgeConfig): Worker {
@@ -185,10 +183,10 @@ export class PhysicsBridge {
     );
 
     worker.onmessage = (e: MessageEvent) => {
-      const msg = e.data;
-      if (msg.type === "particles" && msg.count > 0 && msg.data) {
-        if (msg.generation !== undefined && msg.generation < this.generation) return;
-        this.batches.push({ data: msg.data as Float32Array, count: msg.count as number });
+      const msg = e.data as WorkerOutMsg;
+      if (msg.kind === "particles" && msg.count > 0 && msg.data) {
+        if (msg.generation < this.generation) return;
+        this.batches.push({ data: msg.data, count: msg.count });
       }
       if (typeof msg.tickMs === 'number') {
         this._workerTickMsAccum += msg.tickMs;
@@ -198,7 +196,6 @@ export class PhysicsBridge {
       const state = this.workerStates[index];
       if (!state) return;
       state.busy = false;
-      state.consecutiveErrors = 0;
 
       const pending = state.pendingTick;
       if (pending && pending.generation === this.generation) {
@@ -210,21 +207,11 @@ export class PhysicsBridge {
     };
 
     worker.onerror = (err: ErrorEvent) => {
-      console.error(`[bridge] Worker ${index} error:`, err.message);
-      const state = this.workerStates[index];
-      if (state) {
-        state.busy = false;
-        state.pendingTick = null;
-        state.dead = true;
-        state.consecutiveErrors++;
-      }
-      // Auto-restart with exponential backoff (cap at 5 s)
-      const delay = Math.min(5000, 500 * Math.pow(2, (state?.consecutiveErrors ?? 1) - 1));
-      setTimeout(() => this._restartWorker(index), delay);
+      this._handleWorkerFailure(index, err.message || "unknown worker error");
     };
 
     worker.postMessage({
-      type: "init",
+      kind: "init",
       ...config,
       seed: workerSeed,
       generation: this.generation,
@@ -236,6 +223,7 @@ export class PhysicsBridge {
 
   constructor(config: PhysicsBridgeConfig, workerCount = 1) {
     this.workerCount = Math.max(1, workerCount);
+    this._sessionSeed = config.seed;
 
     // Initialise central perturbation field
     const silkDamping = config.silkDamping ?? DEFAULT_SILK_DAMPING;
@@ -256,8 +244,13 @@ export class PhysicsBridge {
 
     // Create N workers, each with a unique seed derived from the session seed
     for (let i = 0; i < this.workerCount; i++) {
-      this.workerStates.push({ busy: false, pendingTick: null, dead: false, consecutiveErrors: 0 });
-      this.workers.push(this._createWorker(i, config));
+      this.workerStates.push({ busy: false, pendingTick: null });
+      this._workerAttempts.push(0);
+      this._workerDead.push(false);
+      this._workerFailureLogged.push(false);
+      this._workerRestartTimers.push(null);
+      this.workers.push(null);
+      this._restartWorker(i, false);
     }
 
     if (this.workerCount > 1) {
@@ -309,7 +302,7 @@ export class PhysicsBridge {
 
     if (lMax !== this._lastLMax || nS !== this._lastNS || silkDamping !== this._lastSilkDamping) {
       // Regenerate from scratch — structural params changed
-      this.coeffRng = splitmix32(((this._lastLMax * 6271) ^ lMax) >>> 0);
+      this.coeffRng = splitmix32(((this._lastLMax * 6271) ^ lMax ^ this._sessionSeed) >>> 0);
       this.coeffs = generatePerturbCoeffs(lMax, amplitude, this.coeffRng, nS, silkDamping);
       this._lastLMax = lMax;
       this._lastNS = nS;
@@ -339,11 +332,11 @@ export class PhysicsBridge {
     const packedCoeffs = this._packCoeffs();
 
     // Partition rate across alive workers (each gets an equal share)
-    const aliveCount = this.workerStates.filter(s => !s.dead).length;
+    const aliveCount = this.workers.filter((worker, index) => worker && !this._workerDead[index]).length;
     const ratePerWorker = particleRate / Math.max(1, aliveCount);
 
-    const msg: TickMessage = {
-      type: "tick" as const,
+    const msg: WorkerTickMsg = {
+      kind: "tick" as const,
       dt,
       simTime,
       particleRate: ratePerWorker,
@@ -362,8 +355,10 @@ export class PhysicsBridge {
   updatePhysics(beta: number, kCurvature: number): void {
     this.generation++;
     this._clearWorkerTickState();
-    for (const worker of this.workers) {
-      worker.postMessage({ type: "updateBeta", beta, kCurvature, generation: this.generation });
+    for (let i = 0; i < this.workers.length; i++) {
+      const worker = this.workers[i];
+      if (!worker || this._workerDead[i]) continue;
+      worker.postMessage({ kind: "updateBeta", beta, kCurvature, generation: this.generation });
     }
     // Discard any queued particles baked at the old β/k
     this.batches.length = 0;
@@ -385,6 +380,7 @@ export class PhysicsBridge {
     this.generation++;
     this._clearWorkerTickState();
     this._lastConfig = config;
+    this._sessionSeed = config.seed;
 
     // Re-initialise central perturbation field
     const silkDamping = config.silkDamping ?? DEFAULT_SILK_DAMPING;
@@ -402,9 +398,11 @@ export class PhysicsBridge {
     this._lastSilkDamping = silkDamping;
 
     for (let i = 0; i < this.workers.length; i++) {
+      const worker = this.workers[i];
+      if (!worker || this._workerDead[i]) continue;
       const workerSeed = (config.seed ^ (i * 0x9e3779b9)) >>> 0;
-      this.workers[i].postMessage({
-        type: "reset",
+      worker.postMessage({
+        kind: "reset",
         ...config,
         seed: workerSeed,
         generation: this.generation,
@@ -435,13 +433,21 @@ export class PhysicsBridge {
   restart(config: PhysicsBridgeConfig): void {
     // Terminate all existing workers
     for (const worker of this.workers) {
-      worker.terminate();
+      worker?.terminate();
+    }
+    for (let i = 0; i < this._workerRestartTimers.length; i++) {
+      this._clearWorkerRestartTimer(i);
     }
     this.workers = [];
     this.workerStates = [];
+    this._workerAttempts = [];
+    this._workerDead = [];
+    this._workerFailureLogged = [];
+    this._workerRestartTimers = [];
     this.batches = [];
     this.generation++;
     this._lastConfig = config;
+    this._sessionSeed = config.seed;
 
     // Re-initialise central perturbation field
     const silkDamping = config.silkDamping ?? DEFAULT_SILK_DAMPING;
@@ -460,8 +466,13 @@ export class PhysicsBridge {
 
     // Create fresh workers
     for (let i = 0; i < this.workerCount; i++) {
-      this.workerStates.push({ busy: false, pendingTick: null, dead: false, consecutiveErrors: 0 });
-      this.workers.push(this._createWorker(i, config));
+      this.workerStates.push({ busy: false, pendingTick: null });
+      this._workerAttempts.push(0);
+      this._workerDead.push(false);
+      this._workerFailureLogged.push(false);
+      this._workerRestartTimers.push(null);
+      this.workers.push(null);
+      this._restartWorker(i, false);
     }
 
     console.log(`[bridge] Restarted ${this.workerCount} physics workers`);
@@ -474,8 +485,11 @@ export class PhysicsBridge {
   getCoeffRng(): () => number { return this.coeffRng; }
 
   dispose(): void {
+    for (let i = 0; i < this._workerRestartTimers.length; i++) {
+      this._clearWorkerRestartTimer(i);
+    }
     for (const worker of this.workers) {
-      worker.terminate();
+      worker?.terminate();
     }
     this.workers = [];
   }

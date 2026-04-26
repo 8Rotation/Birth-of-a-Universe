@@ -94,6 +94,8 @@ export class ComputeEmitter {
 
   // Frame seed counter (incremented each dispatch)
   private _frameSeed = 1;
+  private _paramsScratch: ArrayBuffer;
+  private _paramsView: DataView;
 
   private _ready = false;
 
@@ -105,6 +107,8 @@ export class ComputeEmitter {
     this._device = device;
     this._ringBuffer = ringBuffer;
     this._shaderSource = shaderSource;
+    this._paramsScratch = new ArrayBuffer(PARAMS_BUFFER_SIZE);
+    this._paramsView = new DataView(this._paramsScratch);
   }
 
   // ── Public API ──────────────────────────────────────────────────────
@@ -214,7 +218,7 @@ export class ComputeEmitter {
       commandEncoder.copyBufferToBuffer(this._stagingBufB, 0, gpuBufs.bufB, 0, wrapSize);
     }
 
-    // Record GPU write with bornTime bounds for alive-range estimation.
+    // Record GPU write with arrivalTime bounds for alive-range estimation.
     // Bounce arrivals fall within ±1.5*spread. Production arrivals use the
     // shader's wider pp clamp, so include it whenever this dispatch contains
     // production particles. The history may overestimate, but must not cull
@@ -227,7 +231,7 @@ export class ComputeEmitter {
     const maxDelay = Math.max(bounceDelay, productionDelay);
     rb.recordGpuWrite(emitCount, params.simTime - maxDelay, params.simTime + maxDelay);
 
-    // Increment frame seed for next dispatch
+    // Intentional u32 wrap: the seed is a per-frame decorrelator with a 2^32 period.
     this._frameSeed = (this._frameSeed + 1) >>> 0;
     return true;
   }
@@ -342,8 +346,7 @@ export class ComputeEmitter {
   ): void {
     // Pack into a Float32Array matching the WGSL Params struct layout.
     // Mixed f32/u32 fields use DataView for correct bit patterns.
-    const ab = new ArrayBuffer(PARAMS_BUFFER_SIZE);
-    const dv = new DataView(ab);
+    const dv = this._paramsView;
     let off = 0;
 
     const wf = (v: number) => { dv.setFloat32(off, v, true); off += 4; };
@@ -394,8 +397,8 @@ export class ComputeEmitter {
     wf(params.ppMaxWEff);            // 128
     wf(params.ppGlobalMinAcc);       // 132
     wf(params.ppGlobalMaxAcc);       // 136
-    // padding to 144 bytes (already zeroed by ArrayBuffer)
+    // Tail padding remains zero in the reused scratch buffer.
 
-    this._device.queue.writeBuffer(this._paramsBuffer!, 0, ab);
+    this._device.queue.writeBuffer(this._paramsBuffer!, 0, this._paramsScratch);
   }
 }

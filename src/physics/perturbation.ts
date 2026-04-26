@@ -135,6 +135,13 @@ export function generatePerturbCoeffs(
   ns = 0.965,
   silkDamping = DEFAULT_SILK_DAMPING,
 ): PerturbMode[] {
+  if (!Number.isFinite(lMax) || lMax <= 0) {
+    throw new RangeError("lMax must be greater than 0");
+  }
+  if (!Number.isFinite(amplitude) || amplitude < 0) {
+    throw new RangeError("amplitude must be greater than or equal to 0");
+  }
+
   const lSilk = Math.max(2, lMax * silkDamping);
   const coeffs: PerturbMode[] = [];
 
@@ -149,6 +156,23 @@ export function generatePerturbCoeffs(
   }
 
   return coeffs;
+}
+
+const gaussianSpareByRng = new WeakMap<() => number, number>();
+
+function gaussianFromRng(rng: () => number): number {
+  const spare = gaussianSpareByRng.get(rng);
+  if (spare !== undefined) {
+    gaussianSpareByRng.delete(rng);
+    return spare;
+  }
+
+  const u1 = Math.max(1e-10, rng());
+  const u2 = rng();
+  const radius = Math.sqrt(-2 * Math.log(u1));
+  const angle = 2 * Math.PI * u2;
+  gaussianSpareByRng.set(rng, radius * Math.sin(angle));
+  return radius * Math.cos(angle);
 }
 
 /**
@@ -177,10 +201,7 @@ export function evolveCoeffs(
   const sqrtDt = Math.sqrt(dt);
   const sigmaScale = Math.sqrt(2 * theta);
   for (const mode of coeffs) {
-    // Box-Muller: two uniforms → one Gaussian
-    const u1 = Math.max(1e-10, rng());
-    const u2 = rng();
-    const gauss = Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+    const gauss = gaussianFromRng(rng);
     mode.c += -theta * mode.c * dt + mode.sigma * sigmaScale * sqrtDt * gauss;
   }
 }
@@ -213,6 +234,7 @@ export function rescaleCoeffSigmas(
  *
  * Returns a dimensionless perturbation value (typically |δ| ≪ 1).
  */
+// Reference implementation — used by tests; do not inline into hot path.
 export function evaluatePerturbation(
   coeffs: PerturbMode[],
   cosT: number,

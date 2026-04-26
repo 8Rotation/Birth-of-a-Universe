@@ -1,8 +1,12 @@
 import { describe, it, expect, vi } from "vitest";
-import { ParticleRingBuffer } from "./particle-ring-buffer";
+import {
+  ARRIVAL_SEARCH_PADDING_MULTIPLIER,
+  DEAD_ARRIVAL_TIME,
+  MIN_VALID_ARRIVAL_TIME,
+  ParticleRingBuffer,
+} from "./particle-ring-buffer";
 
 const STRIDE = 8;
-const BORN_SENTINEL = -1e9;
 
 /** Helper: create a packed Float32Array for N particles with stride 8. */
 function makeBatch(particles: Array<{
@@ -35,11 +39,18 @@ describe("ParticleRingBuffer", () => {
     expect(buf.activeCount).toBe(0);
   });
 
-  it("fills bornTime with sentinel on construction", () => {
+  it("fills arrivalTime with sentinel on construction", () => {
     const buf = new ParticleRingBuffer(16);
     for (let i = 0; i < 16; i++) {
-      expect(buf.getBornTime(i)).toBe(BORN_SENTINEL);
+      expect(buf.getArrivalTime(i)).toBe(DEAD_ARRIVAL_TIME);
     }
+  });
+
+  it("bounds-checks getter indexes", () => {
+    const buf = new ParticleRingBuffer(4);
+    expect(() => buf.getHue(-1)).toThrow(RangeError);
+    expect(() => buf.getHue(4)).toThrow(RangeError);
+    expect(buf.getHue(0)).toBe(0);
   });
 
   it("both packed attributes use DynamicDrawUsage", () => {
@@ -67,7 +78,7 @@ describe("ParticleRingBuffer", () => {
 
     expect(buf.getLx(0)).toBeCloseTo(0.5);
     expect(buf.getLy(0)).toBeCloseTo(-1.2);
-    expect(buf.getBornTime(0)).toBeCloseTo(10.0);
+    expect(buf.getArrivalTime(0)).toBeCloseTo(10.0);
     expect(buf.getHue(0)).toBeCloseTo(120);
     expect(buf.getBrightness(0)).toBeCloseTo(0.7);
     expect(buf.getEps(0)).toBeCloseTo(500);
@@ -88,11 +99,20 @@ describe("ParticleRingBuffer", () => {
     expect(buf.totalWritten).toBe(3);
     expect(buf.activeCount).toBe(3);
 
-    expect(buf.getBornTime(0)).toBeCloseTo(1.0);
-    expect(buf.getBornTime(1)).toBeCloseTo(2.0);
-    expect(buf.getBornTime(2)).toBeCloseTo(3.0);
+    expect(buf.getArrivalTime(0)).toBeCloseTo(1.0);
+    expect(buf.getArrivalTime(1)).toBeCloseTo(2.0);
+    expect(buf.getArrivalTime(2)).toBeCloseTo(3.0);
     // Unwritten slot still has sentinel
-    expect(buf.getBornTime(3)).toBe(BORN_SENTINEL);
+    expect(buf.getArrivalTime(3)).toBe(DEAD_ARRIVAL_TIME);
+  });
+
+  it("throws in dev for arrival times outside the valid runtime bounds", () => {
+    const buf = new ParticleRingBuffer(4);
+    const batch = makeBatch([
+      { lx: 0, ly: 0, born: MIN_VALID_ARRIVAL_TIME - 1, hue: 0, bri: 0.5, eps: 10, size: 0.1 },
+    ]);
+
+    expect(() => buf.writeBatch(batch, 1, STRIDE, 0, 30)).toThrow(RangeError);
   });
 
   // ── Wrap-around ───────────────────────────────────────────────────
@@ -156,13 +176,14 @@ describe("ParticleRingBuffer", () => {
     expect(buf.getLx(3)).toBeCloseTo(4); // slot 3
 
     // New particle should be in the grown region
-    expect(buf.getBornTime(4)).toBeCloseTo(12); // written to slot 4 (old capacity)
+    expect(buf.getArrivalTime(4)).toBeCloseTo(12); // written to slot 4 (old capacity)
   });
 
   // ── Grow preserves data ───────────────────────────────────────────
 
   it("grow() preserves existing data and doubles capacity", () => {
     const buf = new ParticleRingBuffer(4);
+    const resizeVersion = buf.resizeVersion;
 
     const batch = makeBatch([
       { lx: 1.5, ly: -0.5, born: 5, hue: 90, bri: 0.3, eps: 42, size: 0.6 },
@@ -172,6 +193,9 @@ describe("ParticleRingBuffer", () => {
 
     buf.grow(8);
     expect(buf.capacity).toBe(8);
+    expect(buf.resizeVersion).toBe(resizeVersion + 1);
+    expect(buf.packedAttrA.count).toBe(8);
+    expect(buf.packedAttrB.count).toBe(8);
 
     // Original data intact
     expect(buf.getLx(0)).toBeCloseTo(1.5);
@@ -179,11 +203,28 @@ describe("ParticleRingBuffer", () => {
     expect(buf.getLx(1)).toBeCloseTo(-1.5);
     expect(buf.getLy(1)).toBeCloseTo(0.5);
 
-    expect(buf.getBornTime(0)).toBeCloseTo(5);
-    expect(buf.getBornTime(1)).toBeCloseTo(6);
+    expect(buf.getArrivalTime(0)).toBeCloseTo(5);
+    expect(buf.getArrivalTime(1)).toBeCloseTo(6);
     // New slots filled with sentinel
-    expect(buf.getBornTime(4)).toBe(BORN_SENTINEL);
-    expect(buf.getBornTime(7)).toBe(BORN_SENTINEL);
+    expect(buf.getArrivalTime(4)).toBe(DEAD_ARRIVAL_TIME);
+    expect(buf.getArrivalTime(7)).toBe(DEAD_ARRIVAL_TIME);
+  });
+
+  it("grow() destroys old uploaded GPU buffers", () => {
+    const buf = new ParticleRingBuffer(4);
+    const destroyA = vi.fn();
+    const destroyB = vi.fn();
+    const resources = new Map<object, { buffer: { size: number; destroy: () => void } }>();
+    resources.set(buf.packedAttrA, { buffer: { size: buf.capacity * 16, destroy: destroyA } });
+    resources.set(buf.packedAttrB, { buffer: { size: buf.capacity * 16, destroy: destroyB } });
+    const mockDevice = { queue: { writeBuffer: vi.fn() } } as unknown as GPUDevice;
+    const mockBackend = { get: (key: object) => resources.get(key) };
+    buf.setGpuBackend(mockDevice, mockBackend);
+
+    buf.grow(8);
+
+    expect(destroyA).toHaveBeenCalledTimes(1);
+    expect(destroyB).toHaveBeenCalledTimes(1);
   });
 
   it("grow() doubles capacity until >= minCapacity (capped at 4× per call)", () => {
@@ -197,7 +238,7 @@ describe("ParticleRingBuffer", () => {
 
   // ── Clear ─────────────────────────────────────────────────────────
 
-  it("clear() fills bornTime with sentinel and resets writeHead", () => {
+  it("clear() fills arrivalTime with sentinel and resets writeHead", () => {
     const buf = new ParticleRingBuffer(8);
 
     // Write some particles
@@ -213,7 +254,7 @@ describe("ParticleRingBuffer", () => {
     expect(buf.activeCount).toBe(0);
 
     for (let i = 0; i < 8; i++) {
-      expect(buf.getBornTime(i)).toBe(BORN_SENTINEL);
+      expect(buf.getArrivalTime(i)).toBe(DEAD_ARRIVAL_TIME);
     }
 
     // After clear, writing starts at slot 0 again
@@ -227,7 +268,7 @@ describe("ParticleRingBuffer", () => {
 
   // ── invalidateFuture ──────────────────────────────────────────────
 
-  it("invalidateFuture() kills only slots born after cutoff", () => {
+  it("invalidateFuture() kills only slots scheduled after cutoff", () => {
     const buf = new ParticleRingBuffer(8);
 
     const batch = makeBatch([
@@ -240,10 +281,28 @@ describe("ParticleRingBuffer", () => {
 
     buf.invalidateFuture(12);
 
-    expect(buf.getBornTime(0)).toBeCloseTo(5);  // kept (5 <= 12)
-    expect(buf.getBornTime(1)).toBeCloseTo(10); // kept (10 <= 12)
-    expect(buf.getBornTime(2)).toBe(BORN_SENTINEL); // killed (15 > 12)
-    expect(buf.getBornTime(3)).toBe(BORN_SENTINEL); // killed (20 > 12)
+    expect(buf.getArrivalTime(0)).toBeCloseTo(5);  // kept (5 <= 12)
+    expect(buf.getArrivalTime(1)).toBeCloseTo(10); // kept (10 <= 12)
+    expect(buf.getArrivalTime(2)).toBe(DEAD_ARRIVAL_TIME); // killed (15 > 12)
+    expect(buf.getArrivalTime(3)).toBe(DEAD_ARRIVAL_TIME); // killed (20 > 12)
+  });
+
+  it("invalidateFuture() scans only populated slots", () => {
+    const buf = new ParticleRingBuffer(1_000_000);
+    const batch = makeBatch(Array.from({ length: 10 }, (_, i) => (
+      { lx: 0, ly: 0, born: i, hue: 0, bri: 0.5, eps: 10, size: 0.1 }
+    )));
+    buf.writeBatch(batch, 10, STRIDE, 9, 30);
+
+    const inactiveSlot = 500_000;
+    const attrA = buf.packedAttrA.array as Float32Array;
+    attrA[inactiveSlot * 4 + 2] = 999;
+
+    buf.invalidateFuture(4);
+
+    for (let i = 0; i < 5; i++) expect(buf.getArrivalTime(i)).toBeCloseTo(i);
+    for (let i = 5; i < 10; i++) expect(buf.getArrivalTime(i)).toBe(DEAD_ARRIVAL_TIME);
+    expect(attrA[inactiveSlot * 4 + 2]).toBe(999);
   });
 
   // ── activeCount ───────────────────────────────────────────────────
@@ -402,8 +461,8 @@ describe("ParticleRingBuffer", () => {
     const writeBuffer = vi.fn();
     const mockDevice = { queue: { writeBuffer } } as unknown as GPUDevice;
     const resources = new Map<object, { buffer: unknown }>();
-    resources.set(buf.packedAttrA, { buffer: { label: "a" } });
-    resources.set(buf.packedAttrB, { buffer: { label: "b" } });
+    resources.set(buf.packedAttrA, { buffer: { label: "a", destroy: vi.fn() } });
+    resources.set(buf.packedAttrB, { buffer: { label: "b", destroy: vi.fn() } });
     const mockBackend = { get: (key: object) => resources.get(key) };
     buf.setGpuBackend(mockDevice, mockBackend);
 
@@ -443,9 +502,9 @@ describe("ParticleRingBuffer", () => {
   it("revalidates GPU buffers after grow once backend buffers catch up", () => {
     const buf = new ParticleRingBuffer(4);
     const mockDevice = { queue: { writeBuffer: vi.fn() } } as unknown as GPUDevice;
-    const resources = new Map<object, { buffer: { size: number; label: string } }>();
-    resources.set(buf.packedAttrA, { buffer: { size: buf.capacity * 16, label: "a-old" } });
-    resources.set(buf.packedAttrB, { buffer: { size: buf.capacity * 16, label: "b-old" } });
+    const resources = new Map<object, { buffer: { size: number; label: string; destroy: () => void } }>();
+    resources.set(buf.packedAttrA, { buffer: { size: buf.capacity * 16, label: "a-old", destroy: vi.fn() } });
+    resources.set(buf.packedAttrB, { buffer: { size: buf.capacity * 16, label: "b-old", destroy: vi.fn() } });
     const mockBackend = { get: (key: object) => resources.get(key) };
     buf.setGpuBackend(mockDevice, mockBackend);
 
@@ -457,8 +516,8 @@ describe("ParticleRingBuffer", () => {
     expect(buf.getGpuBuffers()).toBeNull();
 
     // Simulate Three.js processing needsUpdate and publishing new buffers.
-    resources.set(buf.packedAttrA, { buffer: { size: buf.capacity * 16, label: "a-new" } });
-    resources.set(buf.packedAttrB, { buffer: { size: buf.capacity * 16, label: "b-new" } });
+    resources.set(buf.packedAttrA, { buffer: { size: buf.capacity * 16, label: "a-new", destroy: vi.fn() } });
+    resources.set(buf.packedAttrB, { buffer: { size: buf.capacity * 16, label: "b-new", destroy: vi.fn() } });
 
     const gpuBuffers = buf.getGpuBuffers();
     expect(gpuBuffers).not.toBeNull();
@@ -508,7 +567,7 @@ describe("ParticleRingBuffer", () => {
       ]);
       buf.writeBatch(batch2, 1, STRIDE, 100, 5);
 
-      // now=100, cutoff=5: alive if bornTime > 100-5=95
+      // now=100, cutoff=5: alive if arrivalTime > 100-5=95
       // Slots: [born=100, born=2, born=3, born=4]
       // writeHead is at 1 (oldest slot)
       // Scan from slot 1: born=2 < 95 → dead, slot 2: born=3 < 95 → dead,
@@ -592,14 +651,14 @@ describe("ParticleRingBuffer", () => {
       buf.writeBatch(batch3, 1, STRIDE, 7.0, 30.0);
       expect(buf.capacity).toBeGreaterThan(cap);
 
-      // After grow + reorder, bornTimes should be monotonically increasing
+      // After grow + reorder, arrivalTimes should be monotonically increasing
       // from slot 0: 3, 4, 5, 6, 7, sentinel, sentinel, sentinel
       for (let i = 0; i < 4; i++) {
-        expect(buf.getBornTime(i)).toBeCloseTo(3 + i);
+        expect(buf.getArrivalTime(i)).toBeCloseTo(3 + i);
       }
-      expect(buf.getBornTime(4)).toBeCloseTo(7);
+      expect(buf.getArrivalTime(4)).toBeCloseTo(7);
       for (let i = 5; i < buf.capacity; i++) {
-        expect(buf.getBornTime(i)).toBe(BORN_SENTINEL);
+        expect(buf.getArrivalTime(i)).toBe(DEAD_ARRIVAL_TIME);
       }
 
       // computeAliveRange should work correctly after growth
@@ -642,6 +701,51 @@ describe("ParticleRingBuffer", () => {
       const { start, count } = buf.computeAliveRange(52, 5);
       expect(start).toBe(0);
       expect(count).toBe(3); // slots 0,1,2 are alive
+    });
+
+    it("keeps a stable range for non-monotonic born times", () => {
+      const buf = new ParticleRingBuffer(8);
+      const batch = makeBatch([
+        { lx: 0, ly: 0, born: 1.0, hue: 0, bri: 0.5, eps: 10, size: 0.1 },
+        { lx: 0, ly: 0, born: 5.0, hue: 0, bri: 0.5, eps: 10, size: 0.1 },
+        { lx: 0, ly: 0, born: 2.0, hue: 0, bri: 0.5, eps: 10, size: 0.1 },
+      ]);
+      buf.writeBatch(batch, 3, STRIDE, 5, 30);
+
+      const { start, count } = buf.computeAliveRange(5, 1);
+
+      expect(start).toBe(0);
+      expect(count).toBe(3);
+    });
+
+    it("keeps spread-jittered arrival times inside the padded range", () => {
+      const buf = new ParticleRingBuffer(128);
+      const now = 50;
+      const spread = 2;
+      const jitter = ARRIVAL_SEARCH_PADDING_MULTIPLIER * spread;
+      const batch = makeBatch(Array.from({ length: 100 }, (_, i) => {
+        const unit = ((i * 37) % 101) / 100;
+        return { lx: 0, ly: 0, born: now + (unit * 2 - 1) * jitter, hue: 0, bri: 0.5, eps: 10, size: 0.1 };
+      }));
+      buf.writeBatch(batch, 100, STRIDE, now, 30);
+
+      const { start, count } = buf.computeAliveRange(now, jitter);
+      const covered = new Set<number>();
+      for (let i = 0; i < count; i++) covered.add((start + i) % buf.capacity);
+
+      for (let i = 0; i < 100; i++) expect(covered.has(i)).toBe(true);
+    });
+
+    it("countVisible excludes future and faded CPU particles", () => {
+      const buf = new ParticleRingBuffer(8);
+      const batch = makeBatch([
+        { lx: 0, ly: 0, born: 7.0, hue: 0, bri: 0.5, eps: 10, size: 0.1 },
+        { lx: 0, ly: 0, born: 9.5, hue: 0, bri: 0.5, eps: 10, size: 0.1 },
+        { lx: 0, ly: 0, born: 11.0, hue: 0, bri: 0.5, eps: 10, size: 0.1 },
+      ]);
+      buf.writeBatch(batch, 3, STRIDE, 10, 30);
+
+      expect(buf.countVisible(10, 2)).toBe(1);
     });
   });
 
@@ -696,10 +800,10 @@ describe("ParticleRingBuffer", () => {
       buf.recordGpuWrite(10, 5.0, 5.5);  // writeHead: 10 → 20
       buf.recordGpuWrite(10, 10.0, 10.5); // writeHead: 20 → 30
 
-      // now=12, cutoff=8 → deadline=4 → batches with maxBorn > 4 are alive
-      // Batch 0: maxBorn=1.5 < 4 → dead
-      // Batch 1: maxBorn=5.5 > 4 → alive (start here)
-      // Batch 2: maxBorn=10.5 > 4 → alive
+      // now=12, cutoff=8 → deadline=4 → batches with maxArrival > 4 are alive
+      // Batch 0: maxArrival=1.5 < 4 → dead
+      // Batch 1: maxArrival=5.5 > 4 → alive (start here)
+      // Batch 2: maxArrival=10.5 > 4 → alive
       const { start, count } = buf.computeAliveRange(12, 8);
       expect(start).toBe(10); // writeHead of batch 1
       expect(count).toBe(20); // from slot 10 to slot 30
@@ -712,7 +816,7 @@ describe("ParticleRingBuffer", () => {
       buf.recordGpuWrite(10, 1.0, 1.5);
       buf.recordGpuWrite(10, 2.0, 2.5);
 
-      // now=100, cutoff=5 → deadline=95 → all maxBorn < 95 → all dead
+      // now=100, cutoff=5 → deadline=95 → all maxArrival < 95 → all dead
       const { start, count } = buf.computeAliveRange(100, 5);
       expect(count).toBe(0);
     });
@@ -724,7 +828,7 @@ describe("ParticleRingBuffer", () => {
       buf.recordGpuWrite(10, 10.0, 10.5);
       buf.recordGpuWrite(10, 11.0, 11.5);
 
-      // now=12, cutoff=100 → deadline=-88 → all maxBorn > -88 → all alive
+      // now=12, cutoff=100 → deadline=-88 → all maxArrival > -88 → all alive
       const { start, count } = buf.computeAliveRange(12, 100);
       expect(start).toBe(0);
       expect(count).toBe(20);
@@ -740,27 +844,42 @@ describe("ParticleRingBuffer", () => {
       buf.recordGpuWrite(10, 5.0, 5.5);   // writeHead: 10 → 4 (wraps)
       buf.recordGpuWrite(4, 10.0, 10.5);  // writeHead: 4 → 8
 
-      // now=12, cutoff=8 → deadline=4, batch 1 maxBorn=5.5 > 4 → alive
+      // now=12, cutoff=8 → deadline=4, batch 1 maxArrival=5.5 > 4 → alive
       const { start, count } = buf.computeAliveRange(12, 8);
       expect(start).toBe(10); // writeHead of batch 1
       // count = (8 - 10 + 16) % 16 = 14
       expect(count).toBe(14);
     });
 
-    it("clears history when gpuComputeMode is disabled", () => {
+    it("keeps history when gpuComputeMode is disabled", () => {
       const buf = new ParticleRingBuffer(32);
       buf.gpuComputeMode = true;
       buf.recordGpuWrite(5, 1.0, 1.5);
 
       buf.gpuComputeMode = false;
 
-      // Should fall back to CPU binary search (which sees empty bornTimes)
-      // but totalWritten is 5, so it will search the CPU data
-      // The CPU data has sentinels (no writeBatch was called), so all dead
-      // at any reasonable cutoff
       const { count } = buf.computeAliveRange(10, 5);
-      // All 5 slots have sentinel bornTime, so all are dead
       expect(count).toBe(0);
+
+      const alive = buf.computeAliveRange(2, 5);
+      expect(alive.count).toBe(5);
+    });
+
+    it("countVisible uses history estimates for GPU-written particles", () => {
+      const buf = new ParticleRingBuffer(32);
+      buf.gpuComputeMode = true;
+      buf.recordGpuWrite(5, 1.0, 1.5);
+      buf.recordGpuWrite(5, 20.0, 22.0);
+
+      expect(buf.countVisible(2, 5)).toBe(5);
+    });
+
+    it("countVisible estimates partial GPU batch overlap", () => {
+      const buf = new ParticleRingBuffer(128);
+      buf.gpuComputeMode = true;
+      buf.recordGpuWrite(100, 0, 10);
+
+      expect(buf.countVisible(5, 2)).toBe(20);
     });
 
     it("clear() resets GPU history", () => {
@@ -804,8 +923,8 @@ describe("ParticleRingBuffer", () => {
       // Alive range should still work — oldest entries were trimmed
       // now=700, cutoff=100 → deadline=600
       // After trimming, entries 50..649 remain (600 entries)
-      // Entry 50 has maxBorn=50.5 < 600 → dead
-      // Entry 600 has maxBorn=600.5 > 600 → alive
+      // Entry 50 has maxArrival=50.5 < 600 → dead
+      // Entry 600 has maxArrival=600.5 > 600 → alive
       const { count } = buf.computeAliveRange(700, 100);
       expect(count).toBeGreaterThan(0);
       expect(count).toBeLessThanOrEqual(650);

@@ -143,6 +143,7 @@ interface NumCtrl {
   max: number;
   step: number;
   overrideMax: number;
+  overrideMin?: number;
   overrideStep?: number;
 }
 
@@ -717,7 +718,6 @@ const OLED_CSS = `
     max-height: none !important;
     overflow-y: auto !important;
     overscroll-behavior: contain;
-    -webkit-overflow-scrolling: touch;
   }
 
   /* Collapsed: no frame/border, but title text stays faintly visible */
@@ -761,6 +761,8 @@ const OLED_CSS = `
   padding: 0 2px 0 0;
   box-sizing: border-box;
   cursor: pointer;
+  appearance: none;
+  font: inherit;
   -webkit-tap-highlight-color: transparent;
   touch-action: manipulation;
   background: none;
@@ -778,6 +780,10 @@ const OLED_CSS = `
 }
 .ecsk-info-btn.active {
   color: rgba(120, 180, 255, 0.8);
+}
+.ecsk-info-btn:focus-visible {
+  outline: 1px solid rgba(120, 180, 255, 0.75);
+  outline-offset: 2px;
 }
 .ecsk-info-btn:active {
   color: rgba(255, 255, 255, 0.6);
@@ -837,7 +843,6 @@ const OLED_CSS = `
   box-shadow: 0 10px 36px rgba(0,0,0,0.82);
   pointer-events: none;
   overscroll-behavior: contain;
-  -webkit-overflow-scrolling: touch;
 }
 .ecsk-mobile .ecsk-tooltip.visible {
   pointer-events: auto;
@@ -1115,8 +1120,11 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
 
   // ── Flow ──────────────────────────────────────────────────────────
   const flow = gui.addFolder("Flow");
+  let onGpuComputeChanged: ((enabled: boolean) => void) | null = null;
   flow.add(params, "frozen").name("Freeze").listen();
-  flow.add(params, "gpuCompute").name("GPU compute");
+  flow.add(params, "gpuCompute").name("GPU compute").listen().onChange((value: boolean) => {
+    onGpuComputeChanged?.(Boolean(value));
+  });
   flow.add(params, "reset").name("⟳ Reset");
   flow.add(params, "resetSettings").name("⟳ Reset Settings");
   // Random button moved to bottom bar as quick-setting
@@ -1214,10 +1222,10 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
     { folder: physics,  prop: "silkDamping",      label: "Small-scale damping",        min: 0,     max: 1,                  step: 0.01,  overrideMax: 5         },
     { folder: physics,  prop: "betaPP",           label: "Pair production (βpp)",      min: 0,     max: 0.005,              step: 0.0001, overrideMax: 1        },
     // Double-Bounce Tuning
-    { folder: dbTuning, prop: "dbSecondHueShift", label: "2nd hue shift (°)",   min: -180,  max: 180,                step: 1,     overrideMax: 360       },
+    { folder: dbTuning, prop: "dbSecondHueShift", label: "2nd hue shift (°)",   min: -180,  max: 180,                step: 1,     overrideMax: 360, overrideMin: -360 },
     { folder: dbTuning, prop: "dbSecondBriScale", label: "2nd brightness",      min: 0.1,   max: 2.0,                step: 0.01,  overrideMax: 10        },
     // Production Tuning
-    { folder: ppTuning, prop: "ppHueShift",       label: "Prod. hue shift (°)",    min: -180,  max: 180,                step: 1,     overrideMax: 360       },
+    { folder: ppTuning, prop: "ppHueShift",       label: "Prod. hue shift (°)",    min: -180,  max: 180,                step: 1,     overrideMax: 360, overrideMin: -360 },
     { folder: ppTuning, prop: "ppBriBoost",       label: "Prod. brightness",       min: 0.1,   max: 3.0,                step: 0.01,  overrideMax: 10        },
     { folder: ppTuning, prop: "ppSizeScale",      label: "Prod. size",       min: 0.1,   max: 3.0,                step: 0.01,  overrideMax: 10        },
     { folder: ppTuning, prop: "ppBaseDelay",      label: "Prod. delay",       min: 0,     max: 5.0,                step: 0.1,   overrideMax: 50        },
@@ -1355,7 +1363,7 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
       // Override: sliders with greatly expanded range (CSS class handles red colouring)
       for (const def of numericDefs) {
         const step = def.overrideStep ?? def.step;
-        const c = def.folder.add(params, def.prop, 0, def.overrideMax, step)
+        const c = def.folder.add(params, def.prop, def.overrideMin ?? 0, def.overrideMax, step)
           .name(def.label);
         activeNumericControllers.push(c);
       }
@@ -1483,6 +1491,7 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
   }
 
   let panelOverlayEl: HTMLDivElement | null = null;
+  let bottomBarEl: HTMLDivElement | null = null;
 
   function isGuiClosed(guiInstance: GUI): boolean {
     return guiInstance.domElement.classList.contains("lil-closed") || guiInstance.domElement.classList.contains("closed");
@@ -1498,6 +1507,8 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
     body.classList.toggle("ecsk-mobile-controls-open", controlsOpen);
     body.classList.toggle("ecsk-mobile-readout-open", readoutOpen);
     body.classList.toggle("ecsk-mobile-both-open", controlsOpen && readoutOpen);
+    bottomBarEl?.classList.toggle("ecsk-bottom-bar--controls-open", controlsOpen && !readoutOpen);
+    bottomBarEl?.classList.toggle("ecsk-bottom-bar--both-open", controlsOpen && readoutOpen);
 
     if (controlsOpen) {
       const controlsHeight = Math.ceil(gui.domElement.getBoundingClientRect().height);
@@ -1665,8 +1676,12 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
 
   // ── Tooltip system ──────────────────────────────────────────────────
   let tooltipTimer: ReturnType<typeof setTimeout> | null = null;
+  let activeTooltipTrigger: HTMLElement | null = null;
   const tooltipEl = document.createElement("div");
+  tooltipEl.id = "ecsk-control-tooltip";
   tooltipEl.className = "ecsk-tooltip";
+  tooltipEl.setAttribute("role", "tooltip");
+  tooltipEl.setAttribute("aria-live", "polite");
   document.body.appendChild(tooltipEl);
   addDisposable(() => {
     if (tooltipTimer) {
@@ -1679,7 +1694,7 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
   // Mobile: overlay blocks all interaction behind the tooltip
   let overlayEl: HTMLDivElement | null = null;
   let activeMobileTooltipKey: string | null = null;
-  let activeMobileTooltipButton: HTMLElement | null = null;
+  let activeMobileTooltipButton: HTMLButtonElement | null = null;
   if (isMobile) {
     overlayEl = document.createElement("div");
     overlayEl.className = "ecsk-tooltip-overlay";
@@ -1730,6 +1745,11 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
   }
 
   function showTooltip(el: HTMLElement, tip: Tooltip): void {
+    if (activeTooltipTrigger && activeTooltipTrigger !== el) {
+      activeTooltipTrigger.removeAttribute("aria-describedby");
+    }
+    activeTooltipTrigger = el;
+    el.setAttribute("aria-describedby", tooltipEl.id);
     tooltipEl.innerHTML = buildTooltipHTML(tip);
     // Position: to the left of the control element (or right for left-panel)
     const rect = el.getBoundingClientRect();
@@ -1753,23 +1773,35 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
   function hideTooltip(): void {
     if (tooltipTimer) { clearTimeout(tooltipTimer); tooltipTimer = null; }
     tooltipEl.classList.remove("visible");
+    activeTooltipTrigger?.removeAttribute("aria-describedby");
+    activeTooltipTrigger = null;
   }
 
   // Mobile tooltip: show with overlay, positioned via CSS
-  function showMobileTooltip(key: string, tip: Tooltip, triggerEl: HTMLElement): void {
-    if (activeMobileTooltipButton) activeMobileTooltipButton.classList.remove("active");
+  function showMobileTooltip(key: string, tip: Tooltip, triggerEl: HTMLButtonElement): void {
+    if (activeMobileTooltipButton) {
+      activeMobileTooltipButton.classList.remove("active");
+      activeMobileTooltipButton.setAttribute("aria-expanded", "false");
+      activeMobileTooltipButton.removeAttribute("aria-describedby");
+    }
     tooltipEl.innerHTML = buildTooltipHTML(tip);
     tooltipEl.classList.add("visible");
     overlayEl?.classList.add("visible");
     activeMobileTooltipKey = key;
     activeMobileTooltipButton = triggerEl;
     activeMobileTooltipButton.classList.add("active");
+    activeMobileTooltipButton.setAttribute("aria-expanded", "true");
+    activeMobileTooltipButton.setAttribute("aria-describedby", tooltipEl.id);
   }
 
   function hideMobileTooltip(): void {
     tooltipEl.classList.remove("visible");
     overlayEl?.classList.remove("visible");
-    if (activeMobileTooltipButton) activeMobileTooltipButton.classList.remove("active");
+    if (activeMobileTooltipButton) {
+      activeMobileTooltipButton.classList.remove("active");
+      activeMobileTooltipButton.setAttribute("aria-expanded", "false");
+      activeMobileTooltipButton.removeAttribute("aria-describedby");
+    }
     activeMobileTooltipButton = null;
     activeMobileTooltipKey = null;
   }
@@ -1800,10 +1832,11 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
 
       // Insert icon as a sibling BEFORE .lil-name inside .lil-controller
       // This leaves lil-gui's name element completely untouched (labels stay visible)
-      const infoBtn = document.createElement("span");
+      const infoBtn = document.createElement("button");
+      infoBtn.type = "button";
       infoBtn.className = "ecsk-info-btn";
-      infoBtn.setAttribute("role", "button");
-      infoBtn.setAttribute("aria-label", `Info: ${key}`);
+      infoBtn.setAttribute("aria-label", `Info: ${nameEl.textContent?.trim() || key}`);
+      infoBtn.setAttribute("aria-expanded", "false");
       infoBtn.innerHTML = '<svg viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="7" stroke="currentColor" stroke-width="1.5"/><circle cx="8" cy="5" r="1" fill="currentColor"/><rect x="7" y="7.5" width="2" height="4.5" rx="0.5" fill="currentColor"/></svg>';
       const toggleMobileTooltip = (e: Event) => {
         e.stopPropagation();
@@ -1920,7 +1953,13 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
   {
     const bar = document.createElement("div");
     bar.id = "bottom-bar";
-    addDisposable(() => bar.remove());
+    bar.className = "ecsk-bottom-bar";
+    if (isMobile) bar.classList.add("ecsk-bottom-bar--mobile");
+    bottomBarEl = bar;
+    addDisposable(() => {
+      if (bottomBarEl === bar) bottomBarEl = null;
+      bar.remove();
+    });
 
     let addToHomeSheetEl: HTMLDivElement | null = null;
 
@@ -1934,7 +1973,7 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
 
     // — Fullscreen button —
     const fsBtn = document.createElement("button");
-    fsBtn.className = "bar-btn";
+    fsBtn.className = "bar-btn ecsk-bar-btn";
     const expandSVG = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>`;
     const collapseSVG = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 14h6v6m10-10h-6V4m0 16h6v-6M4 4h6v6"/></svg>`;
     const immersiveLabel = fullscreenSupport.iosBrowser ? "immersive mode" : "immersive fallback";
@@ -2057,7 +2096,7 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
 
     // — Toggle UI button —
     const uiBtn = document.createElement("button");
-    uiBtn.className = "bar-btn";
+    uiBtn.className = "bar-btn ecsk-bar-btn";
     uiBtn.title = "Hide UI";
     const eyeOpenSVG = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>`;
     const eyeClosedSVG = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>`;
@@ -2093,14 +2132,14 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
 
     // — Random (dice) button —
     const diceBtn = document.createElement("button");
-    diceBtn.className = "bar-btn";
+    diceBtn.className = "bar-btn ecsk-bar-btn";
     diceBtn.title = "Randomize settings";
     diceBtn.innerHTML = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8.5" cy="8.5" r="1.2" fill="currentColor" stroke="none"/><circle cx="15.5" cy="8.5" r="1.2" fill="currentColor" stroke="none"/><circle cx="8.5" cy="15.5" r="1.2" fill="currentColor" stroke="none"/><circle cx="15.5" cy="15.5" r="1.2" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.2" fill="currentColor" stroke="none"/></svg>`;
     addListener(diceBtn, "click", () => { params.randomSettings(); });
 
     if (showAddToHomeScreen) {
       const addBtn = document.createElement("button");
-      addBtn.className = "bar-btn";
+      addBtn.className = "bar-btn ecsk-bar-btn";
       addBtn.title = "Add to Home Screen";
       addBtn.innerHTML = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4"/><path d="M8 8l4-4 4 4"/><path d="M5 14v5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-5"/></svg>`;
       addListener(addBtn, "click", openAddToHomeSheet);
@@ -2133,7 +2172,7 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
     // — Force HDR button (mobile only) —
     if (isMobile) {
       forceHDRBtn = document.createElement("button");
-      forceHDRBtn.className = "bar-btn";
+      forceHDRBtn.className = "bar-btn ecsk-bar-btn";
       forceHDRBtn.title = "Force HDR (OLED)";
       const hdrOffSVG = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><text x="12" y="14" text-anchor="middle" font-size="7" font-weight="bold" fill="currentColor" stroke="none">HDR</text></svg>`;
       const hdrOnSVG = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#6cf" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><text x="12" y="14" text-anchor="middle" font-size="7" font-weight="bold" fill="#6cf" stroke="none">HDR</text></svg>`;
@@ -2153,10 +2192,15 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
     }
     bar.appendChild(uiBtn);
     document.body.appendChild(bar);
+    syncMobilePanelState();
   }
 
   function setForceHDRCallback(cb: (enabled: boolean) => void): void {
     onForceHDR = cb;
+  }
+
+  function setGpuComputeCallback(cb: (enabled: boolean) => void): void {
+    onGpuComputeChanged = cb;
   }
 
   /**
@@ -2195,5 +2239,5 @@ export function createSensorControls(onReset: () => void, budget?: ComputeBudget
 
   activeControlsDispose = dispose;
 
-  return { gui, readoutGui, params, hud, updateHUD, setHDRMode, setForceHDRCallback, updateTargetFpsLabel, manualOverrides, setOverridesCallback, updateParticleRateMax, dispose };
+  return { gui, readoutGui, params, hud, updateHUD, setHDRMode, setForceHDRCallback, setGpuComputeCallback, updateTargetFpsLabel, manualOverrides, setOverridesCallback, updateParticleRateMax, dispose };
 }

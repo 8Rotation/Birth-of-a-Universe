@@ -1,7 +1,7 @@
 import { test, expect } from "@playwright/test";
 
-// Task A3 / GPU-02: real-WebGPU validation that the compute emitter
-// matches a CPU f32 mirror of the same WGSL algorithm.
+// Real-WebGPU validation that the compute emitter matches a CPU f32
+// mirror of the same WGSL algorithm.
 
 test("ComputeEmitter dispatch matches CPU f32 reference under WebGPU", async ({ page }) => {
   const consoleMessages: string[] = [];

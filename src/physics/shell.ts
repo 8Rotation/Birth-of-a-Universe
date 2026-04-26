@@ -66,6 +66,7 @@ const DB_VIS_PERIOD_FLOOR = 0.3;
 const DB_MOD_FLOOR = 0.05;
 /** Mean of max(0, cos²(2x)) over one period — used to normalise rate. */
 const DB_MOD_MEAN = 0.375;
+export const DOUBLE_BOUNCE_MAX_RATE_MULTIPLIER = 1 / DB_MOD_MEAN;
 // Double-bounce defaults (now configurable via EmitterConfig)
 const DEF_DB_SECOND_HUE_SHIFT = 15;
 const DEF_DB_SECOND_BRI_SCALE = 0.82;
@@ -149,17 +150,18 @@ export function defaultEmitterConfig(partial: Partial<EmitterConfig> = {}): Emit
   };
 }
 
-/** A single particle ready to be added to the hit buffer (documentation-only). */
-export interface PendingParticle {
-  lx: number;
-  ly: number;
-  arrivalTime: number;
-  hue: number;
-  brightness: number;
-  /** Raw energy density at bounce: eps = 1/a_min⁴ (for HDR nits mapping). */
-  eps: number;
-  hitSize: number;
-  tailAngle: number;
+export function estimateMaxEmissionMultiplier(
+  config: Partial<Pick<EmitterConfig, "doubleBounce" | "betaPP" | "ppFractionCap">>,
+  kCurvature: number,
+): number {
+  const betaPP = config.betaPP ?? 0;
+  const ppFraction = betaPP > 0
+    ? Math.min(config.ppFractionCap ?? DEF_PP_FRACTION_CAP, betaPP / ECSKPhysics.BETA_CR)
+    : 0;
+  const doubleBounceMultiplier = config.doubleBounce && kCurvature === 1
+    ? DOUBLE_BOUNCE_MAX_RATE_MULTIPLIER
+    : 1;
+  return doubleBounceMultiplier * (1 + ppFraction);
 }
 
 /**
@@ -284,6 +286,7 @@ export class StreamEmitter {
     if (config.ppScatterRange   !== undefined) c.ppScatterRange   = config.ppScatterRange;
     if (config.sizeVariation    !== undefined) c.sizeVariation    = config.sizeVariation;
     if (config.silkDamping      !== undefined) c.silkDamping      = config.silkDamping;
+    if (config.ppFractionCap    !== undefined) c.ppFractionCap    = config.ppFractionCap;
 
     const lMax = config.lMax ?? c.lMax;
     const nS   = config.nS   ?? c.nS;

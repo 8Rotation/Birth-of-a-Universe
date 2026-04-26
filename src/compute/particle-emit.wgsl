@@ -67,7 +67,7 @@ struct Params {
 @group(1) @binding(0) var<uniform> params: Params;
 
 // ── Group 2: Output particle buffer (read-write storage) ────────────────
-// attrA: [lx, ly, bornTime, hue]
+// attrA: [lx, ly, arrivalTime, hue]
 // attrB: [brightness, eps, hitSize, 0.0]
 @group(2) @binding(0) var<storage, read_write> outA: array<vec4<f32>>;
 @group(2) @binding(1) var<storage, read_write> outB: array<vec4<f32>>;

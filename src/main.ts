@@ -28,6 +28,8 @@ import { HardwareDetector } from "./ui/hardware-info.js";
 import { ComputeEmitter } from "./compute/compute-emitter.js";
 import type { ComputeParams } from "./compute/compute-emitter.js";
 import shaderSource from "./compute/particle-emit.wgsl?raw";
+import { ARRIVAL_SEARCH_PADDING_MULTIPLIER } from "./rendering/particle-ring-buffer.js";
+import { getWebGPUDevice } from "./rendering/three-backend.js";
 import {
   stepEmitAccumulator,
   resetEmitAccumulator,
@@ -61,6 +63,8 @@ const FPS_SAMPLE_INTERVAL = 0.8;
 const RATE_SMOOTH_DECAY = 0.3;
 /** EMA gain factor for arrival-rate smoothing (= 1 − decay). */
 const RATE_SMOOTH_GAIN = 0.7;
+/** Neutral brightness gain used while auto-brightness owns exposure. */
+const AUTO_BRIGHTNESS_NEUTRAL_GAIN = 5.0;
 // VRAM budget cap: prevents multi-hundred-MB allocations if persistence
 // and rate are both cranked to extreme values simultaneously.
 // (Overridden at runtime by hardware detection.)
@@ -270,6 +274,7 @@ async function main() {
     flowDirty = false;
     settingsChangeTimer = 0;
     throttleMultiplier = 1.0;
+    smoothedPpMultiplier = 1;
     // Mirror the CPU-side accumulator reset: workers are recreated below
     // (fresh accumulators at 0), so the GPU accumulator must match.
     resetEmitAccumulator(gpuEmitAccumulator);
@@ -323,7 +328,16 @@ async function main() {
     console.log("[main] Simulation reset (full worker restart)");
   }, budget, screenInfo.refreshRate, screenInfo.isMobile);
   appControls = controls;
-  const { params, hud, updateHUD, setHDRMode, setForceHDRCallback, updateTargetFpsLabel, setOverridesCallback, manualOverrides, updateParticleRateMax } = controls;
+  const { params, hud, updateHUD, setHDRMode, setForceHDRCallback, setGpuComputeCallback, updateTargetFpsLabel, setOverridesCallback, manualOverrides, updateParticleRateMax } = controls;
+  let pendingGpuComputePreference: boolean | null = null;
+  let handleGpuComputePreference: ((value: boolean) => void) | null = null;
+  setGpuComputeCallback((value) => {
+    if (handleGpuComputePreference) {
+      handleGpuComputePreference(value);
+    } else {
+      pendingGpuComputePreference = value;
+    }
+  });
 
   // Seed prev-snapshot so the first frame sees no change (NaN → real value)
   prevParticleRate      = params.particleRate;
@@ -360,10 +374,11 @@ async function main() {
       if (!updated) return;
       budget = updated.budget;
       VRAM_BUDGET_PARTICLES = budget.emergencyHitCap;
-      // Push manual peak-nits override to the renderer so HDR brightness changes
-      if (overrides.peakNits > 0) {
-        renderer.peakNits = overrides.peakNits;
-      }
+      updateParticleRateMax(params.gpuCompute && gpuComputeRate > 0
+        ? Math.max(budget.sliderLimits.particleRateMax, gpuComputeRate)
+        : budget.sliderLimits.particleRateMax);
+      // Push manual peak-nits override to the renderer; 0 reverts to auto.
+      renderer.peakNits = overrides.peakNits;
       console.log(
         `[main] Budget recalculated — hit cap: ${(VRAM_BUDGET_PARTICLES / 1e6).toFixed(1)}M, ` +
         `visible max: ${(budget.maxVisibleHits / 1e3).toFixed(0)}K, ` +
@@ -470,11 +485,19 @@ async function main() {
     }
   }
 
+  handleGpuComputePreference = queueGpuComputePreference;
+  if (pendingGpuComputePreference !== null) {
+    queueGpuComputePreference(pendingGpuComputePreference);
+    pendingGpuComputePreference = null;
+  }
+
   let gpuComputeReady: Promise<boolean>;
   {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const backend = (renderer.renderer as any).backend;
-    gpuDevice = backend?.device as GPUDevice | undefined;
+    try {
+      gpuDevice = getWebGPUDevice(renderer.renderer);
+    } catch (e) {
+      gpuComputeInitError = e instanceof Error ? e.message : String(e);
+    }
     if (gpuDevice) {
       computeEmitter = new ComputeEmitter(gpuDevice, renderer.ringBuffer, shaderSource);
       appComputeEmitter = computeEmitter;
@@ -496,6 +519,7 @@ async function main() {
   }
 
   void gpuComputeReady.then((ready) => {
+    if (abortSignal.aborted) return;
     gpuComputeReadySettled = true;
     if (!ready) {
       if (!gpuComputeInitError) gpuComputeInitError = "GPU compute init was cancelled";
@@ -515,8 +539,8 @@ async function main() {
         if (abortSignal.aborted) return;
         if (result) {
           gpuComputeRate = result.particlesPerSec;
-          // Raise slider limit when GPU compute is available
-          const gpuSliderMax = Math.round(gpuComputeRate / 60); // particles/frame at 60fps
+          // Raise slider limit by measured per-second GPU throughput.
+          const gpuSliderMax = gpuComputeRate;
           if (gpuSliderMax > budget.sliderLimits.particleRateMax) {
             updateParticleRateMax(gpuSliderMax);
           }
@@ -526,6 +550,7 @@ async function main() {
       });
     }
   }).catch((e) => {
+    if (abortSignal.aborted) return;
     gpuComputeReadySettled = true;
     gpuComputeInitError = e instanceof Error ? e.message : String(e);
     console.error("[main] GPU compute init failed:", e);
@@ -604,7 +629,7 @@ async function main() {
   setInfo(""); // Clear loading message
 
   function animate(timestamp: number) {
-    if (!animateRunning) return;
+    if (!animateRunning || abortSignal.aborted) return;
     requestAnimationFrame(animate);
 
     // ── Tab hidden: skip everything (zero CPU cost) ──────────────
@@ -729,7 +754,7 @@ async function main() {
             const ppHeadroom = params.betaPP > 0
               ? params.ppBaseDelay + params.ppScatterRange + 2
               : 0;
-            const cutoff = params.arrivalSpread * 1.5 + ppHeadroom + 1;
+            const cutoff = params.arrivalSpread * ARRIVAL_SEARCH_PADDING_MULTIPLIER + ppHeadroom + 1;
             renderer.ringBuffer.invalidateFuture(now + cutoff);
             physicsDirty = false;
           }
@@ -739,21 +764,6 @@ async function main() {
       }
 
       // (Soft cap moved to after fade-expire partition — see below)
-    }
-
-    // ── Proactive buffer pre-sizing ─────────────────────────────────
-    // When persistence is high, pre-grow the ring buffer so it doesn't
-    // hit repeated grow() stalls during the fill-up phase.  Only grows
-    // (never shrinks), cost amortized: each doubling happens at most once.
-    // Capped per frame to avoid massive single-shot allocations when
-    // sliders are dragged to extreme values (grow() also has its own
-    // 4× cap and OOM guard).
-    {
-      const neededCapacity = Math.ceil(params.particleRate * params.persistence * CUTOFF_MARGIN);
-      const clampedNeed = Math.min(neededCapacity, VRAM_BUDGET_PARTICLES);
-      if (clampedNeed > renderer.ringBuffer.capacity) {
-        renderer.ringBuffer.grow(clampedNeed);
-      }
     }
 
     // ── Freeze: snapshot display time so particles stop aging ────
@@ -772,7 +782,14 @@ async function main() {
       // ── Compound-budget throttling ─────────────────────────────
       // Two proactive caps (VRAM, physics) prevent unbounded growth.
       // GPU handles rendering cheaply but unbounded VRAM growth is dangerous.
-      let effectiveRate = params.particleRate;
+      const requestedRate = Math.max(0, params.particleRate);
+      let effectiveRate = requestedRate;
+      let safetyRateCeiling = Number.POSITIVE_INFINITY;
+      const capEffectiveRate = (cap: number): void => {
+        const saneCap = Number.isFinite(cap) ? Math.max(0, cap) : cap;
+        if (Number.isFinite(saneCap)) safetyRateCeiling = Math.min(safetyRateCeiling, saneCap);
+        if (effectiveRate > saneCap) effectiveRate = saneCap;
+      };
 
       // Account for pair-production multiplier: workers emit
       // (1 + ppFraction) particles per requested base particle.
@@ -786,11 +803,11 @@ async function main() {
 
       // (a) VRAM cap: cap total rate so totalRate × persistence ≤ vramBudgetParticles
       const maxByVRAM = VRAM_BUDGET_PARTICLES / (Math.max(params.persistence, 0.2) * totalMultiplier);
-      if (effectiveRate > maxByVRAM) effectiveRate = maxByVRAM;
+      capEffectiveRate(maxByVRAM);
 
       // (a2) Visible-particle cap: softer VRAM cap for steady-state ring buffer occupancy
       const maxByVisible = budget.maxVisibleHits / (Math.max(params.persistence, 0.2) * totalMultiplier);
-      if (effectiveRate > maxByVisible) effectiveRate = maxByVisible;
+      capEffectiveRate(maxByVisible);
 
       // (b) Physics cost: when GPU compute is active with a benchmark result,
       // use GPU throughput to cap rate instead of CPU physics cost.
@@ -811,7 +828,7 @@ async function main() {
         // so toggling GPU compute doesn't emit a leftover burst.
         resetEmitAccumulator(gpuEmitAccumulator);
         if (gpuActive && gpuComputeRate > 0) {
-          const gpuSliderMax = Math.round(gpuComputeRate / 60);
+          const gpuSliderMax = gpuComputeRate;
           if (gpuSliderMax > budget.sliderLimits.particleRateMax) {
             updateParticleRateMax(gpuSliderMax);
           }
@@ -821,21 +838,23 @@ async function main() {
       }
 
       if (gpuActive && gpuComputeRate > 0) {
-        // GPU compute: cap by measured GPU throughput / target FPS
-        const targetFps = Math.max(30, effectiveFrameCapHz);
-        const maxByGpu = gpuComputeRate / (targetFps * totalMultiplier);
-        if (effectiveRate > maxByGpu) effectiveRate = maxByGpu;
+        // GPU compute: cap by measured total particles/sec throughput.
+        const maxByGpu = gpuComputeRate / totalMultiplier;
+        capEffectiveRate(maxByGpu);
       } else {
         const numCoeffs = params.lMax * params.lMax + 2 * params.lMax; // Σ(2l+1) for l=1..lMax
         if (numCoeffs > 0) {
           const maxByPhysics = budget.maxPhysicsCostPerSec / (numCoeffs * totalMultiplier);
-          if (effectiveRate > maxByPhysics) effectiveRate = maxByPhysics;
+          capEffectiveRate(maxByPhysics);
         }
       }
 
-      // (c) Reactive back-pressure: reduce rate when ring buffer is near full
-      // Use computeAliveRange() for the true alive count — activeCount saturates
-      // at capacity once the ring wraps, which would lock fillRatio at 1.0.
+      const safetyFloor = Math.min(100, requestedRate, safetyRateCeiling);
+      if (effectiveRate > 0 && effectiveRate < safetyFloor) effectiveRate = safetyFloor;
+
+      // (c) Reactive back-pressure: reduce rate when the potentially alive
+      // draw window is near full. activeCount saturates at capacity once the
+      // ring wraps, which would lock fillRatio at 1.0.
       const aliveCutoff = params.persistence * CUTOFF_MARGIN;
       const aliveNow = renderer.ringBuffer.computeAliveRange(displayTime, aliveCutoff).count;
       const fillRatio = aliveNow / renderer.ringBuffer.capacity;
@@ -846,14 +865,24 @@ async function main() {
       // Apply watchdog throttle (decays back to 1.0 between lag spikes)
       effectiveRate *= throttleMultiplier;
 
-      // Floor: never drop below 100/s (keep something visible)
-      effectiveRate = Math.max(100, effectiveRate);
+      effectiveRate = Math.max(0, effectiveRate);
+
+      // ── Proactive buffer pre-sizing ───────────────────────────────
+      // Use the capped delivered rate, not raw requested slider values,
+      // so override-mode extremes cannot force needless huge allocations.
+      {
+        const neededCapacity = Math.ceil(effectiveRate * totalMultiplier * params.persistence * CUTOFF_MARGIN);
+        const clampedNeed = Math.min(neededCapacity, budget.maxVisibleHits);
+        if (clampedNeed > renderer.ringBuffer.capacity) {
+          renderer.ringBuffer.grow(clampedNeed);
+        }
+      }
 
       // ── Emit particles: GPU compute or CPU workers ──────────────
       const _tp0 = performance.now();
 
       // Sync ring buffer mode: GPU compute writes directly to GPU buffers,
-      // so the CPU-side bornTime array is stale. gpuComputeMode tells
+      // so the CPU-side arrivalTime array is stale. gpuComputeMode tells
       // computeAliveRange() to use recorded write history instead.
       renderer.ringBuffer.gpuComputeMode = gpuActive;
 
@@ -922,13 +951,16 @@ async function main() {
         // so sub-1 per-frame counts accumulate instead of being floored
         // away. Without this, at 144 Hz with rate=100/s, rate*dt ≈ 0.69
         // floors to 0 and no particles emit. See emit-accumulator.ts.
-        const bounceCount = Math.min(
-          stepEmitAccumulator(gpuEmitAccumulator, gpuEffectiveRate, dt),
-          budget.maxParticlesPerTick,
-        );
         const gpuPpFraction = params.betaPP > 0
           ? Math.min(budget.ppFractionCap, params.betaPP / ECSKPhysics.BETA_CR)
           : 0;
+        const maxGpuBaseCount = Math.max(1, Math.floor(
+          Math.min(budget.maxParticlesPerTick, renderer.ringBuffer.capacity) / (1 + gpuPpFraction),
+        ));
+        const bounceCount = Math.min(
+          stepEmitAccumulator(gpuEmitAccumulator, gpuEffectiveRate, dt),
+          maxGpuBaseCount,
+        );
         const ppCount = params.betaPP > 0
           ? Math.max(0, Math.floor(bounceCount * gpuPpFraction))
           : 0;
@@ -1048,7 +1080,9 @@ async function main() {
     const tau = fadeDurationToTau(params.persistence, params.fadeSharpness);
 
     renderer.hitBaseSize = params.hitSize;
-    renderer.brightnessMultiplier = params.brightness;
+    renderer.brightnessMultiplier = params.autoBrightness
+      ? AUTO_BRIGHTNESS_NEUTRAL_GAIN
+      : params.brightness;
     renderer.roundParticles = params.roundParticles;
     renderer.particleBloomEnabled = params.bloomEnabled;
     renderer.ringBloomEnabled = params.ringBloomEnabled;
@@ -1147,9 +1181,11 @@ async function main() {
         ? (params.betaPP / ECSKPhysics.BETA_CR).toFixed(2)
         : "off";
       hud.flux = arrivalRateSmooth.toFixed(0);
-      const cutoffForHud = params.persistence * CUTOFF_MARGIN;
-      const aliveRange = renderer.ringBuffer.computeAliveRange(displayTime, cutoffForHud);
-      hud.visible = String(aliveRange.count);
+      const visibleDuration = tau * Math.pow(
+        -Math.log(FADE_THRESHOLD),
+        1 / Math.max(0.01, params.fadeSharpness),
+      );
+      hud.visible = String(renderer.ringBuffer.countVisible(displayTime, visibleDuration));
       hud.fps = String(fps);
       // Update screen info in HUD (may change if moved between monitors)
       const si = screenDetector.info;
@@ -1195,7 +1231,7 @@ async function main() {
     }
   }
 
-  if (animateRunning) requestAnimationFrame(animate);
+  if (animateRunning && !abortSignal.aborted) requestAnimationFrame(animate);
 }
 
 // ── Boot ──────────────────────────────────────────────────────────────────

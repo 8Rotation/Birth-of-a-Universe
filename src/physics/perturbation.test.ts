@@ -70,6 +70,11 @@ describe("generatePerturbCoeffs", () => {
       expect(typeof mode.sigma).toBe("number");
     }
   });
+
+  it("rejects invalid structural inputs", () => {
+    expect(() => generatePerturbCoeffs(0, 1, splitmix32(1))).toThrow(RangeError);
+    expect(() => generatePerturbCoeffs(3, -0.1, splitmix32(1))).toThrow(RangeError);
+  });
 });
 
 // ── evaluatePerturbation ────────────────────────────────────────────────
@@ -136,6 +141,21 @@ describe("evolveCoeffs", () => {
       if (coeffs[i].c !== origC[i]) anyChanged = true;
     }
     expect(anyChanged).toBe(true);
+  });
+
+  it("reuses the spare Box-Muller Gaussian sample per RNG function", () => {
+    const coeffs = [
+      { l: 1, m: -1, c: 0, sigma: 1 },
+      { l: 1, m: 0, c: 0, sigma: 1 },
+      { l: 1, m: 1, c: 0, sigma: 1 },
+    ];
+    let calls = 0;
+    const sequence = [0.25, 0.125, 0.5, 0.375];
+    const rng = () => sequence[calls++ % sequence.length];
+
+    evolveCoeffs(coeffs, 0.016, 0.5, rng);
+
+    expect(calls).toBe(4);
   });
 });
 

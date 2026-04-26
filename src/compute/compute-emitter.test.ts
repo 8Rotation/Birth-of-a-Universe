@@ -4,7 +4,51 @@ import type { PerturbMode } from "../physics/perturbation";
 
 // ── Mock GPUDevice / GPUBuffer / GPUBindGroup ───────────────────────────
 
-function makeMockBuffer(size: number) {
+type MockGpuBuffer = GPUBuffer & {
+  _bytes: Uint8Array;
+  _f32: Float32Array;
+};
+
+function asMockBuffer(buffer: GPUBuffer): MockGpuBuffer {
+  return buffer as MockGpuBuffer;
+}
+
+function writeToMockBuffer(
+  buffer: GPUBuffer,
+  bufferOffset: number,
+  data: ArrayBuffer | ArrayBufferView,
+  dataOffset = 0,
+  size?: number,
+): void {
+  let source: Uint8Array;
+  if (ArrayBuffer.isView(data)) {
+    const view = data as ArrayBufferView & { BYTES_PER_ELEMENT?: number };
+    const bytesPerElement = view.BYTES_PER_ELEMENT ?? 1;
+    const byteOffset = view.byteOffset + dataOffset * bytesPerElement;
+    const byteSize = size === undefined
+      ? view.byteLength - dataOffset * bytesPerElement
+      : size * bytesPerElement;
+    source = new Uint8Array(view.buffer, byteOffset, byteSize);
+  } else {
+    const byteSize = size ?? data.byteLength - dataOffset;
+    source = new Uint8Array(data, dataOffset, byteSize);
+  }
+  asMockBuffer(buffer)._bytes.set(source, bufferOffset);
+}
+
+function copyMockBuffer(
+  source: GPUBuffer,
+  sourceOffset: number,
+  destination: GPUBuffer,
+  destinationOffset: number,
+  size: number,
+): void {
+  const sourceBytes = asMockBuffer(source)._bytes.subarray(sourceOffset, sourceOffset + size);
+  asMockBuffer(destination)._bytes.set(sourceBytes, destinationOffset);
+}
+
+function makeMockBuffer(size: number): MockGpuBuffer {
+  const bytes = new Uint8Array(size);
   return {
     size,
     usage: 0,
@@ -14,11 +58,13 @@ function makeMockBuffer(size: number) {
     getMappedRange: vi.fn(),
     mapAsync: vi.fn(),
     unmap: vi.fn(),
-  } as unknown as GPUBuffer;
+    _bytes: bytes,
+    _f32: new Float32Array(bytes.buffer),
+  } as unknown as MockGpuBuffer;
 }
 
 function makeMockDevice() {
-  const buffers: GPUBuffer[] = [];
+  const buffers: MockGpuBuffer[] = [];
   return {
     createBuffer(desc: GPUBufferDescriptor) {
       const buf = makeMockBuffer(desc.size);
@@ -31,11 +77,11 @@ function makeMockDevice() {
     }),
     createBindGroup: vi.fn().mockReturnValue({}),
     queue: {
-      writeBuffer: vi.fn(),
+      writeBuffer: vi.fn(writeToMockBuffer),
       submit: vi.fn(),
     },
     _buffers: buffers,
-  } as unknown as GPUDevice & { _buffers: GPUBuffer[] };
+  } as unknown as GPUDevice & { _buffers: MockGpuBuffer[] };
 }
 
 function makeMockRingBuffer(capacity = 1024) {
@@ -53,7 +99,7 @@ function makeMockRingBuffer(capacity = 1024) {
       writeHead = (writeHead + count) % capacity;
       totalWritten += count;
     },
-    recordGpuWrite(count: number, _minBorn: number, _maxBorn: number) {
+    recordGpuWrite(count: number, _minArrival: number, _maxArrival: number) {
       writeHead = (writeHead + count) % capacity;
       totalWritten += count;
     },
@@ -199,22 +245,45 @@ describe("ComputeEmitter", () => {
     expect(emitter.ready).toBe(false);
   });
 
-  it("handles wrap-around copy correctly", () => {
+  it("copies wrapped GPU output so final particles overwrite oldest slots", () => {
     const cap = 256;
     const rb = makeMockRingBuffer(cap);
-    // Advance write head near the end so the next write wraps
-    rb.advanceWriteHead(cap - 10);
 
     const device = makeMockDevice();
     const emitter = new ComputeEmitter(device, rb as any, "/* wgsl */");
     emitter.init();
 
-    const copyBufferToBuffer = vi.fn();
+    const [stagingA, stagingB] = device._buffers.filter((buffer) => buffer.size === cap * 16);
+    expect(stagingA).toBeDefined();
+    expect(stagingB).toBeDefined();
+
+    const synthesizeComputeOutput = vi.fn(() => {
+      const paramsBuffer = device._buffers.find((buffer) => buffer.size === 144);
+      expect(paramsBuffer).toBeDefined();
+      const paramsView = new DataView(paramsBuffer!._bytes.buffer);
+      const emitCount = paramsView.getUint32(24, true);
+      const writeOffset = paramsView.getUint32(72, true);
+      const bufferCapacity = paramsView.getUint32(76, true);
+
+      for (let particleIndex = 0; particleIndex < emitCount; particleIndex++) {
+        const slot = (writeOffset + particleIndex) % bufferCapacity;
+        const dst = slot * 4;
+        stagingA._f32[dst] = particleIndex;
+        stagingA._f32[dst + 1] = -particleIndex;
+        stagingA._f32[dst + 2] = particleIndex + 0.5;
+        stagingA._f32[dst + 3] = particleIndex + 1;
+        stagingB._f32[dst] = particleIndex + 0.25;
+        stagingB._f32[dst + 1] = particleIndex + 0.75;
+        stagingB._f32[dst + 2] = particleIndex + 1.25;
+        stagingB._f32[dst + 3] = 0;
+      }
+    });
+    const copyBufferToBuffer = vi.fn(copyMockBuffer);
     const encoder = {
       beginComputePass: vi.fn().mockReturnValue({
         setPipeline: vi.fn(),
         setBindGroup: vi.fn(),
-        dispatchWorkgroups: vi.fn(),
+        dispatchWorkgroups: synthesizeComputeOutput,
         end: vi.fn(),
       }),
       copyBufferToBuffer,
@@ -223,11 +292,26 @@ describe("ComputeEmitter", () => {
 
     const coeffs = new Float32Array(0);
 
-    // Write 20 particles: 10 at end + 10 at start (wrap)
-    emitter.dispatch(encoder, 20, defaultParams(), coeffs);
+    const copied = emitter.dispatch(encoder, cap + 100, defaultParams(), coeffs);
 
-    // Should produce 4 copy calls (2 chunks × 2 attributes)
+    expect(copied).toBe(true);
+    expect(synthesizeComputeOutput).toHaveBeenCalled();
+    expect(rb.writeHead).toBe(100);
+    expect(rb.totalWritten).toBe(cap + 100);
     expect(copyBufferToBuffer).toHaveBeenCalledTimes(4);
+
+    const gpuA = asMockBuffer(rb._gpuBufA);
+    const gpuB = asMockBuffer(rb._gpuBufB);
+    for (let slot = 0; slot < 100; slot++) {
+      const particleIndex = cap + slot;
+      const dst = slot * 4;
+      expect(gpuA._f32[dst]).toBe(particleIndex);
+      expect(gpuA._f32[dst + 1]).toBe(-particleIndex);
+      expect(gpuA._f32[dst + 2]).toBe(particleIndex + 0.5);
+      expect(gpuB._f32[dst]).toBe(particleIndex + 0.25);
+    }
+
+    expect(gpuA._f32[100 * 4]).toBe(100);
   });
 
   it("does not record a GPU write when render buffers are unavailable", () => {

@@ -12,23 +12,25 @@ where python >nul 2>&1
 if %errorlevel%==0 (
     start "" "http://localhost:8080"
     python -m http.server 8080
-    goto :eof
+    goto :done
 )
 
 where python3 >nul 2>&1
 if %errorlevel%==0 (
     start "" "http://localhost:8080"
     python3 -m http.server 8080
-    goto :eof
+    goto :done
 )
 
 where npx >nul 2>&1
 if %errorlevel%==0 (
     start "" "http://localhost:8080"
     npx serve -l 8080
-    goto :eof
+    goto :done
 )
 
 echo ERROR: Could not find Python or Node.js to start a local server.
 echo Please install Python (https://python.org) or Node.js (https://nodejs.org)
+
+:done
 pause

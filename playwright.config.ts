@@ -1,11 +1,11 @@
 import { defineConfig, devices } from "@playwright/test";
 
-// Playwright config for the GPU/CPU validation harness (Task A3 / GPU-02).
+// Playwright config for the GPU/CPU validation harness.
 //
 // We launch chromium with WebGPU enabled. SwiftShader gives a software
 // adapter that works in headless Linux/Windows CI without a real GPU.
-// If the test fails to acquire a device, fall back to the angle/vulkan
-// flags listed in plan-implementation.md.
+// If the test fails to acquire a device, try alternate Chromium WebGPU
+// launch flags for the current browser channel.
 
 const VITE_BASE = "/Birth-of-a-Universe/";
 const PORT = 5179;

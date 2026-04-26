@@ -2,7 +2,7 @@ name: E2E (GPU validation)
 
 # Non-blocking GPU/CPU validation under real WebGPU (chromium + SwiftShader).
 # Runs on every push to main and every PR. Failures do NOT block deploy
-# until this stabilises (see plan-implementation.md Task A3).
+# until the WebGPU/SwiftShader path proves stable across CI runners.
 
 on:
   push:

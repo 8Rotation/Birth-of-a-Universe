@@ -2,11 +2,11 @@ import { defineConfig } from "vite";
 
 export default defineConfig({
   root: ".",
-  base: "/Birth-of-a-Universe/",
+  base: process.env.VITE_BASE ?? "/Birth-of-a-Universe/",
   publicDir: "public",
   build: {
     outDir: "dist",
-    target: "esnext",
+    target: "es2022",
   },
   server: {
     open: false,

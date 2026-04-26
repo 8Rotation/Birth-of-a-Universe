@@ -697,7 +697,7 @@ export class HardwareDetector {
     const budget = buildBudget(rawH, cpu.logicalCores, cpuT, noOverrides);
     const summary = buildSummary(cpu, gpu, rawH, renderPixels);
 
-    this._info = {
+    const info: HardwareInfo = {
       cpu, gpu, tier,
       rawCapability: rawH,
       capability: rawH,
@@ -706,6 +706,10 @@ export class HardwareDetector {
       overrides: noOverrides,
       gpuComputeBenchmark: null,
     };
+
+    if (this._aborted) return info;
+
+    this._info = info;
 
     console.log(`[hardware] ${summary}`);
     console.log(
